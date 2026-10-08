@@ -14,7 +14,7 @@ CAD2IngeTrazo reads your AutoCAD plans by their layers and builds the building i
 
 ## Install
 
-1. Download `cad2ingetrazo-v3.11.zip` from the [latest release](../../releases/latest).
+1. Download [`cad2ingetrazo-v3.11.zip`](release/cad2ingetrazo-v3.11.zip) (the `release/` folder).
 2. Close IngeTrazo. Extract the zip into `%APPDATA%\ingetrazo\plugins\`. You should end up with `%APPDATA%\ingetrazo\plugins\cad2ingetrazo\`.
 3. Start IngeTrazo. The **CAD2IngeTrazo** panel opens on the right, and a CAD2IngeTrazo toolbar is added.
 
