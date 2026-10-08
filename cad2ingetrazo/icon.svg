@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6fb3"/>
+      <stop offset="1" stop-color="#1b4778"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="url(#g)"/>
+  <!-- the CAD plan: walls -->
+  <path d="M12 14 H52 V50 H12 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="miter"/>
+  <path d="M32 14 V30 M32 40 V50 M12 32 H24" fill="none" stroke="#ffffff" stroke-width="3.5"/>
+  <!-- a door, open 90 degrees, and its swing -->
+  <path d="M32 30 L42 30" stroke="#f5a623" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M42 30 A10 10 0 0 1 32 40" fill="none" stroke="#f5a623" stroke-width="1.6" stroke-dasharray="2.2 2"/>
+  <!-- the BIM block rising out of it -->
+  <path d="M38 50 L38 42 L46 38 L54 42 L54 50 L46 54 Z" fill="#f5a623" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M38 42 L46 46 L54 42 M46 46 V54" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
