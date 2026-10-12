@@ -263,33 +263,76 @@ CHOICE_LABELS = _choice_labels()
 
 
 class _WheelGuard(QObject):
-    """Mouse-wheel turns over a field of the panel that is not being typed
-    into scroll the panel instead of changing the field's value."""
+    """The mouse wheel never changes a value in the panel: a wheel turn
+    over a spin box, list or slider (clicked into or not) scrolls the
+    panel instead. Values change only by typing, the arrows or picking.
+
+    The panel is scrolled directly (its scroll bar's value set) — the wheel
+    event is never sent on again, so it can't come back through this
+    filter (3.13 re-sent it to the scroll bar, which looped until the
+    stack overflowed and IngeTrazo closed)."""
+
+    FIELDS = (QAbstractSpinBox, QComboBox, QAbstractSlider)
 
     def __init__(self, panel):
         super().__init__(panel)
         self.panel = panel
+        self._busy = False
 
-    def eventFilter(self, obj, ev):
-        try:
-            if ev.type() != QEvent.Wheel:
-                return False
-            if not isinstance(obj, (QAbstractSpinBox, QComboBox,
-                                    QAbstractSlider)):
-                return False
-            if isinstance(obj, QAbstractSlider) and \
-                    isinstance(obj.parent(), QScrollArea):
-                return False
-            if obj.hasFocus() or not self.panel.isAncestorOf(obj):
-                return False
-            if obj.focusPolicy() == Qt.WheelFocus:
-                obj.setFocusPolicy(Qt.StrongFocus)
-            sc = getattr(self.panel, "_scroll", None)
-            if sc is not None:
-                QApplication.sendEvent(sc.verticalScrollBar(), ev)
-            return True
-        except Exception:  # noqa: BLE001
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if self._busy:
             return False
+        try:
+            if ev.type() != QEvent.Wheel or not isinstance(obj, QWidget):
+                return False
+            from PySide6.QtWidgets import QScrollBar
+            # the field the wheel is over: the widget or a parent of it
+            # (a spin box's own line edit gets the wheel first)
+            w, field = obj, None
+            for _ in range(4):
+                if w is None:
+                    break
+                if isinstance(w, QScrollBar):
+                    return False             # the panel's own scroll bar
+                if isinstance(w, self.FIELDS):
+                    field = w
+                    break
+                w = w.parentWidget()
+            if field is None or not self.panel.isAncestorOf(field):
+                return False
+            self._busy = True
+            try:
+                sc = getattr(self.panel, "_scroll", None)
+                if sc is not None:
+                    sb = sc.verticalScrollBar()
+                    px = ev.pixelDelta().y()
+                    if px:
+                        step = -px
+                    else:
+                        step = -int(ev.angleDelta().y() / 120.0 * 3 *
+                                    max(sb.singleStep(), 20))
+                    sb.setValue(sb.value() + step)
+            finally:
+                self._busy = False
+            return True                      # the field never sees it
+        except Exception:  # noqa: BLE001
+            self._busy = False
+            return False
+
+
+def remove_old_guards(app=None):
+    """Wheel guards of earlier versions (a hot install) taken off."""
+    import gc
+    app = app or QApplication.instance()
+    n = 0
+    for o in gc.get_objects():
+        try:
+            if type(o).__name__ == "_WheelGuard" and isinstance(o, QObject):
+                app.removeEventFilter(o)
+                n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
 
 
 class Panel(QWidget):
@@ -316,6 +359,7 @@ class Panel(QWidget):
         # the wheel scrolls the panel; it changes a field only when that
         # field has been clicked into (no value changes by accident while
         # scrolling past a spin box or a list)
+        remove_old_guards()
         self._wheel_guard = _WheelGuard(self)
         QApplication.instance().installEventFilter(self._wheel_guard)
         self._region = None            # this level's part of the drawing
@@ -434,7 +478,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.13.0</span>")
+                   "3.13.1</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -3842,6 +3886,25 @@ class Panel(QWidget):
             return
         self.replace_type_dialog(keys)
 
+    def _pick_bike(self):
+        e = self.library_picker("Motorbike model — CAD2IngeTrazo",
+                                "The model put in every motorbike space "
+                                "(as the cars in the bays).", "Vehicles")
+        if e is not None:
+            self._set_bike(e)
+
+    def _set_bike(self, e):
+        doc = self.doc()
+        st = doc["settings"]
+        if e is None:
+            st["bike_lib"] = None
+        else:
+            st["bike_lib"] = {"key": e["key"], "name": e.get("name", ""),
+                              "entry": e.get("entry")}
+        st["bike_model"] = "lib"
+        self.commit(doc, "Motorbike model: " +
+                    (e.get("name", "") if e else "library (first found)"))
+
     def library_picker(self, title, info="", start_cat=""):
         """IngeTrazo's library (bundled + online catalogue) to pick one
         model from: its entry, or None."""
@@ -4339,6 +4402,16 @@ class Panel(QWidget):
         rowc.addWidget(self.c_carlib, 1)
         rowc.addWidget(self.c_carmodel)
         f.addRow(rowc)
+        rowb = QHBoxLayout()            # motorbikes: a library model too
+        self.c_bikemodel = QLabel("Motorbike: library (first found)")
+        self.c_bikemodel.setWordWrap(True)
+        rowb.addWidget(self.c_bikemodel, 1)
+        rowb.addWidget(_btn("Pick…", self._pick_bike,
+                            "The motorbike model from IngeTrazo's library "
+                            "(More components ▸ Vehicles…)"))
+        rowb.addWidget(_btn("Auto", lambda: self._set_bike(None),
+                            "The first motorbike / scooter in the library"))
+        f.addRow(rowb)
         f.addRow(_btn("Update plans", lambda: self.commit(
             self.doc(), "Plans updated")))
         f.addRow(QLabel("<i>Column grid:</i>"))
@@ -4656,6 +4729,9 @@ class Panel(QWidget):
             self.c_carmodel.blockSignals(True)
             self.c_carmodel.setCurrentIndex(max(i_, 0))
             self.c_carmodel.blockSignals(False)
+            bl_ = doc["settings"].get("bike_lib") or {}
+            self.c_bikemodel.setText("Motorbike: " + (bl_.get("name") or
+                                     "library (first found)"))
             cur = self.level_box.currentData()
             self.level_box.clear()
             read = [k for k in doc["imports"] if k not in VIRTUAL

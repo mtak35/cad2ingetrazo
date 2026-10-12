@@ -79,6 +79,7 @@ DEFAULTS = {
     "ground_ffl": 0.0,             # m, ground F.F.L. above N.G.L. (0 = CAD)
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
     "stair_riser": 0.1778, "stair_going": 0.2794,       # 7" riser, 11" tread
+    "bike_model": "lib", "bike_lib": None,              # motorbikes: library
     "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
     "thresholds": True, "finish_to_edge": True,
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
@@ -3218,7 +3219,22 @@ def _bike_groups(doc, lid, pk, z, lname):
                        "level": lid}}
         out.append(g)
     bs = pk.get("bike_stalls") or []
-    if bs and st.get("cars_lib", True):
+    lib_ok = False
+    if bs and st.get("cars_lib", True) and st.get("bike_model", "lib") == "lib":
+        try:                       # IngeTrazo's library model, as the cars
+            from . import cars as CARS
+            lg = CARS.bike_groups(
+                bs, z, st, level_layer(lname),
+                lambda k: {KEY: {"type": "bike", "id": f"bike-{lid}-{k + 1}",
+                                 "level": lid}},
+                lambda k: f"Motorbike M{k + 1}")
+            if lg:
+                out += lg
+                lib_ok = True
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.bike library")
+    if bs and st.get("cars_lib", True) and not lib_ok:
         if not _BIKE_MESH:
             _BIKE_MESH.append(_mesh_of(PK.bike_faces(0.0)))
         for k, sl in enumerate(bs):
