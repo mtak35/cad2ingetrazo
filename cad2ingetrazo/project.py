@@ -71,7 +71,7 @@ DEFAULTS = {
     "stair_rail_off": 0.05, "stair_rail_gap": 0.0, "stair_rail_ext": 0.0,
     "parapet_rail": "solid",
     "finish_on": True, "finish_t": 0.0508,
-    "beam_h": 0.6096, "beam_w": 0.2032,   # 8" x 24" beams
+    "beam_h": 0.6096, "beam_on": "columns", "beam_span": 10.0, "beam_w": 0.2032,   # 8" x 24" beams
     "ann_rooms": True, "ann_texts": True,
     "auto_layers": True,
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
@@ -2034,6 +2034,79 @@ def add_beams_on_walls(doc, lid, w=0.2032, h=0.6096) -> int:
                      "a": [round(s.at(0.0)[0], 4), round(s.at(0.0)[1], 4)],
                      "b": [round(s.at(1.0)[0], 4), round(s.at(1.0)[1], 4)],
                      "w": min(w, float(wall["t"])), "h": h, "fit": True})
+    recs = [r for r in recs if S.why_not(r) is None]
+    arch["structure"] = [e for e in arch["structure"]
+                         if not (e["type"] == "beam" and e["level"] == lid)]
+    arch["structure"] += M.new_elements(arch["structure"], recs)
+    return len(recs)
+
+
+def beam_lines_between_columns(cols, max_span=10.0, tol_deg=4.0):
+    """The beam lines of a column layout: each column joined to the nearest
+    column in each of its four grid directions (its own angle and square to
+    it), within ``max_span``; each run trimmed to the columns' faces.
+    [((x, y), (x, y))]."""
+    from shapely.geometry import LineString, Polygon
+    pts = [(float(c["x"]), float(c["y"])) for c in cols]
+    polys = []
+    for c in cols:
+        try:
+            polys.append(Polygon(S.column_outline(c, 0.0)).buffer(0))
+        except Exception:  # noqa: BLE001
+            polys.append(None)
+    pairs = set()
+    tol = math.radians(tol_deg)
+    for i, c in enumerate(cols):
+        a0 = math.radians(float(c.get("angle", 0.0) or 0.0))
+        for k in range(4):
+            ang = a0 + k * math.pi / 2
+            ux, uy = math.cos(ang), math.sin(ang)
+            best = None
+            for j, q in enumerate(pts):
+                if j == i:
+                    continue
+                dx, dy = q[0] - pts[i][0], q[1] - pts[i][1]
+                along = dx * ux + dy * uy
+                if along <= 0.3 or along > max_span:
+                    continue
+                side = abs(-dx * uy + dy * ux)
+                if side > max(0.3, min(0.6, along * math.tan(tol))):
+                    continue
+                if best is None or along < best[0]:
+                    best = (along, j)
+            if best is not None:
+                pairs.add(tuple(sorted((i, best[1]))))
+    out = []
+    for i, j in sorted(pairs):
+        L = LineString([pts[i], pts[j]])
+        for p_ in (polys[i], polys[j]):
+            if p_ is not None and not p_.is_empty:
+                L = L.difference(p_)
+        if L.is_empty:
+            continue
+        g = max(getattr(L, "geoms", [L]), key=lambda x: x.length)
+        if g.length < 0.3:
+            continue
+        a_, b_ = list(g.coords)[0], list(g.coords)[-1]
+        out.append(((a_[0], a_[1]), (b_[0], b_[1])))
+    return out
+
+
+def add_beams_on_columns(doc, lid, w=0.2032, h=0.6096,
+                         max_span=10.0) -> int:
+    """Beams column to column on level ``lid`` (each its own element, under
+    the slab over the level), replacing the level's beams. The number made
+    — 0 when the level has fewer than two columns."""
+    arch = doc["arch"]
+    cols = [e for e in arch["structure"]
+            if e["type"] == "column" and e["level"] == lid]
+    if len(cols) < 2:
+        return 0
+    recs = [{"type": "beam", "level": lid,
+             "a": [round(a[0], 4), round(a[1], 4)],
+             "b": [round(b[0], 4), round(b[1], 4)],
+             "w": w, "h": h, "fit": False}
+            for a, b in beam_lines_between_columns(cols, max_span)]
     recs = [r for r in recs if S.why_not(r) is None]
     arch["structure"] = [e for e in arch["structure"]
                          if not (e["type"] == "beam" and e["level"] == lid)]

@@ -478,7 +478,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.13.2</span>")
+                   "3.13.3</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -2029,10 +2029,21 @@ class Panel(QWidget):
         row.addWidget(self.s_bw)
         row.addWidget(self.s_bh)
         f.addRow("Beam width / depth", row)
+        self.s_bon = QComboBox()
+        self.s_bon.addItem("Column to column (the column grid)", "columns")
+        self.s_bon.addItem("Over the walls", "walls")
+        f.addRow("Beams run", self.s_bon)
+        self.s_bspan = _spin(2.0, 20.0, 10.0, 0.3048)
+        self.s_bspan.setToolTip("The longest span joined by a beam: columns "
+                                "farther apart are left without one")
+        f.addRow("Longest beam span", self.s_bspan)
         row = QHBoxLayout()
-        row.addWidget(_btn("Beams on the walls (this level)", self._beams,
-                           "A beam over every straight wall of this level, "
-                           "each its own element (typed B-nn by its size)"))
+        row.addWidget(_btn("Beams (this level)", self._beams,
+                           "Column to column: each column joined to the "
+                           "nearest column in each of its four grid "
+                           "directions, the beam between their faces — each "
+                           "beam its own element (typed B-nn by its size). "
+                           "Replaces this level's beams"))
         row.addWidget(_btn("All levels", lambda: self._beams(True)))
         f.addRow(row)
         f.addRow(QLabel("<i>Foundation:</i>"))
@@ -2442,24 +2453,42 @@ class Panel(QWidget):
 
     def _beams(self, all_levels=False):
         doc = self.doc()
-        doc["settings"]["beam_w"] = self.s_bw.value()
-        doc["settings"]["beam_h"] = self.s_bh.value()
+        st = doc["settings"]
+        st["beam_w"] = self.s_bw.value()
+        st["beam_h"] = self.s_bh.value()
+        st["beam_on"] = self.s_bon.currentData() or "columns"
+        st["beam_span"] = self.s_bspan.value()
         if all_levels:
-            n = 0
-            for lv_ in doc["arch"]["levels"]:
-                if any(w["level"] == lv_["id"] for w in doc["arch"]["walls"]):
-                    n += PJ.add_beams_on_walls(doc, lv_["id"],
-                                               self.s_bw.value(),
-                                               self.s_bh.value())
-            self.commit(doc, f"{n} beams on every level")
-            return
-        lid, lv = self.level()
-        if not lid:
-            self.flash("Pick a level at the top first")
-            return
-        n = PJ.add_beams_on_walls(doc, lid, self.s_bw.value(),
-                                  self.s_bh.value())
-        self.commit(doc, f"{n} beams on «{lv['name']}»")
+            lids = [lv_["id"] for lv_ in doc["arch"]["levels"]]
+        else:
+            lid, lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            lids = [lid]
+        n, nocol = 0, []
+        names = {lv_["id"]: lv_["name"] for lv_ in doc["arch"]["levels"]}
+        for lid_ in lids:
+            has_cols = any(e["type"] == "column" and e["level"] == lid_
+                           for e in doc["arch"]["structure"])
+            has_walls = any(w["level"] == lid_ for w in doc["arch"]["walls"])
+            if st["beam_on"] == "columns":
+                if has_cols:
+                    n += PJ.add_beams_on_columns(doc, lid_, st["beam_w"],
+                                                 st["beam_h"],
+                                                 st["beam_span"])
+                elif has_walls:
+                    nocol.append(names.get(lid_, lid_))
+            elif has_walls:
+                n += PJ.add_beams_on_walls(doc, lid_, st["beam_w"],
+                                           st["beam_h"])
+        msg = f"{n} beams" + (" column to column" if st["beam_on"] ==
+                              "columns" else " over the walls")
+        if nocol:
+            msg += " — no columns on " + ", ".join(nocol[:4]) + \
+                (" …" if len(nocol) > 4 else "") + \
+                " (add columns, or pick «Over the walls»)"
+        self.commit(doc, msg)
 
     def _footings(self):
         doc = self.doc()
@@ -2881,6 +2910,40 @@ class Panel(QWidget):
         self._sel_widgets = {}
         self.lay.addWidget(box)
 
+    def _selected_all(self) -> list:
+        """[(kind, id)] of every CAD2IngeTrazo element selected."""
+        out = []
+        for e in list(self.vp.scene.selection):
+            for g in (e, getattr(e, "owner", None)):
+                tag = PJ.tag_of(g) if g is not None else None
+                if tag and tag["type"] != "symbols":
+                    k = (tag["type"], tag["id"])
+                    if k not in out:
+                        out.append(k)
+                    break
+        return out
+
+    def _extend_to_selected(self, slab_id, wall_ids):
+        from . import slabedges as SE
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            self.flash("That slab is gone — pick it again")
+            return
+        n = SE.extend_to_selected(doc, slab, wall_ids)
+        self._extend_pick = None
+        if not n:
+            self.flash("The slab already reaches those walls (or they are "
+                       "more than 12 m away)")
+            return
+        self.commit(doc, f"Slab extended to {n} selected wall(s)")
+
+    def _start_extend_pick(self, slab_id):
+        self._extend_pick = slab_id
+        self.flash("Now select the walls the slab should reach (Ctrl+click "
+                   "for several), then right-click one ▸ CAD2IngeTrazo ▸ "
+                   "«Extend the slab to the selected walls»", 15000)
+
     def _selected(self):
         """(kind, id) of the CAD2IngeTrazo element selected, or None."""
         for e in list(self.vp.scene.selection):
@@ -3154,6 +3217,20 @@ class Panel(QWidget):
             sel[0], sel[0])
         menu.addSeparator()
         sub = menu.addMenu(f"CAD2IngeTrazo · {name}")
+        try:                 # a slab and walls selected: the slab out to them
+            all_ = self._selected_all()
+            walls_ = [i for k, i in all_ if k == "wall"]
+            slabs_ = [i for k, i in all_ if k == "slab"]
+            target = slabs_[0] if slabs_ else getattr(self, "_extend_pick",
+                                                      None)
+            if walls_ and target:
+                sub.addAction(f"Extend the slab to the selected walls "
+                              f"({len(walls_)})",
+                              lambda t=target, ws=list(walls_):
+                              self._extend_to_selected(t, ws))
+                sub.addSeparator()
+        except Exception:  # noqa: BLE001
+            log_error("panel extend-to-selected menu")
         sub.addAction("Edit properties…", lambda: self.edit_dialog(sel))
         if sel[0] == "wall" and rec.get("type") == "curtain":
             sub.addAction("Add door in this curtain wall…",
@@ -3256,6 +3333,8 @@ class Panel(QWidget):
                           lambda: self.slab_edges_dialog(sel[1]))
             sub.addAction("Extend slab to the walls",
                           lambda: self._slab_extend(sel[1]))
+            sub.addAction("Extend slab to walls I pick…",
+                          lambda: self._start_extend_pick(sel[1]))
             mine = [m for m in doc.get("man_shafts") or []
                     if any(h in (rec.get("man") or [])
                            for h in [m["pts"]]) or self._shaft_in(m, rec)]
@@ -3362,6 +3441,9 @@ class Panel(QWidget):
             row.addWidget(_btn("Add shaft…",
                                lambda: (dlg.reject(),
                                         self.shaft_dialog(sel[1]))))
+            row.addWidget(_btn("Extend to walls I pick…",
+                               lambda: (dlg.reject(),
+                                        self._start_extend_pick(sel[1]))))
             form.addRow(row)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel
                               | QDialogButtonBox.Apply)
@@ -3635,6 +3717,12 @@ class Panel(QWidget):
         lay.addLayout(form)
         ext = QCheckBox("Extend the slab out to its walls' outer faces")
         form.addRow(ext)
+        form.addRow(_btn("Extend to walls I pick in the model…",
+                         lambda: (dlg.reject(),
+                                  self._start_extend_pick(slab_id)),
+                         "Close this, select the walls (Ctrl+click for "
+                         "several), right-click one ▸ «Extend the slab to "
+                         "the selected walls»"))
         rail = QComboBox()
         rail.addItem("— leave as it is —", "")
         for k, lab in RL.TYPES:
@@ -4813,6 +4901,9 @@ class Panel(QWidget):
         try:
             st_ = doc["settings"]
             self.s_rt.setValue(float(st_.get("retain_t", 0.3048)))
+            self.s_bon.setCurrentIndex(max(self.s_bon.findData(
+                st_.get("beam_on", "columns")), 0))
+            self.s_bspan.setValue(float(st_.get("beam_span", 10.0)))
             self.s_sh.setChecked(bool(st_.get("shoring")))
             self.s_sh_kind.setCurrentIndex(max(self.s_sh_kind.findData(
                 st_.get("shoring_type", "piles")), 0))

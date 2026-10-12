@@ -44,6 +44,8 @@ def _largest(g, near=None):
 
 
 def _ring_pts(p) -> list:
+    if p.geom_type != "Polygon":
+        p = max(getattr(p, "geoms", [p]), key=lambda q: q.area)
     pts = list(p.simplify(0.005).exterior.coords)[:-1]
     a = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1)
             in zip(pts, pts[1:] + pts[:1]))
@@ -111,6 +113,63 @@ def extend_to_walls(doc, slab) -> bool:
         return False
     slab["corners"] = _ring_pts(p)
     return True
+
+
+def extend_to_selected(doc, slab, wall_ids, reach=12.0) -> int:
+    """The slab carried out to the walls picked (on any level): each wall's
+    footprint and the strip between it and the slab joined to the slab —
+    the hull of the wall and the slab's nearby edge, so a wall standing
+    off the slab (a boundary wall, a balcony's end wall) is reached too.
+    The number of walls it reached."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    from .engine import walls as W
+    sp = _poly(slab["corners"])
+    if sp.is_empty:
+        return 0
+    arch = doc["arch"]
+    ids = set(wall_ids)
+    picked = [w for w in arch["walls"] if w["id"] in ids]
+    if not picked:
+        return 0
+    polys = {}
+    for lid in {w["level"] for w in picked}:
+        mine = [w for w in arch["walls"] if w["level"] == lid
+                and not w.get("rail")]
+        for wid, pcs in W.plan(mine).items():
+            if wid in ids:
+                for pc in pcs:
+                    try:
+                        polys.setdefault(wid, []).append(_poly(pc["outer"]))
+                    except Exception:  # noqa: BLE001
+                        pass
+    adds, n = [], 0
+    for w in picked:
+        ps = polys.get(w["id"])
+        if not ps:                      # a railing / curved wall: its line
+            try:
+                ps = [LineString([tuple(q) for q in W.points_of(w)]).buffer(
+                    max(float(w["t"]) / 2, 0.03), cap_style=2)]
+            except Exception:  # noqa: BLE001
+                continue
+        wp = unary_union(ps)
+        d = wp.distance(sp)
+        if d > reach:
+            continue
+        near = sp.intersection(wp.buffer(d + 0.05, join_style=2))
+        adds.append(unary_union([wp, near]).convex_hull if not near.is_empty
+                    else wp)
+        n += 1
+    if not adds:
+        return 0
+    u = unary_union([sp] + adds).buffer(0.01, join_style=2).buffer(
+        -0.01, join_style=2)
+    p = _largest(u, sp.representative_point())
+    if p is None or p.area <= sp.area + 0.01:
+        return 0
+    slab["corners"] = _ring_pts(p)
+    return n
 
 
 def extend_outline(outline, lines, reach=4.0, half=0.06) -> list:

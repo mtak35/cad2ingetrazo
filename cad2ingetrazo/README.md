@@ -226,3 +226,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Floor finishes cut at the slab's openings** (shafts, stair / ramp / lift wells, openings drawn by hand), as the slab is.
 - **1 Import CAD plan**: «Analyse / Import to …» right under «Select floor on drawing…»; the drawing and model units, base point, insert point, rotation, wall thickness, level options and floor height fold into «Import settings…» (closed), beside «Layers».
 - **Door thresholds flush with the floor finish**: the granite's top is the finished floor of the rooms either side (the higher one when they differ — a sunk bath, a thicker finish), down to the slab; before, it stood on the level's open-floor height.
+
+## 3.13.3
+- **Extend a slab to the walls you pick**: right-click a slab ▸ «Extend slab to walls I pick…» (also in the slab's Edit properties and its Edges dialog), select the walls (Ctrl+click for several; on any floor, standing on the slab or off it up to 12 m), right-click one ▸ «Extend the slab to the selected walls». Selecting the slab and the walls together and right-clicking works too. The slab takes in each wall and the strip between it and the slab.
+- **Beams column to column** (section 6 ▸ «Beams run: Column to column»): each column joined to the nearest column in each of its four grid directions (its own angle and square to it, within the longest span, 10 m by default), the beam between the two columns' faces; each beam its own element. «Over the walls» keeps the old way; a level with no columns says so.
