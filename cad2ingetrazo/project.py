@@ -3092,6 +3092,30 @@ def floor_offset_at(doc, lid, pt) -> float:
     return open_offset(doc, lid)
 
 
+def _floor_voids(doc, lid):
+    """Every opening in the floor of ``lid`` (shafts, stair and ramp wells,
+    lift wells, openings drawn by hand) as one shapely shape, or None."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    hs = []
+    for s_ in _floor_slabs(doc, lid):
+        for h in s_.get("holes") or []:
+            if len(h) >= 3:
+                try:
+                    p = Polygon([tuple(q[:2]) for q in h]).buffer(0)
+                    if not p.is_empty:
+                        hs.append(p)
+                except Exception:  # noqa: BLE001
+                    continue
+    for m in doc.get("man_shafts") or []:
+        if m.get("through") or m.get("level") == lid:
+            try:
+                hs.append(Polygon(m["pts"]).buffer(0))
+            except Exception:  # noqa: BLE001
+                continue
+    return unary_union(hs) if hs else None
+
+
 def _finish_groups(doc):
     """Every room's floor finish: a layer of its own thickness on its
     floor (over the slab, its level sunk / raised with it), named by its
@@ -3114,6 +3138,7 @@ def _finish_groups(doc):
         lid = lv["id"]
         if not any(w["level"] == lid for w in arch["walls"]):
             continue
+        voids = _floor_voids(doc, lid)      # the slab's openings: cut too
         for room in spaces.of_level(arch, lid):
             if room["area"] < 1.0:          # a duct / shaft: no finish
                 continue
@@ -3122,12 +3147,21 @@ def _finish_groups(doc):
                 continue
             z = elev[i] + floor_offset_at(doc, lid, room["at"])
             poly = room["poly"]
-            piece = {"outer": S._ccw([tuple(q) for q in
-                                      list(poly.exterior.coords)[:-1]]),
-                     "holes": [list(reversed(S._ccw(
-                         [tuple(q) for q in list(h.coords)[:-1]])))
-                         for h in poly.interiors]}
-            faces = W.solid(piece, 0.0, f)
+            if voids is not None and poly.intersects(voids):
+                try:
+                    poly = poly.difference(voids)
+                except Exception:  # noqa: BLE001
+                    pass
+            faces = []
+            for pg in getattr(poly, "geoms", [poly]):
+                if pg.geom_type != "Polygon" or pg.area < 0.05:
+                    continue
+                piece = {"outer": S._ccw([tuple(q) for q in
+                                          list(pg.exterior.coords)[:-1]]),
+                         "holes": [list(reversed(S._ccw(
+                             [tuple(q) for q in list(h.coords)[:-1]])))
+                             for h in pg.interiors]}
+                faces += W.solid(piece, 0.0, f) or []
             if not faces:
                 continue
             lf = CP.local_faces(faces, (0.0, 0.0, 0.0, 0.0))
@@ -3800,8 +3834,20 @@ def _edge_groups(doc):
             log_error("project sunshades")
         if st.get("thresholds", True) and st.get("finish_on", True):
             try:
-                fs = SE.threshold_faces(doc, lid, z0,
-                                        float(st.get("finish_t", 0.0508)))
+                from shapely.geometry import Point as _Pt
+                rooms_ = spaces.of_level(arch, lid)
+                ft_ = float(st.get("finish_t", 0.0508))
+
+                def level_at(q, _i=i, _lid=lid, _rooms=rooms_):
+                    # the slab top and the finished floor there: the room's
+                    # own finish over its own (sunk / raised) floor
+                    base = elev[_i] + floor_offset_at(doc, _lid, q)
+                    pt = _Pt(q)
+                    r = next((r for r in _rooms if r["poly"].contains(pt)),
+                             None)
+                    f = room_finish(doc, r.get("rec")) if r else ft_
+                    return base, base + f
+                fs = SE.threshold_faces(doc, lid, z0, ft_, level_at)
                 if fs:
                     parts.append(("threshold", "Granite thresholds", fs,
                                   (0.20, 0.20, 0.22), "IfcCovering"))

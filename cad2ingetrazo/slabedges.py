@@ -385,9 +385,12 @@ def _mrr_sides(p):
     return (math.dist(q[0], q[1]), math.dist(q[1], q[2]))
 
 
-def threshold_faces(doc, lid, z0, t) -> list:
+def threshold_faces(doc, lid, z0, t, level_at=None) -> list:
     """A granite threshold in every door opening of the level: the door's
-    width by the wall's thickness, as thick as the floor finish."""
+    width by the wall's thickness, its top flush with the finished floor
+    (the higher of the two rooms it joins when they differ), down to the
+    slab. ``level_at(pt)`` → (slab top, finish top) at a point; without it
+    the floor at ``z0`` with a finish ``t`` thick."""
     from .engine import structure as S
     from .engine import walls as W
     arch = doc["arch"]
@@ -401,6 +404,23 @@ def threshold_faces(doc, lid, z0, t) -> list:
         seg = W.centre(w)
         n = (-seg.u[1], seg.u[0])
         t2 = float(w["t"]) / 2
+        za, zb = z0, z0 + t
+        if level_at is not None:
+            c = (seg.p0[0] + seg.u[0] * o["pos"],
+                 seg.p0[1] + seg.u[1] * o["pos"])
+            lv = []
+            for sd in (1, -1):
+                q = (c[0] + n[0] * sd * (t2 + 0.3),
+                     c[1] + n[1] * sd * (t2 + 0.3))
+                try:
+                    lv.append(level_at(q))
+                except Exception:  # noqa: BLE001
+                    pass
+            if lv:
+                za = min(b for b, _f in lv)
+                zb = max(f_ for _b, f_ in lv)
+        if zb - za < 0.005:
+            continue
         out += S._box(seg.p0, seg.u, n, o["pos"] - o["w"] / 2,
-                      o["pos"] + o["w"] / 2, -t2, t2, z0, z0 + t, GRANITE)
+                      o["pos"] + o["w"] / 2, -t2, t2, za, zb, GRANITE)
     return out

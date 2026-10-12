@@ -220,3 +220,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Crash fixed**: 3.12.1–3.13's wheel guard sent the wheel event on to the panel's scroll bar, whose own wheel came back through the guard — an endless loop until the stack overflowed and IngeTrazo closed (IngeTrazo's crash log: «stack overflow … panel.py eventFilter»). The guard now scrolls the panel itself and never re-sends the event; a hot install takes the older guards off.
 - **The wheel never changes a value in the panel**, even in a field clicked into: over a spin box, list or slider it scrolls the panel. Values change by typing, the arrows or picking from the list. (Dialogs keep the normal wheel.)
 - **Motorbikes from IngeTrazo's library**, like the cars: the first motorbike / scooter in the online catalogue, or the one picked with «Pick…» in section 11 (beside the car model); «Auto» goes back to the first found. Offline: the simple built-in motorbike.
+
+## 3.13.2
+- **Motorbikes**: the Vehicles' «Scooter» of IngeTrazo's online catalogue is found first (3.13.1 skipped any name with «motorcycle» in it by mistake).
+- **Floor finishes cut at the slab's openings** (shafts, stair / ramp / lift wells, openings drawn by hand), as the slab is.
+- **1 Import CAD plan**: «Analyse / Import to …» right under «Select floor on drawing…»; the drawing and model units, base point, insert point, rotation, wall thickness, level options and floor height fold into «Import settings…» (closed), beside «Layers».
+- **Door thresholds flush with the floor finish**: the granite's top is the finished floor of the rooms either side (the higher one when they differ — a sunk bath, a thicker finish), down to the slab; before, it stood on the level's open-floor height.

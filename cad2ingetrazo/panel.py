@@ -478,7 +478,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.13.1</span>")
+                   "3.13.2</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -758,10 +758,32 @@ class Panel(QWidget):
         self.i_portion.setWordWrap(True)
         self.i_portion.setStyleSheet("color: #8a94a3;")
         f.addRow(self.i_portion)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Analyse", self._analyse,
+                           "Read the file and list its layers — nothing "
+                           "changes"))
+        self.i_go = _btn("Import to level", self._import, "Walls, doors, "
+                           "windows, columns, beams, slab with holes, room "
+                           "names and texts — replaces this level's earlier "
+                           "import", primary=True)
+        row.addWidget(self.i_go)
+        f.addRow(row)
+        self.i_changed = QLabel("")
+        self.i_changed.setWordWrap(True)
+        self.i_changed.setStyleSheet("color: #c0392b; font-weight: bold;")
+        f.addRow(self.i_changed)
+        f.addRow(_btn("Update from CAD (all levels)", self._update_cad,
+                      "Read every level's plan again with the settings it "
+                      "was imported with — after the CAD file changed"))
+        # the import settings fold under the import (as the layers):
+        # «Import to …» stays right under «Select floor on drawing…»
+        sbox, sbody = _fold("Import settings (units, base point, insert, "
+                            "levels…)", "importset", False)
+        sf = _form(sbody)
         self.i_unit = QComboBox()
         for _k, label, _v in cadread.UNITS:
             self.i_unit.addItem(label)
-        f.addRow("Drawing units", self.i_unit)
+        sf.addRow("Drawing units", self.i_unit)
         from .host import UNIT_CHOICES
         self.i_munits = QComboBox()
         for k, label in UNIT_CHOICES:
@@ -771,14 +793,14 @@ class Panel(QWidget):
                                  "sheets. Auto: as the CAD plan is drawn "
                                  "(inches / feet → feet-inches, mm, cm, m)")
         self.i_munits.currentIndexChanged.connect(self._units_choice)
-        f.addRow("Model units", self.i_munits)
+        sf.addRow("Model units", self.i_munits)
         self.i_base = QComboBox()
         for _k, label in cadread.BASE_MODES:
             self.i_base.addItem(label)
         self.i_base.currentIndexChanged.connect(
             lambda i: self.i_bxy.setEnabled(cadread.BASE_MODES[i][0] ==
                                             "custom"))
-        f.addRow("Base point", self.i_base)
+        sf.addRow("Base point", self.i_base)
         self.i_bxy = QWidget()
         h = QHBoxLayout(self.i_bxy)
         h.setContentsMargins(0, 0, 0, 0)
@@ -786,21 +808,21 @@ class Panel(QWidget):
         self.i_by = _spin(-1e9, 1e9, 0.0, 1.0, 3, "")
         h.addWidget(self.i_bx)
         h.addWidget(self.i_by)
-        f.addRow("  X, Y (drawing units)", self.i_bxy)
+        sf.addRow("  X, Y (drawing units)", self.i_bxy)
         row = QHBoxLayout()
         self.i_ix = _spin(-1e6, 1e6, 0.0, 0.5, 3)
         self.i_iy = _spin(-1e6, 1e6, 0.0, 0.5, 3)
         row.addWidget(self.i_ix)
         row.addWidget(self.i_iy)
-        f.addRow("Insert at X, Y", row)
+        sf.addRow("Insert at X, Y", row)
         self.i_rot = _spin(-360, 360, 0.0, 90, 2, " °")
-        f.addRow("Rotation", self.i_rot)
+        sf.addRow("Rotation", self.i_rot)
         row = QHBoxLayout()
         self.i_tmin = _spin(0.02, 2.0, 0.08, 0.01, 3)
         self.i_tmax = _spin(0.02, 3.0, 0.40, 0.01, 3)
         row.addWidget(self.i_tmin)
         row.addWidget(self.i_tmax)
-        f.addRow("Wall thickness min/max", row)
+        sf.addRow("Wall thickness min/max", row)
         lbox, lbody = _fold("Layers (wildcards, comma separated)",
                             "layers", False)
         lf = _form(lbody)
@@ -826,14 +848,14 @@ class Panel(QWidget):
                                "doors, windows, columns, beams, slab, "
                                "plot and footings found from the drawing; a "
                                "role nothing shows keeps the patterns below")
-        f.addRow(self.i_auto)
+        sf.addRow(self.i_auto)
         self.i_levels = QCheckBox("Floor levels from the CAD's level notes "
                                   "(LEV. +4'-0\", FFL …)")
         self.i_levels.setChecked(True)
         self.i_levels.setToolTip("The level a floor's CAD plan notes most "
                                  "is its floor level, in the plans and in "
                                  "3D; the storey heights follow")
-        f.addRow(self.i_levels)
+        sf.addRow(self.i_levels)
         row = QHBoxLayout()
         self.i_gffl = _spin(0.0, 1.2192, 0.0, 0.0762)   # 0 … 4'-0"
         self.i_gffl.setSpecialValueText("As the CAD notes it")
@@ -845,30 +867,14 @@ class Panel(QWidget):
             "CAD's own level note («LEV. +4'-0\"») decides.")
         row.addWidget(self.i_gffl, 1)
         row.addWidget(_btn("Apply", self._apply_gffl))
-        f.addRow("Ground floor level (F.F.L.)", row)
+        sf.addRow("Ground floor level (F.F.L.)", row)
         self.i_floor_h = _spin(1.5, 20.0, 2.9972)       # 9'-10"
         self.i_floor_h.setToolTip("The level's storey height, floor to "
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
-        f.addRow("Floor height (floor to floor)", self.i_floor_h)
+        sf.addRow("Floor height (floor to floor)", self.i_floor_h)
+        f.addRow(sbox)
         f.addRow(lbox)
-        row = QHBoxLayout()
-        row.addWidget(_btn("Analyse", self._analyse,
-                           "Read the file and list its layers — nothing "
-                           "changes"))
-        self.i_go = _btn("Import to level", self._import, "Walls, doors, "
-                           "windows, columns, beams, slab with holes, room "
-                           "names and texts — replaces this level's earlier "
-                           "import", primary=True)
-        row.addWidget(self.i_go)
-        f.addRow(row)
-        self.i_changed = QLabel("")
-        self.i_changed.setWordWrap(True)
-        self.i_changed.setStyleSheet("color: #c0392b; font-weight: bold;")
-        f.addRow(self.i_changed)
-        f.addRow(_btn("Update from CAD (all levels)", self._update_cad,
-                      "Read every level's plan again with the settings it "
-                      "was imported with — after the CAD file changed"))
         self.i_report = QLabel("")
         self.i_report.setWordWrap(True)
         self.i_report.setTextInteractionFlags(Qt.TextSelectableByMouse)

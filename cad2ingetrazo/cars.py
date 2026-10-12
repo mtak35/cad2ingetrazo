@@ -107,20 +107,27 @@ def bike_entry(st) -> tuple | None:
         return _BIKE_AUTO["auto"]
     import re
     if _BIKE_RE is None:
-        _BIKE_RE = re.compile(r"moto|bike|scooter|vespa|harley|ducati|"
-                              r"yamaha|honda\s*cb|kawasaki", re.I)
+        _BIKE_RE = re.compile(r"moto|bike|scooter|esc[uú]ter|vespa|harley|"
+                              r"ducati|yamaha|kawasaki", re.I)
     found = None
     try:
         from . import library as LB
+        best = None
         for e in LB.list_entries():
-            txt = " ".join(str(e.get(k, "")) for k in ("name", "tip")) + \
-                " " + " ".join(str((e.get("entry") or {}).get(k, ""))
-                               for k in ("nombre", "nombre_en", "id"))
-            if _BIKE_RE.search(txt) and not re.search(r"bicic|bicycle|cycl"
-                                                       r"ist|ciclis", txt,
-                                                       re.I):
-                found = (e["key"], e.get("entry"), e.get("name", ""))
-                break
+            ent = e.get("entry") or {}
+            txt = " ".join([str(e.get("name", "")), str(e.get("tip", ""))] +
+                           [str(ent.get(k, "")) for k in
+                            ("nombre", "nombre_en", "id", "obj")])
+            if not _BIKE_RE.search(txt) or re.search(
+                    r"bicic|bicycle|ciclis|cyclist|kick\s*scooter|patinete",
+                    txt, re.I):
+                continue
+            # the Vehicles' scooter first, then any motorbike
+            score = (0 if e.get("cat") == "Vehicles" else 1,
+                     0 if re.search(r"scooter", txt, re.I) else 1)
+            if best is None or score < best[0]:
+                best = (score, (e["key"], e.get("entry"), e.get("name", "")))
+        found = best[1] if best else None
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("cars.bike_entry")
