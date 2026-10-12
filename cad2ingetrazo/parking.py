@@ -598,6 +598,122 @@ def stalls_of(bays, cars) -> list:
             for row in rows for c, a, L, W in sorted(row)]
 
 
+def bike_of(ins) -> dict | None:
+    """A motorbike block → {c, ang, L, W} (1.4–2.6 m long, 0.4–1.2 wide)."""
+    cs = ins.get("corners")
+    if not cs or len(cs) < 4:
+        return None
+    xs, ys = [p[0] for p in cs], [p[1] for p in cs]
+    bw, bh = max(xs) - min(xs), max(ys) - min(ys)
+    r = math.radians(float(ins.get("rot", 0.0)))
+    c, s = abs(math.cos(r)), abs(math.sin(r))
+    det = c * c - s * s
+    if abs(det) > 0.2:
+        a = (bw * c - bh * s) / det
+        b = (bh * c - bw * s) / det
+    else:
+        a = b = max(bw, bh) / math.sqrt(2)
+    ang = math.degrees(r)
+    if b > a:
+        a, b, ang = b, a, ang + 90.0
+    if not (1.3 <= a <= 2.8 and 0.35 <= b <= 1.3):
+        return None
+    return {"c": [round((min(xs) + max(xs)) / 2, 4),
+                  round((min(ys) + max(ys)) / 2, 4)],
+            "ang": round(ang, 3), "L": round(a, 3), "W": round(b, 3)}
+
+
+def bike_stalls(lines_, bikes, cars_stalls=()) -> list:
+    """The motorbike spaces: the small bays the parking / motorbike lines
+    close (0.9–4.5 m², long and narrow) and every motorbike symbol outside
+    them — rows top to bottom, left to right."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import polygonize, unary_union
+    out = []
+    ls = [LineString(b) for b in lines_
+          if math.dist(tuple(b[0]), tuple(b[1])) > 0.05]
+    taken = [Point(c["c"]).buffer(1.0) for c in cars_stalls]
+    if ls:
+        for f in polygonize(unary_union(ls)):
+            mr = f.minimum_rotated_rectangle
+            if not (0.9 <= f.area <= 4.5) or mr.area <= 0 or \
+                    f.area / mr.area < 0.85:
+                continue
+            q = list(mr.exterior.coords)
+            e1 = (q[1][0] - q[0][0], q[1][1] - q[0][1])
+            e2 = (q[2][0] - q[1][0], q[2][1] - q[1][1])
+            l1, l2 = math.hypot(*e1), math.hypot(*e2)
+            L_, W_ = max(l1, l2), min(l1, l2)
+            if L_ < 1.4 or W_ < 0.5 or L_ / W_ < 1.4:
+                continue
+            c = f.centroid
+            if any(t.contains(c) for t in taken):
+                continue
+            e = e1 if l1 >= l2 else e2
+            out.append((f, (c.x, c.y), math.degrees(math.atan2(e[1], e[0])),
+                        L_, W_))
+    for b in bikes:
+        p = Point(b["c"])
+        if not any(f.contains(p) for f, *_r in out):
+            out.append((p.buffer(0.01), (p.x, p.y), float(b.get("ang", 90.0)),
+                        float(b.get("L", 2.0)), float(b.get("W", 0.8))))
+    if not out:
+        return []
+    recs = sorted((r[1:] for r in out), key=lambda r: -r[0][1])
+    rows, cur = [], [recs[0]]
+    for r in recs[1:]:
+        if abs(r[0][1] - cur[0][0][1]) <= 1.5:
+            cur.append(r)
+        else:
+            rows.append(cur)
+            cur = [r]
+    rows.append(cur)
+    return [{"c": [round(c[0], 4), round(c[1], 4)], "ang": round(a % 360.0, 2),
+             "L": round(L, 3), "W": round(W, 3)}
+            for row in rows for c, a, L, W in sorted(row)]
+
+
+BIKE_BODY = (0.12, 0.13, 0.15, 1.0)
+BIKE_TANK = (0.62, 0.10, 0.10, 1.0)
+BIKE_TYRE = (0.08, 0.08, 0.08, 1.0)
+BIKE_METAL = (0.70, 0.71, 0.73, 1.0)
+
+
+def bike_faces(z0=0.0) -> list:
+    """A simple motorbike, 2.0 m long along +x, centred on the origin:
+    two wheels, frame, tank, seat, handlebar — faces with colours."""
+    def box(x0, x1, y0, y1, za, zb, col):
+        c = [(x0, y0, za), (x1, y0, za), (x1, y1, za), (x0, y1, za),
+             (x0, y0, zb), (x1, y0, zb), (x1, y1, zb), (x0, y1, zb)]
+        qs = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+              (2, 3, 7, 6), (3, 0, 4, 7)]
+        return [{"loop": [c[i] for i in q], "holes": [], "color": col}
+                for q in qs]
+
+    def wheel(cx, r=0.31, t=0.09, n=14):
+        fs = []
+        ring = [(cx + r * math.cos(2 * math.pi * k / n),
+                 r + z0 + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+        for side in (-t / 2, t / 2):
+            fs.append({"loop": [(x, side, zz) for x, zz in
+                                (ring if side > 0 else ring[::-1])],
+                       "holes": [], "color": BIKE_TYRE})
+        for k in range(n):
+            (x0, za), (x1, zb) = ring[k], ring[(k + 1) % n]
+            fs.append({"loop": [(x0, -t / 2, za), (x1, -t / 2, zb),
+                                (x1, t / 2, zb), (x0, t / 2, za)],
+                       "holes": [], "color": BIKE_TYRE})
+        return fs
+    f = wheel(-0.68) + wheel(0.68)
+    f += box(-0.55, 0.45, -0.07, 0.07, z0 + 0.30, z0 + 0.58, BIKE_BODY)
+    f += box(-0.05, 0.40, -0.15, 0.15, z0 + 0.58, z0 + 0.82, BIKE_TANK)
+    f += box(-0.55, -0.05, -0.14, 0.14, z0 + 0.62, z0 + 0.76, BIKE_BODY)
+    f += box(0.45, 0.70, -0.04, 0.04, z0 + 0.30, z0 + 0.95, BIKE_METAL)
+    f += box(0.62, 0.68, -0.38, 0.38, z0 + 0.95, z0 + 1.00, BIKE_METAL)
+    f += box(-0.80, -0.55, -0.06, 0.06, z0 + 0.50, z0 + 0.60, BIKE_METAL)
+    return f
+
+
 def ramp_z(r) -> list:
     s = _length([(tuple(a), tuple(b)) for a, b in r["sections"]])
     run = s[-1] or 1.0

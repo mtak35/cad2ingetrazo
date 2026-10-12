@@ -57,6 +57,8 @@ DEFAULTS = {
     "lift": "*LIFT*, *ELEVATOR*, *CORE*",
     "parking": "*PARK*",
     "cars": "*CAR*, *VEHIC*",
+    "bikes": "*BIKE*, *MOTORCYCLE*, *SCOOTER*",
+    "rails": "*RAIL*, *GRILL*",
     "ramps": "*RAMP*",
     "cars_lib": True, "cad_lines": True, "levels_cad": True, "car_model": "suv", "park_nums": True, "marks_on": True, "ramp_t": 0.20,
     "win_style": "sliding", "door_style": "hinged", "door2_style": "hinged",
@@ -69,12 +71,19 @@ DEFAULTS = {
     "stair_rail_off": 0.05, "stair_rail_gap": 0.0, "stair_rail_ext": 0.0,
     "parapet_rail": "solid",
     "finish_on": True, "finish_t": 0.0508,
-    "beam_h": 0.45,
+    "beam_h": 0.6096, "beam_w": 0.2032,   # 8" x 24" beams
     "ann_rooms": True, "ann_texts": True,
     "auto_layers": True,
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
     "plinth": 0.15,                # m, ground floor above the plot's ground
+    "ground_ffl": 0.0,             # m, ground F.F.L. above N.G.L. (0 = CAD)
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
+    "stair_riser": 0.1778, "stair_going": 0.2794,       # 7" riser, 11" tread
+    "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
+    "thresholds": True, "finish_to_edge": True,
+    "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
+    "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
+    "shoring_embed": 3.048,                              # 10'-0" below
     "stair_nosing": 0.025, "stair_tread": 0.05,
 }
 
@@ -104,7 +113,9 @@ def empty() -> dict:
             "site": SITE_.load_site(None), "grid": SITE_.load_grid(None),
             "stairs": [], "stair_cad": {}, "materials": {},
             "parking": {}, "ramps": [], "marks": {}, "landscape": {},
-            "comp_names": {}}
+            "comp_names": {}, "man_shafts": [], "ceilings": {},
+            "furniture": [], "ffl_marks": [], "slab_edges": {},
+            "sunshades": {}}
 
 
 def load(raw) -> dict:
@@ -146,10 +157,38 @@ def load(raw) -> dict:
     doc["landscape"] = {k: v for k, v in (raw.get("landscape") or {}).items()
                         if k in ids and isinstance(v, list)}
     # the component types' marks and names (components.py)
-    doc["comp_names"] = {str(k): {kk: str(vv)[:80] for kk, vv in v.items()
-                                  if kk in ("mark", "name")}
-                         for k, v in (raw.get("comp_names") or {}).items()
-                         if isinstance(v, dict) and v.get("mark")}
+    doc["comp_names"] = {}
+    for k, v in (raw.get("comp_names") or {}).items():
+        if not isinstance(v, dict) or not v.get("mark"):
+            continue
+        ent = {kk: str(vv)[:80] for kk, vv in v.items()
+               if kk in ("mark", "name")}
+        lib = v.get("lib")              # a library model standing in
+        if isinstance(lib, dict) and lib.get("key"):
+            ent["lib"] = {kk: lib[kk] for kk in
+                          ("key", "fit", "rot", "name", "entry") if kk in lib}
+        mir = v.get("mirror")           # the type mirrored
+        if isinstance(mir, dict) and (mir.get("x") or mir.get("y")):
+            ent["mirror"] = {kk: True for kk in ("x", "y") if mir.get(kk)}
+        doc["comp_names"][str(k)] = ent
+    # openings cut by hand in the slabs (shafts), on a floor or through all
+    doc["man_shafts"] = [m for m in raw.get("man_shafts") or []
+                         if isinstance(m, dict) and m.get("id")
+                         and len(m.get("pts") or []) >= 3
+                         and (m.get("level") in ids or m.get("through"))]
+    # false ceilings per level (ceilings.py), furniture placed in rooms,
+    # level marks placed by hand, slab edges (railings / sun shades)
+    doc["ceilings"] = {k: v for k, v in (raw.get("ceilings") or {}).items()
+                       if k in ids and isinstance(v, dict)}
+    doc["furniture"] = [f for f in raw.get("furniture") or []
+                        if isinstance(f, dict) and f.get("level") in ids
+                        and f.get("key")]
+    doc["ffl_marks"] = [m for m in raw.get("ffl_marks") or []
+                        if isinstance(m, dict) and m.get("level") in ids]
+    doc["slab_edges"] = {k: v for k, v in (raw.get("slab_edges") or {}).items()
+                         if k in ids and isinstance(v, dict)}
+    doc["sunshades"] = {k: v for k, v in (raw.get("sunshades") or {}).items()
+                        if k in ids and isinstance(v, dict)}
     return doc
 
 
@@ -193,6 +232,99 @@ def _rect_column(pts):
     ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
     return {"x": round(cx, 4), "y": round(cy, 4), "w": round(w, 3),
             "d": round(d, 3), "angle": round(ang, 3), "shape": "rect"}
+
+
+_FLOOR = r"(FOUND\w*|FDN|BASE\w*|BSMT|GRD|GROUND|G\.?F|ROOF|TOP|\d+\s*(?:ST|ND|RD|TH)?)"
+_RANGE = re.compile(_FLOOR + r"\s*(?:FLOOR|FLR|FL)?\.?\s*(?:TO|-|~)\s*" + _FLOOR)
+
+
+def _floor_no(word: str) -> int:
+    w = word.upper().replace(" ", "")
+    if w.startswith(("FOUND", "FDN", "BASE", "BSMT")):
+        return -99
+    if w in ("GRD", "GROUND", "GF", "G.F"):
+        return 0
+    if w in ("ROOF", "TOP"):
+        return 99
+    m = re.match(r"\d+", w)
+    return int(m.group()) if m else 0
+
+
+def floor_range(layer: str):
+    """(from, to) floors a layer's name says it runs through («S-CONC-4
+    FOUNDATION TO 6TH» → (-99, 6), «COL.3RD TO 6TH» → (3, 6), «6TH TO
+    ROOF» → (6, 99)), or None when it names no range."""
+    m = _RANGE.search(str(layer).upper().replace("[", "").replace("]", ""))
+    if not m:
+        return None
+    a, b = _floor_no(m.group(1)), _floor_no(m.group(2))
+    return (min(a, b), max(a, b))
+
+
+def level_floor_no(arch, lid) -> int:
+    """A level's floor number: the ground floor 0, the floors above 1, 2…,
+    the basements −1, −2…"""
+    el = elevations(arch)
+    order = sorted(range(len(arch["levels"])), key=lambda i: el[i])
+    ids = [arch["levels"][i]["id"] for i in order]
+    g = next((k for k, i in enumerate(order)
+              if arch["levels"][i]["kind"] == "ground"), 0)
+    return ids.index(lid) - g if lid in ids else 0
+
+
+def column_layers_for(pats, floor: int) -> list:
+    """The column layer patterns that stand on ``floor``: a layer naming a
+    run of floors only where it runs; every other one everywhere."""
+    out = []
+    for p in pats:
+        r = floor_range(p)
+        if r is None or r[0] <= floor <= r[1]:
+            out.append(p)
+    return out
+
+
+def redetect_columns(doc, lids=None) -> dict:
+    """The columns of levels ``lids`` (all imported ones by default) read
+    again from their CAD plans — nothing else on the level changes (walls,
+    openings, edits kept). {level id: (before, after)}."""
+    arch = doc["arch"]
+    st = doc["settings"]
+    out = {}
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file") or \
+                lid not in {lv["id"] for lv in arch["levels"]}:
+            continue
+        raw = cadread.read(how["file"], how.get("unit"))
+        drawing = cadread.crop(raw, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base,
+                           (how.get("ix", 0.0), how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _found = layer_patterns(drawing, how, st)
+        pats = column_layers_for(P["columns"], level_floor_no(arch, lid))
+        cols = columns_from(pl, pats, pl["layers"])
+        old = [e for e in arch["structure"]
+               if e["type"] == "column" and e["level"] == lid]
+        keep = {k: old[0][k] for k in ("base", "height") if old and k in old[0]}
+        seen, recs = set(), []
+        for c in cols:
+            key = (round(c["x"], 2), round(c["y"], 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            recs.append(dict(c, type="column", level=lid, anchor="centre",
+                             base=keep.get("base", 0.0),
+                             height=keep.get("height", "level"), fit=False))
+        recs = [r for r in recs if S.why_not(r) is None]
+        arch["structure"] = [e for e in arch["structure"]
+                             if not (e["type"] == "column"
+                                     and e["level"] == lid)]
+        arch["structure"] += M.new_elements(arch["structure"], recs)
+        out[lid] = (len(old), len(recs))
+    return out
 
 
 def columns_from(pl, pats, lay) -> list:
@@ -448,7 +580,7 @@ def _outer_loops(pieces, gap=1.25, least=20.0):
 
 ROLE_KEYS = ("walls", "doors", "windows", "columns", "beams", "slab", "holes",
              "text", "plot", "footings", "stairs", "grid", "lift", "parking",
-             "cars", "ramps")
+             "cars", "ramps", "bikes", "rails")
 
 
 def layer_patterns(drawing, how, st):
@@ -625,6 +757,35 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     made = M.new_walls(arch["walls"], recs)
     arch["walls"] += made
     rep["walls"] = len(made)
+    # railings drawn on the rail layers: railing walls at the slab's edge
+    # (the slab carried out to them below)
+    from . import slabedges as SE
+    edge_lines = []
+    if P.get("rails"):
+        try:
+            rk = st.get("parapet_rail", "ss_bars")
+            rk = rk if rk and rk != "solid" else "ss_bars"
+            rrecs = SE.rails_from_cad(pl, lambda n: _match(n, P["rails"]),
+                                      lid, rk, float(st.get("rail_h",
+                                                            SE.RAIL_H)))
+            made_r = M.new_walls(arch["walls"], rrecs)
+            n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
+                     .startswith("Balcony railing"))
+            for k_, w_ in enumerate(made_r, 1):
+                w_["name"] = f"Balcony railing {n0 + k_}"
+                w_["rail"] = rk
+            arch["walls"] += made_r
+            rep["railings"] = len(made_r)
+            edge_lines += [(tuple(w_["a"]), tuple(w_["b"])) for w_ in made_r]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project rails_from_cad")
+    if st.get("slab_extend_cad", True):
+        try:
+            edge_lines += SE.dashed_lines(pl)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project dashed_lines")
     orecs = []
     for op in ops:
         k, pos, width = op[:3]
@@ -657,7 +818,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
 
     # columns: closed outlines, loose lines and circles on the column
     # layers — rectangles (long shear walls too), and L / T / C sections
-    cols = columns_from(pl, P["columns"], lay)
+    cols = columns_from(pl, column_layers_for(P["columns"],
+                                              level_floor_no(arch, lid)),
+                        lay)
     seen = set()
     crecs = []
     for c in cols:                     # a column drawn twice (block + lines)
@@ -761,6 +924,15 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["voids"] = len(xo)
             openings_all = openings_all + xo
         rep["shafts"] = 0
+        if edge_lines:            # out to the railings, the dashed edges
+            try:
+                ext = [SE.extend_outline(o, edge_lines) for o in outlines]
+                rep["slab_extended"] = sum(1 for a_, b_ in zip(outlines, ext)
+                                           if a_ is not b_)
+                outlines = ext
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project extend_outline")
         for outline in outlines:
             poly = Polygon(outline)
             inner = poly.buffer(-0.02) if poly.is_valid else poly.buffer(0)
@@ -874,6 +1046,15 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["plot"] = True
             doc["imports"][PLOT_KEY] = dict(how, file=str(path), level=lid)
 
+    # a basement's outer walls: RCC retaining walls, no doors or windows
+    lv_ = next((x for x in arch["levels"] if x["id"] == lid), None)
+    if lv_ is not None and lv_.get("kind") == "basement" and \
+            st.get("basement_rcc", True):
+        try:
+            rep["retaining"] = basement_walls(doc, lid)["walls"]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.basement_walls")
     # openings the wall can't hold (too tall, at an end…) are left out
     rep["skipped"] += validate_openings(arch)
     rep["openings"] = sum(1 for o in arch["openings"]
@@ -901,6 +1082,68 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     return rep
 
 
+def outer_walls(arch, lid) -> list:
+    """The walls on a level's outer edge (straight ones): their centre line
+    along the outline of everything the level's walls enclose."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    ws = [w for w in arch["walls"] if w["level"] == lid and
+          w.get("kind", "line") == "line" and not w.get("rail")]
+    if not ws:
+        return []
+    u = unary_union([LineString([tuple(w["a"]), tuple(w["b"])]).buffer(
+        float(w["t"]) / 2 + 0.06, cap_style=2, join_style=2) for w in ws])
+    # the gaps the CAD leaves at doors bridged: the building's own outline
+    u = u.buffer(2.0, join_style=2).buffer(-2.0, join_style=2)
+    shells = [Polygon(p.exterior) for p in getattr(u, "geoms", [u])
+              if p.geom_type == "Polygon" and Polygon(p.exterior).area > 15.0]
+    if not shells:
+        return []
+    rings = [sh.exterior for sh in shells]
+    out = []
+    for w in ws:
+        tol = float(w["t"]) / 2 + 0.25
+        a, b = tuple(w["a"]), tuple(w["b"])
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if any(r.distance(Point(m)) <= tol and r.distance(Point(a)) <= tol
+               and r.distance(Point(b)) <= tol for r in rings):
+            out.append(w)
+    return out
+
+
+def basement_walls(doc, lid=None, t=None, on=True) -> dict:
+    """A basement's outer walls (every basement's when ``lid`` is None) made
+    RCC retaining walls, like a lift core's: their doors and windows taken
+    out (the wall closed), at least ``t`` thick (the settings' 12" by
+    default). ``on=False`` makes them ordinary walls again.
+    {"walls": n, "openings": m}."""
+    arch = doc["arch"]
+    st = doc["settings"]
+    t = float(t if t is not None else st.get("retain_t", 0.3048))
+    lids = [lid] if lid else [lv["id"] for lv in arch["levels"]
+                             if lv.get("kind") == "basement"]
+    nw = no = 0
+    for l_ in lids:
+        for w in outer_walls(arch, l_):
+            if not on:
+                if w.pop("rcc", None):
+                    nw += 1
+                continue
+            w["rcc"] = True
+            w["type"] = "solid"
+            if float(w["t"]) < t:
+                w["t"] = round(t, 4)
+            nm = str(w.get("name") or "")
+            if not nm.startswith("RCC retaining wall"):
+                w["name"] = f"RCC retaining wall {nw + 1}"
+            nw += 1
+            before = len(arch["openings"])
+            arch["openings"] = [o for o in arch["openings"]
+                                if o["wall"] != w["id"]]
+            no += before - len(arch["openings"])
+    return {"walls": nw, "openings": no}
+
+
 def _parking_import(doc, lid, pl, P) -> dict:
     """The level's parking bays and cars, its ramps (their wells cut in the
     slabs) and its level notes."""
@@ -921,9 +1164,29 @@ def _parking_import(doc, lid, pl, P) -> dict:
             if c:
                 cars.append(c)
     stalls = PK.stalls_of(bays, cars)
-    if bays or cars:
+    # motorbikes: their blocks, and the small bays the bike / parking lines
+    # close (numbered M1, M2… as the cars are P1, P2…)
+    bikel = [[[round(s[0], 4), round(s[1], 4)], [round(s[2], 4), round(s[3], 4)]]
+             for s in pl["segs"] if P.get("bikes") and on(s, "bikes")]
+    bikes = []
+    for ins in pl.get("inserts", ()):
+        nm = str(ins["name"]).upper()
+        if (P.get("bikes") and _match(ins["layer"], P["bikes"])) or \
+                re.search(r"BIKE|MOTOR\s?CYC|M\.?\s?CYCLE|SCOOTER|2.?WHEEL", nm):
+            b = PK.bike_of(ins)
+            if b:
+                bikes.append(b)
+    bstalls = []
+    try:
+        if bikel or bikes:
+            bstalls = PK.bike_stalls(bikel + bays, bikes, stalls)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.bike_stalls")
+    if bays or cars or bikes or bstalls:
         doc["parking"][lid] = {"bays": bays, "carlines": carl, "cars": cars,
-                               "stalls": stalls}
+                               "stalls": stalls, "bikelines": bikel,
+                               "bikes": bikes, "bike_stalls": bstalls}
     else:
         doc["parking"].pop(lid, None)
     # ramps: the old ones of this level out (their wells closed), the new in
@@ -1027,6 +1290,92 @@ def apply_slab_pos(doc) -> None:
             s["top"] = True
         else:
             s.pop("top", None)
+
+
+def _floor_slabs(doc, lid) -> list:
+    """The slab records that make the floor of level ``lid``: with slabs
+    cast over each floor, the main slab of the level below (and this
+    level's own sunk / raised parts); else this level's slabs."""
+    arch = doc["arch"]
+    slabs = [s for s in arch["structure"] if s["type"] == "slab"]
+    if not slab_on_top(doc):
+        return [s for s in slabs if s["level"] == lid]
+    el = elevations(arch)
+    order = [arch["levels"][i]["id"] for i in
+             sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+    k = order.index(lid) if lid in order else -1
+    below = order[k - 1] if k > 0 else None
+    out = [s for s in slabs if s["level"] == lid and not s.get("top")]
+    if below is not None:
+        out += [s for s in slabs if s["level"] == below and s.get("top")]
+    return out or [s for s in slabs if s["level"] == lid]
+
+
+def add_man_shaft(doc, lid, pts, through=False) -> str | None:
+    """A shaft / slab opening drawn by hand on the floor of ``lid`` (or
+    through every floor): kept in ``doc["man_shafts"]`` and cut again into
+    the slabs at every rebuild. Its id, or None when it cuts no slab."""
+    import uuid
+    from shapely.geometry import Polygon
+    g = Polygon(pts).buffer(0)
+    if g.is_empty or g.area < 0.04:
+        return None
+    if g.geom_type != "Polygon":
+        g = max(g.geoms, key=lambda q: q.area)
+    rec = {"id": uuid.uuid4().hex[:8], "level": lid, "through": bool(through),
+           "pts": [[round(x, 4), round(y, 4)]
+                   for x, y in list(g.exterior.coords)[:-1]]}
+    doc.setdefault("man_shafts", []).append(rec)
+    n = apply_man_shafts(doc)
+    if not n.get(rec["id"]):
+        doc["man_shafts"].remove(rec)
+        apply_man_shafts(doc)
+        return None
+    return rec["id"]
+
+
+def remove_man_shaft(doc, sid) -> bool:
+    before = len(doc.get("man_shafts") or [])
+    doc["man_shafts"] = [m for m in doc.get("man_shafts") or []
+                         if m["id"] != sid]
+    apply_man_shafts(doc)
+    return len(doc["man_shafts"]) < before
+
+
+def apply_man_shafts(doc) -> dict:
+    """The hand-drawn openings cut into the slabs they cross (the earlier
+    cuts first taken out, so it can run at every rebuild): {id: slabs}."""
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    slabs = [s for s in arch["structure"] if s["type"] == "slab"]
+    for s in slabs:                         # the earlier hand cuts out
+        man = s.pop("man", None) or []
+        if man:
+            s["holes"] = [h for h in s.get("holes") or [] if h not in man]
+            s["shafts"] = [h for h in s.get("shafts") or [] if h not in man]
+    out = {}
+    for m in doc.get("man_shafts") or []:
+        hp = Polygon(m["pts"]).buffer(0)
+        targets = slabs if m.get("through") else _floor_slabs(doc,
+                                                              m["level"])
+        n = 0
+        for s in targets:
+            try:
+                sp = Polygon(s["corners"]).buffer(0)
+                cut = hp.intersection(sp.buffer(-0.01))
+            except Exception:  # noqa: BLE001
+                continue
+            for g in getattr(cut, "geoms", [cut]):
+                if g.geom_type != "Polygon" or g.area < 0.04:
+                    continue
+                h = [[round(x, 4), round(y, 4)]
+                     for x, y in list(g.exterior.coords)[:-1]]
+                s.setdefault("holes", []).append(h)
+                s.setdefault("shafts", []).append(h)
+                s.setdefault("man", []).append(h)
+                n += 1
+        out[m["id"]] = n
+    return out
 
 
 def recut_wells(doc) -> dict:
@@ -1673,7 +2022,7 @@ def add_corner_columns(doc, lid, size=0.30) -> int:
     return len(recs)
 
 
-def add_beams_on_walls(doc, lid, w=0.20, h=0.45) -> int:
+def add_beams_on_walls(doc, lid, w=0.2032, h=0.6096) -> int:
     arch = doc["arch"]
     recs = []
     for wall in arch["walls"]:
@@ -1750,6 +2099,9 @@ def find_record(doc, kind, rid):
     if kind == "dig":
         return next((d for d in arch.get("digs") or [] if d["id"] == rid),
                     None)
+    if kind == "furniture":
+        return next((f for f in doc.get("furniture") or []
+                     if f["id"] == rid), None)
     pool = arch[LISTS.get(kind, "structure")]
     return next((r for r in pool if r["id"] == rid), None)
 
@@ -1766,6 +2118,9 @@ def delete_record(doc, kind, rid) -> None:
                          if s["id"] != rid]
     elif kind == "dig":
         arch["digs"] = [d for d in arch.get("digs") or [] if d["id"] != rid]
+    elif kind == "furniture":
+        doc["furniture"] = [f for f in doc.get("furniture") or []
+                            if f["id"] != rid]
     elif kind == "stairrail":      # the stair stays, without its railing
         s = find_record(doc, "stair", rid)
         if s is not None:
@@ -1980,6 +2335,24 @@ def symbol_lines(o, wall, seg):
     return leaf(s1 - fr, -1.0, r)
 
 
+def _type_mirror(e, recs, walls_by, cat):
+    """(about x, about y) when the element's component type is mirrored,
+    else None."""
+    if not cat:
+        return None
+    from . import components as CP
+    rec = recs.get(("opening" if e["kind"] == "opening" else e["kind"],
+                    e["id"]))
+    if rec is None:
+        return None
+    tk = CP.type_of(e["kind"], rec, walls_by)
+    t = cat.get(tk[1]) if tk else None
+    m = (t or {}).get("mirror") or {}
+    if m.get("x") or m.get("y"):
+        return (bool(m.get("x")), bool(m.get("y")))
+    return None
+
+
 def _groups(arch, doc=None):
     """Every element as a tagged group on its level's layer, named by its
     component type («D-01 · Hinged door…»). Elements of the same geometry
@@ -2009,9 +2382,13 @@ def _groups(arch, doc=None):
         z0 = info[e["level"]]["z0"] if e["level"] in info else 0.0
         fr = CP.frame_of_element(e, arch, walls_by, z0)
         lf = CP.local_faces(e["faces"], fr)
+        # a type mirrored (Edit type ▸ Mirror): its elements drawn flipped
+        mir = _type_mirror(e, recs, walls_by, cat)
+        if mir:
+            lf = CP.mirror_lf(lf, *mir)
         key = (e["kind"], CP.shape_key(lf))
         count[key] = count.get(key, 0) + 1
-        prep.append((e, fr, lf, key))
+        prep.append((e, fr, lf, key, bool(mir)))
     protos: dict = {}
 
     def mesh_of(lf):
@@ -2026,7 +2403,7 @@ def _groups(arch, doc=None):
         _soften(mesh)
         return mesh
     out = []
-    for e, fr, lf, key in prep:
+    for e, fr, lf, key, mirrored in prep:
         rec = recs.get((e["kind"] if e["kind"] != "opening" else "opening",
                         e["id"]))
         t, tkey = None, None
@@ -2043,10 +2420,12 @@ def _groups(arch, doc=None):
         if t and t.get("lib"):                # an IngeTrazo library model
             try:
                 from . import library as LB
+                m_ = (t.get("mirror") or {})
                 lg = LB.groups_for(t["lib"], fr, lf, name,
                                    level_layer(names[e["level"]]), tag,
                                    {"class": cls, "name": name}
-                                   if cls else None)
+                                   if cls else None,
+                                   (bool(m_.get("x")), bool(m_.get("y"))))
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project._groups library")
@@ -2054,7 +2433,7 @@ def _groups(arch, doc=None):
             if lg:
                 out += lg
                 continue
-        if count[key] > 1:                    # a component: shared mesh
+        if count[key] > 1 or mirrored:        # a component: shared mesh
             if key not in protos:
                 protos[key] = mesh_of(lf)
             g = Group(protos[key], name=name)
@@ -2066,6 +2445,8 @@ def _groups(arch, doc=None):
                       name=name)
             g.component = False
         g.material = {"color": COLOR[e["kind"]], "opacity": 1.0}
+        if e["kind"] == "wall" and (walls_by.get(e["id"]) or {}).get("rcc"):
+            g.material = {"color": COLOR["core"], "opacity": 1.0}
         g.layer = level_layer(names[e["level"]])
         cls = OPENING_IFC.get(e.get("okind")) if e["kind"] == "opening" \
             else IFC.get(e["kind"])
@@ -2258,6 +2639,17 @@ def _stair_groups(doc):
                         d_["color"] = colour
                     faces.append(d_)
             lf = CP.local_faces(faces, (0.0, 0.0, z, 0.0))
+            try:                         # a mirrored stair / railing type
+                r_ = dict(recs.get(sid) or {},
+                          **ST.eff(recs.get(sid) or {}, stt))
+                tk_ = CP.type_of(kind, r_)
+                m_ = ((cat.get(tk_[1]) or {}).get("mirror") or {}) \
+                    if tk_ else {}
+                if m_.get("x") or m_.get("y"):
+                    lf = CP.mirror_lf(lf, bool(m_.get("x")),
+                                      bool(m_.get("y")))
+            except Exception:  # noqa: BLE001
+                pass
             key = (kind, CP.shape_key(lf))
             count[key] = count.get(key, 0) + 1
             prep.append((kind, name, sid, lid, layer, z, lf, key))
@@ -2532,9 +2924,28 @@ def level_marks(doc) -> dict:
             x = sum(p[0] for p in cs) / len(cs)
             y = sum(p[1] for p in cs) / len(cs)
         e = elev[i]
-        sign = "±" if abs(e) < 0.005 else ("+" if e > 0 else "-")
-        out[lid] = [(x, y, f"FFL {sign}{len_txt(abs(e))}")]
+        out[lid] = [(x, y, ffl_text(e))]
     return out
+
+
+def ffl_text(e: float) -> str:
+    """«+4'-0" F.F.L.» / «±0'-0" F.F.L.» / «-10'-6" F.F.L.»"""
+    from .host import len_txt
+    sign = "±" if abs(e) < 0.005 else ("+" if e > 0 else "-")
+    return f"{sign}{len_txt(abs(e))} F.F.L."
+
+
+def apply_ground_ffl(doc) -> None:
+    """The ground floor's finished level above the natural ground (the
+    road / N.G.L. at 0), as the project needs it — 1'-0" to 4'-0": the
+    ground floor stands there (the floors above and the basements follow)
+    and the plot's ground is 0. 0 = as the CAD's level note set it."""
+    v = float(doc["settings"].get("ground_ffl", 0.0) or 0.0)
+    if v <= 0.0:
+        return
+    proj = doc["arch"].setdefault("project", {})
+    proj["ground_level"] = round(v, 4)
+    doc["settings"]["plinth"] = round(v, 4)
 
 
 
@@ -2574,6 +2985,23 @@ def room_record(doc, rid):
            "name": room["name"]}
     arch["rooms"].append(rec)
     return rec
+
+
+def room_size(doc, rec):
+    """(width, length) of a room — its smallest bounding rectangle — or
+    None when the room is not found."""
+    from shapely.geometry import Point
+    if not rec:
+        return None
+    for room in spaces.of_level(doc["arch"], rec["level"]):
+        if (room.get("rec") or {}).get("id") == rec["id"] or \
+                room["poly"].buffer(0.01).contains(Point(rec["x"], rec["y"])):
+            r = room["poly"].minimum_rotated_rectangle
+            pts = list(r.exterior.coords)[:4]
+            a = math.dist(pts[0], pts[1])
+            b = math.dist(pts[1], pts[2])
+            return (min(a, b), max(a, b))
+    return None
 
 
 def room_finish(doc, rec) -> float:
@@ -2705,7 +3133,43 @@ def _finish_groups(doc):
             key = CP.shape_key(lf)
             count[key] = count.get(key, 0) + 1
             prep.append((lv, lid, room, f, z, lf, key))
+    edge = []          # the finish carried out to the slab's edge
+    if st.get("finish_to_edge", True):
+        from . import slabedges as SE
+        for i, lv in enumerate(arch["levels"]):
+            lid = lv["id"]
+            if lid in (doc.get("parking") or {}) or \
+                    not any(w["level"] == lid for w in arch["walls"]):
+                continue
+            try:
+                rooms_ = spaces.of_level(arch, lid)
+                for k_, p_ in enumerate(SE.edge_finish_polys(doc, lid,
+                                                             rooms_), 1):
+                    f = float(st.get("finish_t", 0.0508))
+                    c_ = p_.representative_point()
+                    z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y))
+                    piece = {"outer": S._ccw([tuple(q) for q in
+                                              list(p_.exterior.coords)[:-1]]),
+                             "holes": [list(reversed(S._ccw(
+                                 [tuple(q) for q in list(h.coords)[:-1]])))
+                                 for h in p_.interiors]}
+                    faces = W.solid(piece, z, z + f)
+                    if faces:
+                        edge.append((lv, lid, k_, faces))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project edge finish")
     protos, out = {}, []
+    for lv, lid, k_, faces in edge:
+        g = Group(_mesh_of([f_ if isinstance(f_, dict) else
+                            {"loop": f_, "holes": []} for f_ in faces]),
+                  name=f"Floor finish · slab edge {k_} · {lv['name']}")
+        g.component = False
+        g.material = {"color": COLOR["room"], "opacity": 1.0}
+        g.layer = level_layer(lv["name"])
+        g.ext = {KEY: {"type": "finish_edge", "id": f"edge-{lid}-{k_}",
+                       "level": lid}}
+        out.append(g)
     for lv, lid, room, f, z, lf, key in prep:
         if key not in protos:
             mesh = Mesh()
@@ -2726,6 +3190,61 @@ def _finish_groups(doc):
                        **({"ctype": tk[1], "mark": t["mark"]} if t else {})}}
         out.append(g)
     return out, []
+
+_BIKE_MESH = []
+
+
+def _bike_groups(doc, lid, pk, z, lname):
+    """A level's motorbike parking: its bay lines painted, a motorbike in
+    every space (one shared mesh), M1, M2… and the count —
+    (groups, labels, plan lines)."""
+    from PySide6.QtGui import QMatrix4x4, QVector3D
+
+    from core.group import Group
+    from core.textlabel import TextLabel
+
+    from . import parking as PK
+    st = doc["settings"]
+    out, labels = [], []
+    bl = pk.get("bikelines") or []
+    lines = [(tuple(a), tuple(b)) for a, b in bl]
+    faces = PK.paint_union(bl, z + 0.004) if bl else []
+    if faces:
+        g = Group(_mesh_of(faces), name=f"Motorbike parking · {lname}")
+        g.component = False
+        g.material = {"color": (0.95, 0.95, 0.9), "opacity": 1.0}
+        g.layer = level_layer(lname)
+        g.ext = {KEY: {"type": "parking", "id": f"bikepark-{lid}",
+                       "level": lid}}
+        out.append(g)
+    bs = pk.get("bike_stalls") or []
+    if bs and st.get("cars_lib", True):
+        if not _BIKE_MESH:
+            _BIKE_MESH.append(_mesh_of(PK.bike_faces(0.0)))
+        for k, sl in enumerate(bs):
+            g = Group(_BIKE_MESH[0], name=f"Motorbike M{k + 1}")
+            m = QMatrix4x4()
+            m.translate(float(sl["c"][0]), float(sl["c"][1]), z)
+            m.rotate(float(sl.get("ang", 0.0)), 0.0, 0.0, 1.0)
+            g.xform = m
+            g.component = True
+            g.layer = level_layer(lname)
+            g.ext = {KEY: {"type": "bike", "id": f"bike-{lid}-{k + 1}",
+                           "level": lid}}
+            out.append(g)
+    if bs and st.get("park_nums", True):
+        for k, sl in enumerate(bs):
+            labels.append(TextLabel(
+                QVector3D(sl["c"][0], sl["c"][1], z + 0.02),
+                QVector3D(0, 0, 0), f"M{k + 1}", layer=text_layer(lname)))
+        xs = [sl["c"][0] for sl in bs]
+        ys = [sl["c"][1] for sl in bs]
+        labels.append(TextLabel(
+            QVector3D((min(xs) + max(xs)) / 2, min(ys) - 1.5, z + 0.02),
+            QVector3D(0, 0, 0), f"MOTORBIKE PARKING: {len(bs)} BIKES",
+            layer=text_layer(lname)))
+    return out, labels, lines
+
 
 def _parking_groups(doc):
     """Parking (paint + cars), each ramp (a sloped RC slab) and their plan
@@ -2792,6 +3311,15 @@ def _parking_groups(doc):
                           z + 0.02), QVector3D(0, 0, 0),
                 f"CAR PARKING: {len(stalls)} CARS",
                 layer=text_layer(names[lid])))
+        try:
+            out_b, lab_b, lines_b = _bike_groups(doc, lid, pk, z,
+                                                 names[lid])
+            out += out_b
+            labels += lab_b
+            plan.setdefault(lid, []).extend(lines_b)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.bikes")
     # landscape areas, in green
     from . import landscape as LS
     g_i = next((i for i, lv in enumerate(arch["levels"])
@@ -3080,6 +3608,232 @@ def plot_from_loop(drawing_placed, P) -> list | None:
     return max(cands, key=_poly_area) if cands else None
 
 
+def _furniture_pose(f, pr, z):
+    """The placement of a furniture model: its footprint's middle on
+    (x, y), standing on z, turned ``rot`` degrees."""
+    from PySide6.QtGui import QMatrix4x4
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    m = QMatrix4x4()
+    m.translate(float(f["x"]), float(f["y"]), z)
+    if abs(float(f.get("rot", 0.0) or 0.0)) > 1e-9:
+        m.rotate(float(f["rot"]), 0.0, 0.0, 1.0)
+    m.translate(-(x0 + x1) / 2, -(y0 + y1) / 2, -z0)
+    return m
+
+
+def _furniture_groups(doc):
+    """The furniture placed in rooms: IngeTrazo library models, one
+    component each (the same model shares its mesh)."""
+    from core.group import Group
+
+    from . import library as LB
+    arch = doc["arch"]
+    elev = elevations(arch)
+    z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
+    names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    out = []
+    for f in doc.get("furniture") or []:
+        if f["level"] not in z_of:
+            continue
+        pr = LB.proto(f["key"], f.get("entry"))
+        if pr is None:
+            continue
+        rec = next((r for r in arch["rooms"] if r["id"] == f.get("room")),
+                   None)
+        z = z_of[f["level"]] + (room_finish(doc, rec)
+                                if doc["settings"].get("finish_on", True)
+                                else 0.0)
+        base = _furniture_pose(f, pr, z)
+        nm = f"{f.get('name', 'Furniture')} · {names[f['level']]}"
+        if len(pr["parts"]) == 1:
+            mesh, xf = pr["parts"][0]
+            g = Group(mesh, name=nm)
+            g.xform = base * xf if xf is not None else base
+        else:                          # a model in parts: ONE object
+            from PySide6.QtGui import QMatrix4x4
+            from core.mesh import Mesh
+            kids = []
+            for mesh, xf in pr["parts"]:
+                k = Group(mesh, name=nm)
+                k.xform = QMatrix4x4(xf) if xf is not None else QMatrix4x4()
+                kids.append(k)
+            g = Group(Mesh(), name=nm)
+            g.adopt(kids)
+            g.xform = base
+        g.component = True
+        g.layer = level_layer(names[f["level"]])
+        g.ifc = {"class": "IfcFurniture", "name": f.get("name", "")}
+        g.ext = {KEY: {"type": "furniture", "id": f["id"],
+                       "level": f["level"],
+                       "at": [float(f["x"]), float(f["y"]),
+                              float(f.get("rot", 0.0) or 0.0)]}}
+        out.append(g)
+    return out
+
+
+def moved_furniture(scene, doc) -> int:
+    """Furniture moved / turned with IngeTrazo's tools: its record follows
+    (no rebuild). How many changed."""
+    import math as _m
+    recs = {f["id"]: f for f in doc.get("furniture") or []}
+    n = 0
+    for g in getattr(scene, "groups", []):
+        t = tag_of(g)
+        if not t or t.get("type") != "furniture" or g.xform is None:
+            continue
+        f = recs.get(t["id"])
+        if f is None:
+            continue
+        m = g.xform
+        from . import library as LB0
+        pr0 = LB0.proto(f["key"], f.get("entry"))
+        if pr0 is not None and len(pr0["parts"]) == 1 and \
+                pr0["parts"][0][1] is not None:
+            inv, ok = pr0["parts"][0][1].inverted()
+            if ok:
+                m = m * inv
+        # where the model's local origin went, and the turn of its x axis
+        c = m.map(__import__("PySide6.QtGui", fromlist=["QVector3D"])
+                  .QVector3D(0, 0, 0))
+        ax = m.mapVector(__import__("PySide6.QtGui", fromlist=["QVector3D"])
+                         .QVector3D(1, 0, 0))
+        rot = _m.degrees(_m.atan2(ax.y(), ax.x()))
+        at = t.get("at") or [f["x"], f["y"], f.get("rot", 0.0)]
+        from . import library as LB
+        pr = LB.proto(f["key"], f.get("entry"))
+        if pr is None:
+            continue
+        x0, y0, _z0, x1, y1, _z1 = pr["box"]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        r = _m.radians(rot)
+        # the footprint's middle, back from the origin's place
+        nx = c.x() + cx * _m.cos(r) - cy * _m.sin(r)
+        ny = c.y() + cx * _m.sin(r) + cy * _m.cos(r)
+        if abs(nx - at[0]) > 1e-3 or abs(ny - at[1]) > 1e-3 or \
+                abs(((rot - at[2] + 180) % 360) - 180) > 0.05:
+            f["x"], f["y"], f["rot"] = round(nx, 4), round(ny, 4), \
+                round(rot, 3)
+            t["at"] = [f["x"], f["y"], f["rot"]]
+            n += 1
+    return n
+
+
+def _ceiling_groups(doc):
+    """The false ceilings: one group per room (plan views cut under them),
+    on the level's layer, IfcCovering."""
+    from PySide6.QtGui import QVector3D
+
+    from core.group import Group
+    from core.mesh import Mesh
+
+    from . import ceilings as CE
+    if not doc.get("ceilings"):
+        return []
+    arch = doc["arch"]
+    elev = elevations(arch)
+    z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
+    names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    out = []
+    for lid, rname, kind, h, parts in CE.build(doc, z_of, room_key):
+        mesh = Mesh()
+        for fs, col in parts:
+            for f in fs:
+                if not isinstance(f, dict):
+                    f = {"loop": f, "holes": []}
+                face = mesh.add_face([QVector3D(*q) for q in f["loop"]],
+                                     [[QVector3D(*q) for q in hh]
+                                      for hh in f.get("holes") or []])
+                if face is not None:
+                    face.attrs["color"] = tuple(col[:3])
+        if not mesh.faces:
+            continue
+        _soften(mesh)
+        nm = f"False ceiling · {CE.label(kind)} · {rname} · {names[lid]}"
+        g = Group(mesh, name=nm)
+        g.component = False
+        g.material = {"color": (0.95, 0.95, 0.94), "opacity": 1.0}
+        g.layer = level_layer(names[lid])
+        g.ifc = {"class": "IfcCovering", "name": nm}
+        g.ext = {KEY: {"type": "ceiling", "id": f"{lid}|{rname}",
+                       "level": lid}}
+        out.append(g)
+    return out
+
+
+def _edge_groups(doc):
+    """Sun shades over the outer windows (the floors that have them) and
+    granite thresholds in the door openings, one group a level each."""
+    from core.group import Group
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    st = doc["settings"]
+    elev = elevations(arch)
+    out = []
+    for i, lv in enumerate(arch["levels"]):
+        lid = lv["id"]
+        z0 = elev[i] + open_offset(doc, lid)
+        parts = []
+        try:
+            fs = SE.sunshade_faces(doc, lid, elev[i])
+            if fs:
+                parts.append(("sunshade", "Sun shades (chajja)", fs,
+                              (0.80, 0.80, 0.78), "IfcShadingDevice"))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project sunshades")
+        if st.get("thresholds", True) and st.get("finish_on", True):
+            try:
+                fs = SE.threshold_faces(doc, lid, z0,
+                                        float(st.get("finish_t", 0.0508)))
+                if fs:
+                    parts.append(("threshold", "Granite thresholds", fs,
+                                  (0.20, 0.20, 0.22), "IfcCovering"))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project thresholds")
+        for kind, label, fs, col, cls in parts:
+            nm = f"{label} · {lv['name']}"
+            g = Group(_mesh_of(fs), name=nm)
+            g.component = False
+            g.material = {"color": col, "opacity": 1.0}
+            g.layer = level_layer(lv["name"])
+            g.ifc = {"class": cls, "name": nm}
+            g.ext = {KEY: {"type": kind, "id": f"{kind}-{lid}",
+                           "level": lid}}
+            out.append(g)
+    return out
+
+
+def _shoring_groups(doc):
+    """The shoring along the plot limits (a basement dig): one group per
+    plot side, on the lowest basement's layer."""
+    from core.group import Group
+
+    from . import shoring as SH
+    arch = doc["arch"]
+    sides = SH.build(doc, elevations(arch))
+    names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    kind = doc["settings"].get("shoring_type", "piles")
+    out = []
+    for k, L, fs, lid in sides:
+        if not fs:
+            continue
+        mesh = _mesh_of(fs)
+        _soften(mesh)
+        nm = f"Shoring · {SH.LABELS.get(kind, kind)} · side {k} ({L:.1f} m)"
+        g = Group(mesh, name=nm)
+        g.component = False
+        g.material = {"color": (0.62, 0.62, 0.60), "opacity": 1.0}
+        g.layer = level_layer(names[lid])
+        g.ifc = {"class": "IfcPile" if kind != "sheet" else "IfcWall",
+                 "name": nm}
+        g.ext = {KEY: {"type": "shoring", "id": f"shoring-{k}",
+                       "level": lid}}
+        out.append(g)
+    return out
+
+
 def _dig_groups(doc):
     """The excavations and fills (ArchXQ's terrain): each its own group on
     the terrain layer, named with its depth and volume."""
@@ -3358,7 +4112,13 @@ def commit(viewport, doc, opts=None) -> None:
     opts = opts or {}
     arch = doc["arch"]
     arch["levels"] = M.fix_levels(arch["levels"])
+    apply_ground_ffl(doc)
     apply_slab_pos(doc)
+    try:
+        apply_man_shafts(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.apply_man_shafts")
     try:
         sync_room_floors(doc)
     except Exception:  # noqa: BLE001
@@ -3374,6 +4134,26 @@ def commit(viewport, doc, opts=None) -> None:
         new_groups += _plot_groups(doc)
         new_groups += _site_groups(doc)
         new_groups += _dig_groups(doc)
+    except Exception:  # noqa: BLE001 — the plot never blocks the building
+        from .host import log_error
+        log_error("project._plot_groups")
+    try:
+        new_groups += _furniture_groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._furniture_groups")
+    try:
+        new_groups += _edge_groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._edge_groups")
+    try:
+        new_groups += _shoring_groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._shoring_groups")
+    try:
+        new_groups += _ceiling_groups(doc)
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")

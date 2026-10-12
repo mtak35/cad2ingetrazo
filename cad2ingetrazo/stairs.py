@@ -97,21 +97,63 @@ def _area(pts):
 
 
 # ---- how --------------------------------------------------------------------------------
-def design(corners, H, flip=False) -> dict:
-    """Risers, going and kind for a well and a storey height H."""
+def n_risers(H, riser=RISER) -> int:
+    """The number of risers for a storey H with risers no higher than
+    ``riser`` (7" by default)."""
+    return max(int(math.ceil(H / max(float(riser), 0.10) - 1e-6)), 2)
+
+
+def design(corners, H, flip=False, riser=RISER, going=None,
+           n=None) -> dict:
+    """Risers, going and kind for a well and a storey height H: risers no
+    higher than ``riser``, treads ``going`` deep (11" by default) unless the
+    well is too short for them (then as deep as it allows); ``n`` risers
+    when given."""
     _c, _u, w, L = rect_of(corners)
-    n = max(int(math.ceil(H / (RISER + 0.005))), 2)
+    n = int(n) if n else n_risers(H, riser)
     rise = H / n
-    straight_run = (n - 1) * GOING_MIN
+    want = float(going) if going else None
+    straight_run = (n - 1) * (want or GOING_MIN)
     if L >= straight_run + 0.9 or w < 1.6:
-        g = min(GOING_MAX, max((L - 0.9) / (n - 1), 0.15))
+        g = (L - 0.9) / (n - 1)
+        g = min(want, g) if want else min(GOING_MAX, g)
         return {"kind": "straight", "risers": n, "rise": round(rise, 4),
-                "going": round(g, 4), "flip": flip}
+                "going": round(max(g, 0.15), 4), "flip": flip}
     dl = w / 2                                   # half landing, square
     n1 = int(math.ceil(n / 2))
-    g = min(GOING_MAX, max((L - dl) / max(n1 - 1, 1), 0.15))
+    g = (L - dl) / max(n1 - 1, 1)
+    g = min(want, g) if want else min(GOING_MAX, g)
     return {"kind": "dogleg", "risers": n, "rise": round(rise, 4),
-            "going": round(g, 4), "flip": flip}
+            "going": round(max(g, 0.15), 4), "flip": flip}
+
+
+def redesign(st, new) -> dict:
+    """A stair's new riser / tread / number of risers, as typed in its
+    edit dialog: the storey height stays; a new number of risers sets the
+    riser height, a new riser height sets the number (risers no higher);
+    a designed stair re-lays its flights with the new tread in its well. A
+    traced stair (drawn in the CAD) keeps its tread lines."""
+    H = float(st.get("rise", 0.175)) * int(st.get("risers", 18))
+    out = dict(new)
+    n0, n1 = int(st.get("risers", 0)), int(new.get("risers", 0) or 0)
+    r0, r1 = float(st.get("rise", 0)), float(new.get("rise", 0) or 0)
+    if n1 and n1 != n0:
+        n = n1
+    elif r1 and abs(r1 - r0) > 1e-4:
+        n = n_risers(H, r1)
+    else:
+        n = n0
+    n = max(n, 2)
+    out["risers"] = n
+    out["rise"] = round(H / n, 4)
+    if not st.get("traced") and st.get("corners"):
+        d = design(st["corners"], H, st.get("flip", False),
+                   going=float(new.get("going") or st.get("going", 0.2794)),
+                   n=n)
+        out.update(kind=d["kind"], going=d["going"])
+    else:
+        out["going"] = st.get("going")
+    return out
 
 
 def steps(st, z0) -> list:
@@ -169,6 +211,7 @@ def auto(doc, cad=None, flip=False) -> dict:
     from .engine import spaces
     from .engine import structure as S
     arch = doc["arch"]
+    stt0 = doc.get("settings") or {}
     _uncut(doc)
     # what each stair set for itself survives a re-make (by where it is)
     kept = {}
@@ -199,7 +242,7 @@ def auto(doc, cad=None, flip=False) -> dict:
             H = float(lv.get("height") or 3.0)
         else:
             H = info[up["id"]]["z0"] - info[lv["id"]]["z0"]
-        n_need = max(int(math.ceil(H / (RISER + 0.005))), 2)
+        n_need = n_risers(H, float(stt0.get("stair_riser", 0.1778)))
         recs = []
         try:
             chains = PJ.stair_trace(doc, lv["id"])
@@ -229,7 +272,11 @@ def auto(doc, cad=None, flip=False) -> dict:
             wells = list(cad.get(lv["id"]) or []) or \
                 from_rooms(arch, lv["id"])
             for corners in wells:
-                recs.append(dict(design(corners, H, flip), corners=corners))
+                recs.append(dict(design(
+                    corners, H, flip,
+                    float(stt0.get("stair_riser", 0.1778)),
+                    float(stt0.get("stair_going", 0.2794))),
+                    corners=corners))
         if not recs and carried:                  # the floor below's stair
             recs = [dict(r) for r in carried]
             for r in recs:
@@ -1132,6 +1179,12 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
     both = sides == "both" or (nfl == 1 and sides not in ("outer",)
                                and not st.get("rail_sides"))
     out = []
+    if both and nfl > 1:
+        # both sides of a stair with landings: the well side joined across
+        # each landing, and the wall side turning round the landings — the
+        # landing's open edges railed too
+        return railing(st, runs, kind, h, "inner", gap, ext, inset) + \
+            railing(st, runs, kind, h, "outer", gap, ext, inset)
     if both:
         for i in range(nfl):
             for r in (r for r in runs if r[0] == i):

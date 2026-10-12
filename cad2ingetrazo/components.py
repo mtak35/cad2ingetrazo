@@ -81,14 +81,22 @@ def type_of(kind: str, rec: dict, walls: dict | None = None):
                 else (", single" if st in S.HINGED_TYPES else "")
             label = f"{DOOR_NAMES.get(st, st.title() + ' door')}{two}{hd}" \
                     f" · {size} · {S.FRAMES[fr][0].split(' (')[0]} frame"
-            return "door", f"door|{st}|{lv}|{head}|{fr}|{w}|{h}", label
+            gl = rec.get("glass") or "clear"
+            if gl != "clear":
+                label += f" · {dict((k, l) for k, l, _c in S.GLASS_TYPES).get(gl, gl)}"
+            return "door", f"door|{st}|{lv}|{head}|{fr}|{w}|{h}" + \
+                (f"|{gl}" if gl != "clear" else ""), label
         if k == "window":
             st = rec.get("style") or "sliding"
             fr = S.frame_of(rec)
             sill = _mm(rec.get("sill"))
             label = f"{WINDOW_NAMES.get(st, st.title() + ' window')}{hd}" \
                     f" · {size} · sill {_len(rec.get('sill', 0))}"
-            return "window", f"window|{st}|{head}|{fr}|{w}|{h}|{sill}", label
+            gl = rec.get("glass") or "clear"
+            if gl != "clear":
+                label += f" · {dict((k, l) for k, l, _c in S.GLASS_TYPES).get(gl, gl)}"
+            return "window", f"window|{st}|{head}|{fr}|{w}|{h}|{sill}" + \
+                (f"|{gl}" if gl != "clear" else ""), label
         return "void", f"void|{w}|{h}|{_mm(rec.get('sill'))}", \
             f"Opening · {size}"
     if kind == "wall" and rec.get("rail"):
@@ -100,8 +108,12 @@ def type_of(kind: str, rec: dict, walls: dict | None = None):
     if kind == "wall":
         t = _mm(rec.get("t"))
         if rec.get("type") == "curtain":
-            return "curtain", f"curtain|{t}", \
-                f"Curtain wall · {_len(rec['t'])}"
+            gl = rec.get("glass") or "clear"
+            gtxt = "" if gl == "clear" else " · " + \
+                dict((k, l) for k, l, _c in S.GLASS_TYPES).get(gl, gl)
+            return "curtain", f"curtain|{t}" + (f"|{gl}" if gl != "clear"
+                                               else ""), \
+                f"Curtain wall · {_len(rec['t'])}{gtxt}"
         nm = str(rec.get("name", ""))
         what = "Parapet" if nm.startswith("Terrace") else "Wall"
         return "wall", f"wall|{what}|{t}", f"{what} {_len(rec['t'])}"
@@ -204,7 +216,8 @@ def sync(doc, found: dict) -> dict:
     for k, (g, lab) in found.items():
         v = names[k]
         out[k] = {"mark": v["mark"], "name": v.get("name") or lab,
-                  "label": lab, "group": g, "lib": v.get("lib")}
+                  "label": lab, "group": g, "lib": v.get("lib"),
+                  "mirror": v.get("mirror")}
     return out
 
 
@@ -312,6 +325,32 @@ def local_faces(faces, fr):
                         else None))
         else:
             out.append(([L(q) for q in f], [], None))
+    return out
+
+
+def mirror_lf(lf, mx=False, my=False):
+    """Local faces mirrored about their box's middle: ``mx`` flips left ↔
+    right (x), ``my`` front ↔ back (y). One flip turns every face inside
+    out, so its loop is reversed to keep it facing out."""
+    if not (mx or my) or not lf:
+        return lf
+    xs = [q[0] for lp, _h, _c in lf for q in lp]
+    ys = [q[1] for lp, _h, _c in lf for q in lp]
+    cx = (min(xs) + max(xs)) / 2
+    cy = (min(ys) + max(ys)) / 2
+
+    def M(q):
+        return (2 * cx - q[0] if mx else q[0], 2 * cy - q[1] if my else q[1],
+                q[2])
+    rev = bool(mx) != bool(my)
+    out = []
+    for lp, hs, col in lf:
+        lp2 = [M(q) for q in lp]
+        hs2 = [[M(q) for q in h] for h in hs]
+        if rev:
+            lp2 = lp2[::-1]
+            hs2 = [h[::-1] for h in hs2]
+        out.append((lp2, hs2, col))
     return out
 
 

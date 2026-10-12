@@ -15,7 +15,7 @@ import re
 
 ROLES = ("walls", "doors", "windows", "columns", "beams", "slab", "holes",
          "text", "plot", "footings", "stairs", "grid", "lift", "parking",
-         "cars", "ramps")
+         "cars", "ramps", "bikes", "rails")
 
 _W = r"(^|[^A-Z])"            # a word's start: not inside another word
 KEYS = {
@@ -47,6 +47,10 @@ KEYS = {
     "parking": [r"PARK", r"PRKG", r"ESTACION", r"STALL", r"\bBAY"],
     "cars": [r"(^|[^A-Z])CARS?($|[^A-Z])", r"VEHIC", r"AUTOMOB"],
     "ramps": [r"RAMP", r"RAMPA"],
+    "bikes": [r"MOTOR\s?-?\s?(BIKE|CYCLE)", r"M\.?\s?CYCLE", r"BIKE",
+              r"SCOOTER", r"2\s?-?\s?WHEEL", r"TWO\s?WHEEL"],
+    "rails": [r"RAIL", r"(^|[^A-Z])RALL", r"GRILL", r"BALUSTR",
+              r"BARANDA", r"GUARD\s?RAIL"],
     "footings": [r"FOOT", r"FOUND", r"FNDN", r"ZAPATA", r"SAPATA",
                  r"S-FNDN", r"S-FOOT", r"PILE", r"RAFT", r"PAD"],
 }
@@ -82,6 +86,11 @@ def by_name(name: str) -> list:
         out = [k for k in out if k not in ("footings", "slab", "walls")]
         if "columns" not in out:
             out.append("columns")
+    # a motorbike layer is not a car's; a railing is not a wall
+    if "bikes" in out and "cars" in out:
+        out.remove("cars")
+    if "rails" in out and "walls" in out:
+        out.remove("walls")
     # the boundary wall is the plot's, not the building's
     if any(w in n for w in ("BOUNDARY", "COMPOUND", "OTHER PROP")) and \
             "walls" in out:

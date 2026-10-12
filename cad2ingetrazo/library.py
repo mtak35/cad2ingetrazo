@@ -6,7 +6,10 @@ the library model instead, fitted to the element's own box (stretched to
 it, or scaled evenly to fit inside it), turned as asked.
 
 The choice lives on the type: ``doc["comp_names"][type key]["lib"] =
-{"key": "doors/door_single", "fit": "stretch" | "keep", "rot": 0|90|180|270}``
+{"key": "suv" | "online:<id>", "fit": "stretch" | "keep" | "native",
+"rot": 0|90|180|270, "name", "entry": the online catalogue's record}`` —
+the bundled models and IngeTrazo's whole online catalogue («More
+components…», doors, windows, kitchen, bathroom, furniture…).
 — the CAD2IngeTrazo element stays the record (its wall opening, its
 dimensions, its schedule); only what is drawn changes.
 """
@@ -35,8 +38,22 @@ def label_of(key: str) -> str:
         " ".join(w.capitalize() for w in words)
 
 
-def list_all() -> list:
-    """[(key, label)] of every library component, by folder and name."""
+#: The online catalogue's categories (they arrive in Spanish) in English —
+#: as IngeTrazo's own library dialog says them.
+CATEGORY_EN = {
+    "Cocina": "Kitchen", "Cuarto de Baño": "Bathroom",
+    "Dormitorio": "Bedroom", "Escaleras": "Staircases",
+    "Exterior": "Exterior", "Iluminación": "Lights", "Oficina": "Office",
+    "Personajes": "People", "Puertas y Ventanas": "Doors and windows",
+    "Salón": "Living room", "Varios": "Miscellaneous",
+    "Vehículos": "Vehicles"}
+BUNDLED = "Bundled with IngeTrazo"
+
+
+def bundled() -> list:
+    """The models that ship in ``resources/components`` (the tray's grid):
+    [{"key", "name", "tip", "cat", "src": "igz"}]."""
+    out = []
     try:
         root = folder()
         if not root.exists():
@@ -50,53 +67,168 @@ def list_all() -> list:
                                         str(e.get("tip") or ""))
         except Exception:  # noqa: BLE001
             pass
-        out = []
         for p in sorted(root.rglob("*.igz")):
             key = p.relative_to(root).with_suffix("").as_posix()
             nm, tip = names.get(key, (label_of(key), ""))
-            out.append((key, f"{nm} — {tip}" if tip else nm))
-        out.sort(key=lambda kv: kv[1].lower())
-        return out
+            out.append({"key": key, "name": nm, "tip": tip, "cat": BUNDLED,
+                        "src": "igz"})
     except Exception:  # noqa: BLE001
         from .host import log_error
-        log_error("library.list_all")
+        log_error("library.bundled")
+    return out
+
+
+def online(refresh: bool = False) -> list:
+    """The whole online catalogue — IngeTrazo's «More components…»
+    (``core.library``: ~1500 models, cached after the first read):
+    [{"key": "online:<id>", "name", "tip", "cat", "src": "online",
+    "entry": the catalogue's own record}]."""
+    try:
+        from core import library as CL
+    except Exception:  # noqa: BLE001 — an IngeTrazo without the library
         return []
+    out = []
+    try:
+        for e in CL.index(refresh):
+            ident = str(e.get("id") or "")
+            if not ident:
+                continue
+            nm = e.get("nombre_en") or e.get("nombre") or ident
+            cat = CATEGORY_EN.get(e.get("categoria", ""),
+                                  e.get("categoria", "") or "Miscellaneous")
+            cm = e.get("cm") or ()
+            tip = ""
+            try:
+                tip = " × ".join(f"{float(v) / 100:.2f}" for v in cm) + " m"
+            except (TypeError, ValueError):
+                pass
+            if e.get("licencia_nombre") or e.get("licencia"):
+                tip += f" · {e.get('licencia_nombre') or e.get('licencia')}"
+            out.append({"key": f"online:{ident}", "name": str(nm),
+                        "tip": tip, "cat": cat, "src": "online",
+                        "entry": e})
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("library.online")
+    return out
 
 
-def proto(key: str):
+def list_entries(refresh: bool = False) -> list:
+    """Everything that can stand in for a component type: the bundled
+    models, then the online catalogue, sorted by category and name."""
+    on = online(refresh)
+    on.sort(key=lambda e: (e["cat"].lower(), e["name"].lower()))
+    return bundled() + on
+
+
+def list_all() -> list:
+    """[(key, label)] — kept for older callers."""
+    return [(e["key"], f"{e['cat']} · {e['name']}") for e in list_entries()]
+
+
+def thumbnail(entry: dict):
+    """A preview image path for an entry when there is one on disk (never
+    blocks: online previews are fetched by :func:`prefetch`)."""
+    try:
+        if entry.get("src") == "igz":
+            p = folder() / "thumbs" / f"{entry['key']}.png"
+            return p if p.is_file() else None
+        from core import library as CL
+        return CL.cached_thumbnail(entry["entry"].get("id", ""))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def prefetch(entries) -> None:
+    """Fetch the online previews of ``entries`` in the background."""
+    try:
+        from core import library as CL
+        CL.prefetch_thumbnails([e["entry"].get("id") for e in entries
+                                if e.get("src") == "online"])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _collect(scene):
+    """[(mesh, QMatrix4x4 | None)] of every piece in ``scene`` — its loose
+    geometry, each group, and the groups inside groups (a model written as
+    parts), each with its placement."""
+    from PySide6.QtGui import QMatrix4x4
+    parts = []
+    m0 = getattr(scene, "mesh", None)
+    if m0 is not None and getattr(m0, "faces", None):
+        parts.append((m0, None))
+
+    def walk(g, parent):
+        xf = getattr(g, "xform", None)
+        here = parent
+        if xf is not None:
+            here = (parent * xf) if parent is not None else QMatrix4x4(xf)
+        m = getattr(g, "mesh", None)
+        if m is not None and getattr(m, "faces", None):
+            parts.append((m, here))
+        for kid in getattr(g, "children", None) or []:
+            walk(kid, here)
+    for g in getattr(scene, "groups", []) or []:
+        walk(g, None)
+    return parts
+
+
+def _boxed(parts):
+    lo, hi = [1e18] * 3, [-1e18] * 3
+    for m, xf in parts:
+        for v in m.vertices:
+            p = v.position
+            if xf is not None:
+                p = xf.map(p)
+            for i, c in enumerate((p.x(), p.y(), p.z())):
+                lo[i] = min(lo[i], c)
+                hi[i] = max(hi[i], c)
+    if not parts or hi[0] <= lo[0]:
+        return None
+    return {"parts": parts, "box": (*lo, *hi)}
+
+
+def proto(key: str, entry: dict | None = None):
     """{"parts": [(mesh, QMatrix4x4 | None)], "box": (x0, y0, z0, x1, y1,
-    z1)} of a library component, or None (missing / unreadable)."""
+    z1)} of a library model, or None (missing / unreadable / offline).
+    ``online:<id>`` keys are downloaded once (IngeTrazo's own cache) and
+    sized as the catalogue declares them."""
     if key in _PROTO:
         return _PROTO[key]
     rec = None
     try:
         from core.scene import Scene
-        from formats import igz
-        path = folder() / f"{key}.igz"
-        if path.exists():
-            tmp = Scene()
-            igz.load_into(tmp, path)
-            parts, lo, hi = [], [1e18] * 3, [-1e18] * 3
-            for g in tmp.groups:
-                m = getattr(g, "mesh", None)
-                if m is None:
-                    continue
-                xf = getattr(g, "xform", None)
-                for v in m.vertices:
-                    p = v.position
-                    if xf is not None:
-                        p = xf.map(p)
-                    for i, c in enumerate((p.x(), p.y(), p.z())):
-                        lo[i] = min(lo[i], c)
-                        hi[i] = max(hi[i], c)
-                parts.append((m, xf))
-            if parts and hi[0] > lo[0]:
-                rec = {"parts": parts, "box": (*lo, *hi)}
+        tmp = Scene()
+        if key.startswith("online:"):
+            from core import library as CL
+            from formats import obj as OBJ
+            if entry is None:
+                ident = key.split(":", 1)[1]
+                entry = next((e for e in CL.index()
+                              if str(e.get("id")) == ident), None)
+            path = CL.model_file(entry) if entry else None
+            if path is not None:
+                OBJ.load_obj(tmp, path, matrix=CL.model_matrix(entry, path))
+                try:
+                    from formats.fuse import soften_smooth_edges
+                    for m, _x in _collect(tmp):
+                        soften_smooth_edges(m, cos_threshold=0.55)
+                except Exception:  # noqa: BLE001
+                    pass
+                rec = _boxed(_collect(tmp))
+        else:
+            from formats import igz
+            path = folder() / f"{key}.igz"
+            if path.exists():
+                igz.load_into(tmp, path)
+                rec = _boxed(_collect(tmp))
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("library.proto")
         rec = None
-    _PROTO[key] = rec
+    if rec is not None:                 # a failed download is tried again
+        _PROTO[key] = rec
     return rec
 
 
@@ -139,7 +271,7 @@ def fit(box, pr, how="stretch", rot=0.0) -> tuple:
     return sx, sy, sz
 
 
-def xforms(fr, lf, pr, how="stretch", rot=0.0) -> list:
+def xforms(fr, lf, pr, how="stretch", rot=0.0, mirror=(False, False)) -> list:
     """The QMatrix4x4 of each part of ``pr`` placed on the element (its
     frame ``fr``, its local faces ``lf``)."""
     from PySide6.QtGui import QMatrix4x4
@@ -152,7 +284,8 @@ def xforms(fr, lf, pr, how="stretch", rot=0.0) -> list:
     if abs(fr[3]) > 1e-9:
         m.rotate(fr[3], 0.0, 0.0, 1.0)
     m.translate((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, box[2])
-    m.scale(sx, sy, sz)
+    m.scale(sx * (-1 if mirror[0] else 1), sy * (-1 if mirror[1] else 1),
+            sz)
     if rot:
         m.rotate(float(rot), 0.0, 0.0, 1.0)
     m.translate(-cx, -cy, -z0)
@@ -162,19 +295,20 @@ def xforms(fr, lf, pr, how="stretch", rot=0.0) -> list:
     return out
 
 
-def groups_for(lib, fr, lf, name, layer, ext, ifc=None) -> list | None:
+def groups_for(lib, fr, lf, name, layer, ext, ifc=None,
+               mirror=(False, False)) -> list | None:
     """The library model's groups for one element (None: no model — the
     element is drawn as it is)."""
     if not lib or not lib.get("key"):
         return None
-    pr = proto(lib["key"])
+    pr = proto(lib["key"], lib.get("entry"))
     if pr is None:
         return None
     from core.group import Group
     out = []
     for (mesh, _xf), xm in zip(pr["parts"], xforms(
             fr, lf, pr, lib.get("fit", "stretch"),
-            float(lib.get("rot", 0.0) or 0.0))):
+            float(lib.get("rot", 0.0) or 0.0), mirror)):
         g = Group(mesh, name=name)
         g.xform = xm
         g.component = True

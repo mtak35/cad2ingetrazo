@@ -43,7 +43,7 @@ DEFAULT_DOC = {
     "done": [],
     "system": "frame",
     "project": None,            # None until the user starts a project
-    "levels": [{"name": "Level 1", "kind": "ground",
+    "levels": [{"name": "Ground Floor", "kind": "ground",
                 "height": DEFAULT_HEIGHT, "id": "lv0"}],
     # what is shown (view state: kept in the file, never an undo step).
     # *_dims: None = the Settings decide; True / False = chosen in the
@@ -246,6 +246,7 @@ def new_dig(digs: list[dict], corners, bottom: dict,
 
 
 WALL_ALIGNS = ("outside", "centre", "inside")
+GLASS_KEYS = ("clear", "double", "lowe", "grey", "bronze", "green", "blue_ref", "silver_ref", "frosted")
 
 
 def _walls(raw, level_ids: set) -> list[dict]:
@@ -288,6 +289,10 @@ def _walls(raw, level_ids: set) -> list[dict]:
             # built as a railing of this type (a parapet, a balcony edge)
             if w.get("rail") and str(w["rail"]) != "solid":
                 rec["rail"] = str(w["rail"])
+            if w.get("glass") in GLASS_KEYS and w.get("glass") != "clear":
+                rec["glass"] = w["glass"]
+            if w.get("rcc"):                 # an RCC (retaining) wall
+                rec["rcc"] = True
         except (TypeError, ValueError, KeyError, IndexError):
             continue
         rec["align"] = w.get("align") if w.get("align") in WALL_ALIGNS \
@@ -350,12 +355,17 @@ def _rooms(raw, level_ids: set) -> list[dict]:
         rec = {"id": rid, "level": str(r["level"]), "x": x, "y": y,
                "name": name}
         # its floor: the finish's thickness, the level sunk (−) / raised
-        for k_, lo, hi in (("finish", 0.0, 0.3), ("fz", -3.0, 3.0)):
+        for k_, lo, hi in (("finish", 0.0, 0.3), ("fz", -3.0, 3.0),
+                           ("ceiling_h", 2.0, 8.0)):
             try:
                 if r.get(k_) is not None:
                     rec[k_] = min(max(float(r[k_]), lo), hi)
             except (TypeError, ValueError):
                 pass
+        # its false ceiling: «level» (the level's), «none», or a type
+        if r.get("ceiling") in ("none", "gypsum", "tiles", "pop", "wood",
+                                "pvc", "metal"):
+            rec["ceiling"] = r["ceiling"]
         out.append(rec)
     return out
 
@@ -557,6 +567,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             oid = uuid.uuid4().hex[:8]
         ids.add(oid)
         rec["id"] = oid
+        if o.get("glass") in GLASS_KEYS and o.get("glass") != "clear":
+            rec["glass"] = o["glass"]
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)
@@ -709,11 +721,19 @@ def fix_levels(levels) -> list[dict]:
 
 #: default names (the prototype's and today's): they are renumbered by
 #: place whenever levels change, so inserting one never gives «Level 2 (2)»
-_OLD_DEFAULT = re.compile(r"Ground floor|Floor \d+|Level \d+|Basement \d+")
+_OLD_DEFAULT = re.compile(r"Ground floor|Floor \d+|Level \d+|Basement \d+|"
+                          r"\d+(?:st|nd|rd|th) floor", re.I)
+
+
+def ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 4th… 11th, 12th, 13th, 21st…"""
+    suf = "th" if 10 <= n % 100 <= 20 else \
+        {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
 
 
 def _name_levels(rows: list[dict]) -> list[dict]:
-    """Default names: Level 1 (the ground floor), Level 2, 3… above,
+    """Default names: Ground Floor, 1st Floor, 2nd Floor… above,
     Basement 1, 2… below. Every level gets a lasting id (its layer
     follows it through renames); an old file's levels get one from their
     place, so reading it twice gives the same ids."""
@@ -734,9 +754,9 @@ def _name_levels(rows: list[dict]) -> list[dict]:
             ids.add(r["id"])
         if not r["name"]:
             if r["kind"] == "ground":
-                r["name"] = "Level 1"
+                r["name"] = "Ground Floor"
             elif r["kind"] == "floor":
-                r["name"] = f"Level {i - g + 1}"
+                r["name"] = f"{ordinal(i - g)} Floor"
             else:
                 r["name"] = f"Basement {g - i}"
         base, n = r["name"], 2

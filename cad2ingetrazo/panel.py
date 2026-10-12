@@ -8,8 +8,9 @@ from __future__ import annotations
 import math
 import os
 
-from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSlider,
+                               QAbstractSpinBox, QApplication, QCheckBox,
                                QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -138,6 +139,9 @@ def _form(parent):
 #: (key, label, kind, options / range)
 FIELDS = {
     "wall": [("type", "Wall type", "choice", ("solid", "curtain")),
+             ("glass", "Curtain wall glass", "choice",
+              ("clear", "double", "lowe", "grey", "bronze", "green",
+               "blue_ref", "silver_ref", "frosted")),
              ("rail", "Build as railing", "choice",
               ("solid", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
                "wood", "wall_rail")),
@@ -166,7 +170,10 @@ FIELDS = {
                 ("leaves", "Leaves (single / double)", "choice", (1, 2)),
                 ("head", "Head", "choice", ("flat", "transom", "arch")),
                 ("frame", "Frame", "choice",
-                 ("auto", "wood", "aluminium", "steel", "upvc"))],
+                 ("auto", "wood", "aluminium", "steel", "upvc")),
+                ("glass", "Glass type", "choice",
+                 ("clear", "double", "lowe", "grey", "bronze", "green",
+                  "blue_ref", "silver_ref", "frosted"))],
     "column": [("shape", "Shape", "choice", ("rect", "round")),
                ("w", "Width / Ø", "len", (0.05, 5.0)),
                ("d", "Depth", "len", (0.05, 5.0)),
@@ -184,7 +191,10 @@ FIELDS = {
              ("offset", "Top offset", "len", (-3.0, 3.0))],
     "footing": [("w", "Width", "len", (0.1, 10.0)),
                 ("d", "Depth", "len", (0.05, 5.0))],
-    "stair": [("stype", "Stair type", "choice",
+    "stair": [("rise", "Riser (max)", "len", (0.10, 0.25)),
+              ("going", "Tread (going)", "len", (0.18, 0.45)),
+              ("risers", "Number of risers (steps)", "int", (2, 80)),
+              ("stype", "Stair type", "choice",
                ("monolithic", "solid", "open", "cantilever")),
               ("rail", "Railing", "choice",
                ("none", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
@@ -211,7 +221,12 @@ FIELDS = {
                   ("rail_ext", "Run-on past the first / last step", "len",
                    (0.0, 1.0))],
     "dig": [("name", "Name", "text", None)],
-    "room": [("name", "Room name", "text", None),
+    "room": [("size", "Size (width × length)", "info", None),
+             ("name", "Room name", "text", None),
+             ("ceiling", "False ceiling", "choice",
+              ("level", "none", "gypsum", "tiles", "pop", "wood", "pvc",
+               "metal")),
+             ("ceiling_h", "Ceiling height from floor", "len", (2.0, 8.0)),
              ("finish", "Floor finish thickness", "len", (0.0, 0.3)),
              ("fz", "Floor sunk (−) / raised (+)", "len", (-3.0, 3.0))],
     "roof": [("kind", "Type", "choice", ("flat", "gable", "hip")),
@@ -226,6 +241,11 @@ def _choice_labels() -> dict:
     """Plain names for the keys a choice field stores."""
     from .engine import railings as RL
     out = dict(RL.TYPES)
+    from .engine import structure as S_
+    out.update({k: lab for k, lab, _c in S_.GLASS_TYPES})
+    from . import ceilings as CE_
+    out.update({t[0]: t[1] for t in CE_.TYPES})
+    out.update({"level": "As the level"})
     out.update({"none": "No railing", "inner": "Inner side (by the well)",
                 "both": "Both sides", "outer": "Outer side (by the wall)",
                 "monolithic": "Monolithic RCC",
@@ -240,6 +260,36 @@ def _choice_labels() -> dict:
 
 
 CHOICE_LABELS = _choice_labels()
+
+
+class _WheelGuard(QObject):
+    """Mouse-wheel turns over a field of the panel that is not being typed
+    into scroll the panel instead of changing the field's value."""
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() != QEvent.Wheel:
+                return False
+            if not isinstance(obj, (QAbstractSpinBox, QComboBox,
+                                    QAbstractSlider)):
+                return False
+            if isinstance(obj, QAbstractSlider) and \
+                    isinstance(obj.parent(), QScrollArea):
+                return False
+            if obj.hasFocus() or not self.panel.isAncestorOf(obj):
+                return False
+            if obj.focusPolicy() == Qt.WheelFocus:
+                obj.setFocusPolicy(Qt.StrongFocus)
+            sc = getattr(self.panel, "_scroll", None)
+            if sc is not None:
+                QApplication.sendEvent(sc.verticalScrollBar(), ev)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
 
 class Panel(QWidget):
@@ -262,6 +312,12 @@ class Panel(QWidget):
         self.lay.setSpacing(6)
         scroll.setWidget(body)
         outer.addWidget(scroll)
+        self._scroll = scroll
+        # the wheel scrolls the panel; it changes a field only when that
+        # field has been clicked into (no value changes by accident while
+        # scrolling past a spin box or a list)
+        self._wheel_guard = _WheelGuard(self)
+        QApplication.instance().installEventFilter(self._wheel_guard)
         self._region = None            # this level's part of the drawing
         self._head()
         self._import_part()
@@ -378,7 +434,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.11</span>")
+                   "3.13.0</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -713,7 +769,9 @@ class Panel(QWidget):
                          ("footings", "Footings"), ("stairs", "Stairs"),
                          ("grid", "Column grid"), ("lift", "Lift core"),
                          ("parking", "Parking bays"), ("cars", "Cars"),
-                         ("ramps", "Car ramps")):
+                         ("bikes", "Motorbike parking"),
+                         ("ramps", "Car ramps"),
+                         ("rails", "Railings (slab edges)")):
             e = QLineEdit()
             lf.addRow(label, e)
             self.i_layers[k] = e
@@ -732,6 +790,18 @@ class Panel(QWidget):
                                  "is its floor level, in the plans and in "
                                  "3D; the storey heights follow")
         f.addRow(self.i_levels)
+        row = QHBoxLayout()
+        self.i_gffl = _spin(0.0, 1.2192, 0.0, 0.0762)   # 0 … 4'-0"
+        self.i_gffl.setSpecialValueText("As the CAD notes it")
+        self.i_gffl.setToolTip(
+            "The ground floor's finished level above the natural ground / "
+            "road (N.G.L. = 0), 1'-0\" to 4'-0\" as the project needs: the "
+            "ground floor, the floors above and the basements follow, and "
+            "the F.F.L. marks read from it. At the bottom of the range: the "
+            "CAD's own level note («LEV. +4'-0\"») decides.")
+        row.addWidget(self.i_gffl, 1)
+        row.addWidget(_btn("Apply", self._apply_gffl))
+        f.addRow("Ground floor level (F.F.L.)", row)
         self.i_floor_h = _spin(1.5, 20.0, 2.9972)       # 9'-10"
         self.i_floor_h.setToolTip("The level's storey height, floor to "
                                   "floor (the CAD's level notes, when read, "
@@ -1697,6 +1767,19 @@ class Panel(QWidget):
                 w.blockSignals(False)
         self._store_flag("cad_lines", on)
 
+    def _apply_gffl(self):
+        doc = self.doc()
+        v = self.i_gffl.value()
+        if 0.0 < v < 0.3048 - 1e-6:
+            v = 0.3048                       # 1'-0" at the least
+            self.i_gffl.setValue(v)
+        doc["settings"]["ground_ffl"] = round(v, 4)
+        if v > 0:
+            doc["settings"]["plinth"] = round(v, 4)
+        from .host import len_txt
+        self.commit(doc, "Ground floor at " + (PJ.ffl_text(v) if v > 0
+                                              else "the CAD's level note"))
+
     def _store_flag(self, key, on):
         """A view setting stored (no rebuild; the overlay reads it)."""
         if getattr(self, "_building", False):
@@ -1870,15 +1953,38 @@ class Panel(QWidget):
                       "outside of its walls (stair holes kept)"))
         self.s_col = _spin(0.1, 2, 0.30)
         f.addRow("Column size", self.s_col)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Columns from the CAD (all levels)",
+                           lambda: self._cad_columns(False),
+                           "Read every imported level's columns again from "
+                           "its CAD plan — walls, openings and your edits "
+                           "stay; a layer naming a run of floors («S-CONC "
+                           "FOUNDATION TO 6TH») only on those floors",
+                           primary=True))
+        row.addWidget(_btn("This level", lambda: self._cad_columns(True)))
+        f.addRow(row)
         f.addRow(_btn("Columns at wall corners (this level)",
                       self._corner_columns))
+        f.addRow(_btn("Shaft / slab opening on this level…",
+                      lambda: self.shaft_dialog(None),
+                      "Cut an opening in the floor slab: a rectangle at "
+                      "X, Y, or a rectangle you drew and selected; on this "
+                      "floor or through every floor. Right-click a slab "
+                      "for the same, and to remove one"))
         row = QHBoxLayout()
-        self.s_bw = _spin(0.1, 2, 0.20)
-        self.s_bh = _spin(0.1, 3, 0.45)
+        self.s_bw = _spin(0.1, 2, 0.2032, 0.0254)        # 8"
+        self.s_bh = _spin(0.1, 3, 0.6096, 0.0254)        # 24"
+        self.s_bw.setToolTip("Beam width (8\" by default)")
+        self.s_bh.setToolTip("Beam depth, slab included (24\" by default)")
         row.addWidget(self.s_bw)
         row.addWidget(self.s_bh)
         f.addRow("Beam width / depth", row)
-        f.addRow(_btn("Beams on the walls (this level)", self._beams))
+        row = QHBoxLayout()
+        row.addWidget(_btn("Beams on the walls (this level)", self._beams,
+                           "A beam over every straight wall of this level, "
+                           "each its own element (typed B-nn by its size)"))
+        row.addWidget(_btn("All levels", lambda: self._beams(True)))
+        f.addRow(row)
         f.addRow(QLabel("<i>Foundation:</i>"))
         self.s_found = _spin(-30, 0, -1.50, 0.05, 2)
         self.s_found.setToolTip("The footings' bottom, from ±0.00 (the "
@@ -1894,7 +2000,65 @@ class Panel(QWidget):
                       "or import a foundation plan: Level ▸ Foundation"))
         f.addRow(QLabel("<i>Basement: Level ▸ «＋ Basement (new, below)», "
                         "then import its plan — or + Basement in part 2.</i>"))
+        self.s_rt = _spin(0.15, 1.0, 0.3048, 0.0254)     # 12"
+        self.s_rt.setToolTip("The RCC retaining walls' least thickness "
+                             "(12\" by default)")
+        f.addRow("Retaining wall (RCC) min.", self.s_rt)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Basement outer walls → RCC", self._retaining,
+                           "Every basement's outer walls made RCC retaining "
+                           "walls (as a lift core's): no doors or windows in "
+                           "them, at least the thickness above. Done by "
+                           "itself when a basement plan is imported"))
+        row.addWidget(_btn("Undo RCC", lambda: self._retaining(False)))
+        f.addRow(row)
+        from . import shoring as SH
+        self.s_sh = QCheckBox("Shoring along the plot limits")
+        self.s_sh.setToolTip("Piles (or sheet piles) round the plot, from "
+                             "the ground to under the lowest basement")
+        f.addRow(self.s_sh)
+        self.s_sh_kind = QComboBox()
+        for k, lab in SH.TYPES:
+            self.s_sh_kind.addItem(lab, k)
+        f.addRow("Shoring type", self.s_sh_kind)
+        row = QHBoxLayout()
+        self.s_sh_d = _spin(0.3, 1.5, 0.6096, 0.0254)      # 24" piles
+        self.s_sh_d.setToolTip("Pile diameter")
+        self.s_sh_e = _spin(0.5, 20, 3.048, 0.1524)        # 10'-0"
+        self.s_sh_e.setToolTip("Embedment under the lowest basement floor")
+        row.addWidget(self.s_sh_d)
+        row.addWidget(self.s_sh_e)
+        f.addRow("Pile Ø / embedment", row)
+        f.addRow(_btn("Apply shoring", self._shoring))
         self.lay.addWidget(box)
+
+    def _retaining(self, on=True):
+        doc = self.doc()
+        doc["settings"]["retain_t"] = self.s_rt.value()
+        doc["settings"]["basement_rcc"] = bool(on)
+        r = PJ.basement_walls(doc, None, self.s_rt.value(), on)
+        if not r["walls"]:
+            self.flash("No basement outer walls found (add a basement and "
+                       "import its plan first)")
+            return
+        self.commit(doc, f"{r['walls']} basement walls RCC, "
+                         f"{r['openings']} openings closed" if on else
+                    f"{r['walls']} basement walls ordinary again")
+
+    def _shoring(self):
+        doc = self.doc()
+        st = doc["settings"]
+        st["shoring"] = self.s_sh.isChecked()
+        st["shoring_type"] = self.s_sh_kind.currentData() or "piles"
+        st["shoring_d"] = self.s_sh_d.value()
+        st["shoring_embed"] = self.s_sh_e.value()
+        if st["shoring"] and not doc["arch"].get("plot"):
+            self.flash("Set the plot first (Site ▸ Plot) — shoring follows "
+                       "its limits")
+        elif st["shoring"] and not any(lv.get("kind") == "basement"
+                                       for lv in doc["arch"]["levels"]):
+            self.flash("There's no basement — shoring is for a basement dig")
+        self.commit(doc, "Shoring " + ("on" if st["shoring"] else "off"))
 
     def _slab_pos(self, _i=None):
         if self._building:
@@ -1995,6 +2159,16 @@ class Panel(QWidget):
         self.st_waist.setToolTip("Monolithic RCC: the waist slab's thickness "
                                  "under the steps (6\" = 152 mm)")
         f.addRow("Waist slab", self.st_waist)
+        row = QHBoxLayout()
+        self.st_riser = _spin(0.10, 0.25, 0.1778, 0.0127)     # 7"
+        self.st_going = _spin(0.18, 0.45, 0.2794, 0.0127)     # 11"
+        self.st_riser.setToolTip("Risers no higher than this: the number of "
+                                 "steps follows the storey height")
+        self.st_going.setToolTip("The tread (going) of a standard stair — "
+                                 "less only where its well is too short")
+        row.addWidget(self.st_riser)
+        row.addWidget(self.st_going)
+        f.addRow("Riser (max) / tread", row)
         self.st_nose = _spin(0.0, 0.1, 0.025, 0.005)
         f.addRow("Nosing", self.st_nose)
         self.st_tread = _spin(0.02, 0.2, 0.05, 0.005)
@@ -2109,6 +2283,8 @@ class Panel(QWidget):
         self.st_type.setCurrentIndex(max(self.st_type.findData(
             stt.get("stair_type", "monolithic")), 0))
         self.st_waist.setValue(float(stt.get("stair_waist", 0.1524)))
+        self.st_riser.setValue(float(stt.get("stair_riser", 0.1778)))
+        self.st_going.setValue(float(stt.get("stair_going", 0.2794)))
         self.st_nose.setValue(float(stt.get("stair_nosing", 0.025)))
         self.st_tread.setValue(float(stt.get("stair_tread", 0.05)))
         n_cad = sum(len(v) for v in doc.get("stair_cad", {}).values())
@@ -2126,6 +2302,8 @@ class Panel(QWidget):
     def _stair_opts(self, doc):
         doc["settings"].update(stair_type=self.st_type.currentData(),
                                stair_waist=self.st_waist.value(),
+                               stair_riser=self.st_riser.value(),
+                               stair_going=self.st_going.value(),
                                stair_nosing=self.st_nose.value(),
                                stair_tread=self.st_tread.value(),
                                stair_rail=self.st_rail.currentData(),
@@ -2186,15 +2364,49 @@ class Panel(QWidget):
             return
         self.commit(doc, f"Balcony {area_txt(r['area'])}")
 
+    def _cad_columns(self, this_level=False):
+        doc = self.doc()
+        lid, _lv = self.level()
+        if this_level and not lid:
+            self.flash("Pick a level at the top first")
+            return
+        from PySide6.QtWidgets import QApplication as _QA
+        _QA.setOverrideCursor(Qt.WaitCursor)
+        try:
+            r = PJ.redetect_columns(doc, [lid] if this_level else None)
+        finally:
+            _QA.restoreOverrideCursor()
+        if not r:
+            self.flash("No level imported from a CAD plan here", 8000)
+            return
+        names = {lv["id"]: lv["name"] for lv in doc["arch"]["levels"]}
+        msg = ", ".join(f"{names.get(k, k)} {a}→{b}" for k, (a, b)
+                        in r.items())
+        self.commit(doc, f"Columns from the CAD: {msg}")
+
     def _corner_columns(self):
         doc = self.doc()
         lid, lv = self.level()
         n = PJ.add_corner_columns(doc, lid, self.s_col.value())
         self.commit(doc, f"{n} columns on «{lv['name']}»")
 
-    def _beams(self):
+    def _beams(self, all_levels=False):
         doc = self.doc()
+        doc["settings"]["beam_w"] = self.s_bw.value()
+        doc["settings"]["beam_h"] = self.s_bh.value()
+        if all_levels:
+            n = 0
+            for lv_ in doc["arch"]["levels"]:
+                if any(w["level"] == lv_["id"] for w in doc["arch"]["walls"]):
+                    n += PJ.add_beams_on_walls(doc, lv_["id"],
+                                               self.s_bw.value(),
+                                               self.s_bh.value())
+            self.commit(doc, f"{n} beams on every level")
+            return
         lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
         n = PJ.add_beams_on_walls(doc, lid, self.s_bw.value(),
                                   self.s_bh.value())
         self.commit(doc, f"{n} beams on «{lv['name']}»")
@@ -2263,7 +2475,55 @@ class Panel(QWidget):
                       self._roof_level, "A «Roof» level over the top floor: "
                       "its slab round the outside of the walls below, a "
                       "parapet wall on its edge — also in the Level list"))
+        from . import ceilings as CE_
+        f.addRow(QLabel("<i>False ceiling (every room of a level):</i>"))
+        self.fc_kind = QComboBox()
+        for k, lab, *_r in CE_.TYPES:
+            self.fc_kind.addItem(lab, k)
+        f.addRow("Type", self.fc_kind)
+        self.fc_h = _spin(2.0, 8.0, CE_.DEFAULT_H, 0.0254)    # 8'-0"
+        self.fc_h.setToolTip("The ceiling's underside over the finished "
+                             "floor (8'-0\" by default)")
+        f.addRow("Height from floor", self.fc_h)
+        row = QHBoxLayout()
+        row.addWidget(_btn("This level", lambda: self._ceiling(False),
+                           "A false ceiling in every room of the level "
+                           "picked at the top (a room can differ: Edit "
+                           "properties of the room)", primary=True))
+        row.addWidget(_btn("All levels", lambda: self._ceiling(True)))
+        row.addWidget(_btn("Remove", self._ceiling_remove))
+        f.addRow(row)
         self.lay.addWidget(box)
+
+    def _ceiling(self, all_levels=False):
+        from . import ceilings as CE
+        doc = self.doc()
+        arch = doc["arch"]
+        if all_levels:
+            lids = [lv["id"] for lv in arch["levels"]
+                    if lv["name"].lower() != "roof"
+                    and any(w["level"] == lv["id"] for w in arch["walls"])]
+        else:
+            lid, _lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            lids = [lid]
+        for lid in lids:
+            CE.set_level(doc, lid, self.fc_kind.currentData(),
+                         self.fc_h.value())
+        from .host import len_txt
+        self.commit(doc, f"False ceiling ({self.fc_kind.currentText()}, "
+                         f"{len_txt(self.fc_h.value())} over the floor) on "
+                         f"{len(lids)} level(s)")
+
+    def _ceiling_remove(self):
+        from . import ceilings as CE
+        doc = self.doc()
+        lid, _lv = self.level()
+        if lid:
+            CE.remove_level(doc, lid)
+        self.commit(doc, "False ceiling removed")
 
     def _roof_level(self):
         doc = self.doc()
@@ -2654,11 +2914,29 @@ class Panel(QWidget):
                 w._start = w.value()
             elif typ == "text":
                 w = QLineEdit(str(rec.get(key, "") or ""))
+            elif typ == "info":
+                txt = ""
+                if kind == "room" and key == "size":
+                    sz = PJ.room_size(self.doc(), rec)
+                    if sz:
+                        from .host import area_txt
+                        txt = f"{len_txt(sz[0])} × {len_txt(sz[1])}" \
+                            f"  ({area_txt(sz[0] * sz[1])} bounding)"
+                w = QLabel(txt or "—")
+            elif typ == "int":
+                from PySide6.QtWidgets import QSpinBox
+                w = QSpinBox()
+                w.setRange(int(opt[0]), int(opt[1]))
+                w.setValue(int(rec.get(key, opt[0]) or opt[0]))
             else:
                 suffix = " °" if typ == "deg" else " m"
                 val = rec.get(key, 0.0)
                 if kind == "room" and key == "finish" and val is None:
                     val = PJ.room_finish(self.doc(), None)
+                if kind == "room" and key == "ceiling_h" and not val:
+                    from . import ceilings as CE_
+                    val = float(((self.doc().get("ceilings") or {}).get(
+                        rec.get("level")) or {}).get("h", CE_.DEFAULT_H))
                 w = _spin(opt[0], opt[1], float(val or 0.0),
                           1.0 if typ == "deg" else 0.05, 2, suffix)
                 if kind == "room" and key == "finish":
@@ -2678,6 +2956,8 @@ class Panel(QWidget):
             return
         new = dict(rec)
         for key, (typ, w) in widgets.items():
+            if typ == "info":
+                continue
             if typ == "choice":
                 new[key] = w._opts[w.currentIndex()]
             elif typ == "height":
@@ -2702,6 +2982,9 @@ class Panel(QWidget):
         new.pop("slope", None)
         if sel[0] == "opening" and new["kind"] == "door":
             new["sill"] = 0.0
+        if sel[0] == "stair":           # riser / tread / steps re-laid
+            from . import stairs as ST_
+            new = ST_.redesign(rec, new)
         if sel[0] == "opening":
             PJ.fit_head(new)            # a transom / arch: a full leaf under
         why = PJ.check_record(doc, sel[0], new) if sel[0] != "opening" else \
@@ -2763,6 +3046,11 @@ class Panel(QWidget):
         seen = getattr(self, "_moves_seen", None)
         if seen is None:
             seen = self._moves_seen = {}
+        try:                           # furniture moved / turned: kept
+            if PJ.moved_furniture(self.vp.scene, doc):
+                PJ.store_only(self.vp, doc)
+        except Exception:  # noqa: BLE001
+            log_error("panel._follow_moves furniture")
         try:
             moves = PJ.moved_openings(self.vp.scene, doc, seen)
         except Exception:  # noqa: BLE001
@@ -2834,6 +3122,14 @@ class Panel(QWidget):
                     sub.addAction(f"Replace «{t['mark']}» with a library "
                                   "component…",
                                   lambda k=tk: self.replace_type_dialog([k]))
+                    mm = sub.addMenu(f"Mirror «{t['mark']}» — all {n}")
+                    mir = t.get("mirror") or {}
+                    for ax, lab_ in (("x", "Left ↔ right"),
+                                     ("y", "Front ↔ back")):
+                        a_ = mm.addAction(lab_, lambda k=tk, a=ax:
+                                          self.mirror_type(k, a))
+                        a_.setCheckable(True)
+                        a_.setChecked(bool(mir.get(ax)))
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu types")
         if sel[0] == "opening":
@@ -2868,6 +3164,25 @@ class Panel(QWidget):
                 sub.addAction("Flip hinge", self._flip)
                 sub.addAction("Opens to the other side", lambda: self._quick(
                     sel, face=-int(rec.get("face", 1) or 1)))
+            if rec["kind"] in ("window", "void"):
+                ops = [i for k, i in self._selected_all() if k == "opening"] \
+                    or [sel[1]]
+                nsel = len(ops)
+                sub.addAction("Replace with wall (close the opening)" if nsel
+                              == 1 else f"Replace {nsel} openings with wall",
+                              lambda o=ops: self.close_openings(o))
+                try:
+                    from . import components as CP_
+                    tk_ = CP_.key_of(doc, "opening", rec)
+                    t_ = CP_.catalogue(doc).get(tk_) if tk_ else None
+                    if t_ and len(t_["items"]) > 1:
+                        sub.addAction(
+                            f"Replace every «{t_['mark']}» with wall "
+                            f"({len(t_['items'])})",
+                            lambda t=t_: self.close_openings(
+                                [i for _k, i, _l in t["items"]]))
+                except Exception:  # noqa: BLE001
+                    log_error("panel.context_menu close")
             sub.addAction("Move ◀ 0.1 m", lambda: self._nudge_op(-0.1))
             sub.addAction("Move ▶ 0.1 m", lambda: self._nudge_op(0.1))
         if sel[0] == "wall":
@@ -2884,11 +3199,49 @@ class Panel(QWidget):
             else:
                 sub.addAction(f"Convert {what} to a curtain wall",
                               lambda: self.convert_walls(walls, "curtain"))
+        if sel[0] == "slab":
+            sub.addAction("Add shaft / opening in this slab…",
+                          lambda: self.shaft_dialog(sel[1]))
+            sub.addAction("Edges, railing, sun shades, close openings…",
+                          lambda: self.slab_edges_dialog(sel[1]))
+            sub.addAction("Extend slab to the walls",
+                          lambda: self._slab_extend(sel[1]))
+            mine = [m for m in doc.get("man_shafts") or []
+                    if any(h in (rec.get("man") or [])
+                           for h in [m["pts"]]) or self._shaft_in(m, rec)]
+            if mine:
+                ms = sub.addMenu(f"Remove an opening drawn here "
+                                 f"({len(mine)})")
+                for m in mine:
+                    xs = [p_[0] for p_ in m["pts"]]
+                    ys = [p_[1] for p_ in m["pts"]]
+                    ms.addAction(
+                        f"{max(xs) - min(xs):.2f} × {max(ys) - min(ys):.2f} m"
+                        f" at ({sum(xs) / len(xs):.2f}, "
+                        f"{sum(ys) / len(ys):.2f})"
+                        + (" · through all floors" if m.get("through")
+                           else ""),
+                        lambda i=m["id"]: self._shaft_remove(i))
         if sel[0] == "ramp":
             sub.addAction("Start at the other end", self._flip)
+        if sel[0] == "room":
+            sub.addAction("Add furniture from the library…",
+                          lambda: self.add_furniture_dialog(sel[1]))
         sub.addSeparator()
         sub.addAction("Show in the panel", self._fill_selected)
         sub.addAction("Delete", self._delete_selected)
+
+    def close_openings(self, ids):
+        """Windows (or openings) taken out: the wall runs through solid."""
+        doc = self.doc()
+        ids = set(ids)
+        n = sum(1 for o in doc["arch"]["openings"] if o["id"] in ids)
+        if not n:
+            return
+        doc["arch"]["openings"] = [o for o in doc["arch"]["openings"]
+                                   if o["id"] not in ids]
+        self._sel_key = None
+        self.commit(doc, f"{n} opening(s) replaced with wall")
 
     def _quick(self, sel, **changes):
         """One change to an element, from the right-click menu."""
@@ -2951,6 +3304,15 @@ class Panel(QWidget):
         widgets = self._build_fields(form, sel[0], rec)
         if not widgets:
             form.addRow(QLabel("Nothing to edit here — use the panel"))
+        if sel[0] == "slab":
+            row = QHBoxLayout()
+            row.addWidget(_btn("Edges, railing, sun shades, openings…",
+                               lambda: (dlg.reject(),
+                                        self.slab_edges_dialog(sel[1]))))
+            row.addWidget(_btn("Add shaft…",
+                               lambda: (dlg.reject(),
+                                        self.shaft_dialog(sel[1]))))
+            form.addRow(row)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel
                               | QDialogButtonBox.Apply)
         lay.addWidget(bb)
@@ -3076,6 +3438,247 @@ class Panel(QWidget):
         self._reselect(("wall", pid))
         if what == "edit":
             self.edit_dialog(("wall", pid))
+
+    @staticmethod
+    def _shaft_in(m, slab) -> bool:
+        try:
+            from shapely.geometry import Polygon
+            return Polygon(slab["corners"]).buffer(0).intersects(
+                Polygon(m["pts"]).buffer(0).buffer(-0.02))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _shaft_remove(self, sid):
+        doc = self.doc()
+        if PJ.remove_man_shaft(doc, sid):
+            self.commit(doc, "Opening removed — the slab closed there")
+
+    def shaft_dialog(self, slab_id=None):
+        """A shaft or slab opening cut by hand: a rectangle W × D centred at
+        X, Y (turned by an angle), or the outline selected in the model (a
+        rectangle / shape drawn on the floor); in this floor only, or
+        through every floor (a services / lift shaft)."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        doc = self.doc()
+        arch = doc["arch"]
+        slab = PJ.find_record(doc, "slab", slab_id) if slab_id else None
+        # the floor this slab carries (cast over the floor below it)
+        lid = None
+        if slab is not None:
+            lid = slab["level"]
+            if slab.get("top"):
+                el = M.elevations(arch)
+                order = [arch["levels"][i]["id"] for i in
+                         sorted(range(len(arch["levels"])),
+                                key=lambda i: el[i])]
+                k = order.index(lid)
+                if k + 1 < len(order):
+                    lid = order[k + 1]
+        lid = lid or self.level()[0]
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+        drawn = self._drawn_outlines()
+        cx = cy = 0.0
+        if slab is not None:
+            cs = slab["corners"]
+            cx = sum(p_[0] for p_ in cs) / len(cs)
+            cy = sum(p_[1] for p_ in cs) / len(cs)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Shaft / slab opening — CAD2IngeTrazo")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"<b>Floor of {names.get(lid, lid)}</b><br><i>"
+                             "The opening stays through rebuilds and "
+                             "re-imports of the slab.</i>"))
+        form = QFormLayout()
+        lay.addLayout(form)
+        how = QComboBox()
+        how.addItem("Rectangle W × D centred at X, Y", "rect")
+        if drawn:
+            how.addItem(f"The outline selected in the model ({len(drawn)})",
+                        "sel")
+            how.setCurrentIndex(1)
+        form.addRow("Shape", how)
+        row = QHBoxLayout()
+        sx, sy = _spin(-1e5, 1e5, round(cx, 2), 0.1), \
+            _spin(-1e5, 1e5, round(cy, 2), 0.1)
+        row.addWidget(sx)
+        row.addWidget(sy)
+        form.addRow("Centre X, Y", row)
+        row = QHBoxLayout()
+        sw, sd = _spin(0.2, 50, 1.8, 0.05), _spin(0.2, 50, 2.1, 0.05)
+        row.addWidget(sw)
+        row.addWidget(sd)
+        form.addRow("Width × depth", row)
+        sa = _spin(-360, 360, 0.0, 5, 1, " °")
+        form.addRow("Angle", sa)
+        thr = QCheckBox("Through every floor (a shaft from bottom to top)")
+        form.addRow(thr)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        lay.addWidget(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        dlg.adjustSize()
+        _place_on_screen(dlg, QCursor.pos())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        doc = self.doc()
+        shapes = []
+        if how.currentData() == "sel":
+            shapes = [[v[:2] for v in vs] for vs in drawn]
+        else:
+            a = math.radians(sa.value())
+            c_, s_ = math.cos(a), math.sin(a)
+            w2, d2 = sw.value() / 2, sd.value() / 2
+            shapes = [[(sx.value() + px * c_ - py * s_,
+                        sy.value() + px * s_ + py * c_)
+                       for px, py in ((-w2, -d2), (w2, -d2), (w2, d2),
+                                      (-w2, d2))]]
+        made = sum(1 for sh in shapes
+                   if PJ.add_man_shaft(doc, lid, sh, thr.isChecked()))
+        if not made:
+            self.flash("No opening made — it falls outside the slab", 8000)
+            return
+        self.commit(doc, f"{made} opening(s) cut in the floor of "
+                         f"{names.get(lid, lid)}"
+                         + (" and every floor" if thr.isChecked() else ""))
+
+    def _slab_extend(self, slab_id):
+        from . import slabedges as SE
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            return
+        if not SE.extend_to_walls(doc, slab):
+            self.flash("The slab already reaches its walls")
+            return
+        self.commit(doc, "Slab extended to its walls")
+
+    def slab_edges_dialog(self, slab_id):
+        """A slab's edges: extended to its walls; a railing on its free
+        edges (or taken off); sun shades over its floor's windows; its
+        openings closed."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox,
+                                       QListWidget, QListWidgetItem)
+
+        from . import slabedges as SE
+        from .engine import railings as RL
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            return
+        lid = SE.floor_level_of(doc, slab)
+        names = {lv["id"]: lv["name"] for lv in doc["arch"]["levels"]}
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Slab edges — CAD2IngeTrazo")
+        lay = QVBoxLayout(dlg)
+        free = SE.free_edges(doc, slab)
+        lay.addWidget(QLabel(
+            f"<b>{slab.get('name', 'Slab')}</b> · the floor of "
+            f"{names.get(lid, lid)}<br><i>{len(free)} free edge(s) — "
+            f"{sum(math.dist(a, b) for a, b in free):.1f} m with no wall on "
+            "them.</i>"))
+        form = QFormLayout()
+        lay.addLayout(form)
+        ext = QCheckBox("Extend the slab out to its walls' outer faces")
+        form.addRow(ext)
+        rail = QComboBox()
+        rail.addItem("— leave as it is —", "")
+        for k, lab in RL.TYPES:
+            rail.addItem(lab, k)
+        rail.addItem("Take the railings off this slab's edge", "off")
+        form.addRow("Railing on the free edges", rail)
+        rh = _spin(0.3, 2.0, float(doc["settings"].get("rail_h", SE.RAIL_H)),
+                   0.0254)
+        form.addRow("Railing height", rh)
+        cur = (doc.get("sunshades") or {}).get(lid)
+        sun = QCheckBox("Sun shades (chajja) over the floor's outer windows")
+        sun.setChecked(cur is not None)
+        form.addRow(sun)
+        row = QHBoxLayout()
+        sd = _spin(0.15, 2.0, (cur or {}).get("d", 0.6096), 0.0254)
+        sd.setToolTip("Projection (2'-0\" by default)")
+        st_ = _spin(0.05, 0.3, (cur or {}).get("t", 0.1016), 0.0127)
+        st_.setToolTip("Thickness (4\" by default)")
+        se = _spin(0.0, 1.0, (cur or {}).get("ext", 0.1524), 0.0254)
+        se.setToolTip("Past each side of the window (6\" by default)")
+        for w_ in (sd, st_, se):
+            row.addWidget(w_)
+        form.addRow("Projection / thick / past jambs", row)
+        holes = slab.get("holes") or []
+        lst = None
+        if holes:
+            lay.addWidget(QLabel("<b>Close openings</b> (tick to close):"))
+            lst = QListWidget()
+            for k, h in enumerate(holes):
+                xs = [p_[0] for p_ in h]
+                ys = [p_[1] for p_ in h]
+                it = QListWidgetItem(
+                    f"{max(xs) - min(xs):.2f} × {max(ys) - min(ys):.2f} m at "
+                    f"({sum(xs) / len(xs):.2f}, {sum(ys) / len(ys):.2f})")
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Unchecked)
+                it.setData(Qt.UserRole, k)
+                lst.addItem(it)
+            lst.setMaximumHeight(140)
+            lay.addWidget(lst)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        lay.addWidget(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        dlg.adjustSize()
+        _place_on_screen(dlg, QCursor.pos())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        msgs = []
+        if lst is not None:
+            ks = sorted((lst.item(i).data(Qt.UserRole)
+                         for i in range(lst.count())
+                         if lst.item(i).checkState() == Qt.Checked),
+                        reverse=True)
+            n = sum(1 for k in ks if SE.close_hole(doc, slab, k))
+            if n:
+                msgs.append(f"{n} opening(s) closed")
+        if ext.isChecked() and SE.extend_to_walls(doc, slab):
+            msgs.append("slab extended to its walls")
+        kind = rail.currentData()
+        if kind == "off":
+            msgs.append(f"{SE.remove_edge_rails(doc, slab)} railing(s) off")
+        elif kind:
+            doc["settings"]["rail_h"] = rh.value()
+            SE.remove_edge_rails(doc, slab)
+            n = SE.add_edge_rails(doc, slab, kind, rh.value())
+            msgs.append(f"{n} railing(s) on the free edges")
+        if sun.isChecked():
+            SE.set_sunshades(doc, lid, sd.value(), st_.value(), se.value())
+            msgs.append("sun shades over the windows")
+        elif cur is not None:
+            SE.remove_sunshades(doc, lid)
+            msgs.append("sun shades off")
+        if not msgs:
+            self.flash("Nothing changed")
+            return
+        self.commit(doc, "Slab: " + ", ".join(msgs))
+
+    def _drawn_outlines(self) -> list:
+        """Flat faces selected in the model that are not CAD2IngeTrazo's
+        (a rectangle drawn with the Rectangle tool): their corners."""
+        out = []
+        for e in list(self.vp.scene.selection):
+            if any(PJ.tag_of(g) for g in (e, getattr(e, "owner", None))
+                   if g is not None):
+                continue
+            if hasattr(e, "loop") and hasattr(e, "vertices"):
+                vs = [(v.x(), v.y(), v.z()) for v in e.vertices]
+                if len(vs) >= 3 and max(v[2] for v in vs) - \
+                        min(v[2] for v in vs) < 0.05:
+                    out.append(vs)
+        return out
 
     def _delete_selected(self):
         sel = self._sel_key
@@ -3239,6 +3842,139 @@ class Panel(QWidget):
             return
         self.replace_type_dialog(keys)
 
+    def library_picker(self, title, info="", start_cat=""):
+        """IngeTrazo's library (bundled + online catalogue) to pick one
+        model from: its entry, or None."""
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QCursor, QIcon
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox,
+                                       QListWidget, QListWidgetItem)
+
+        from . import library as LB
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            comps = LB.list_entries()
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not comps:
+            self.flash("No IngeTrazo library found (check the connection "
+                       "once; it is cached after)", 9000)
+            return None
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(540, 600)
+        lay = QVBoxLayout(dlg)
+        if info:
+            lay.addWidget(QLabel(info))
+        row = QHBoxLayout()
+        catbox = QComboBox()
+        catbox.addItem("All categories", "")
+        for c_ in sorted({e["cat"] for e in comps},
+                         key=lambda x: (x != LB.BUNDLED, x.lower())):
+            catbox.addItem(c_, c_)
+        if start_cat:
+            catbox.setCurrentIndex(max(catbox.findData(start_cat), 0))
+        row.addWidget(catbox)
+        find = QLineEdit()
+        find.setPlaceholderText("Search the library…")
+        row.addWidget(find, 1)
+        lay.addLayout(row)
+        lst = QListWidget()
+        lst.setIconSize(QSize(48, 48))
+        items = []
+        for e in comps:
+            it = QListWidgetItem(e["name"])
+            it.setData(Qt.UserRole, e)
+            it.setToolTip(f"{e['cat']} · {e['name']}"
+                          + (f"\n{e['tip']}" if e.get("tip") else ""))
+            lst.addItem(it)
+            items.append(it)
+
+        def visible():
+            return [it for it in items if not it.isHidden()]
+
+        def icons():
+            for it in visible()[:400]:
+                if it.icon().isNull():
+                    p_ = LB.thumbnail(it.data(Qt.UserRole))
+                    if p_ is not None:
+                        it.setIcon(QIcon(str(p_)))
+
+        def filt(*_a):
+            q = find.text().strip().lower()
+            c_ = catbox.currentData()
+            for it in items:
+                e = it.data(Qt.UserRole)
+                it.setHidden(not ((not c_ or e["cat"] == c_) and (
+                    not q or q in e["name"].lower()
+                    or q in e["cat"].lower())))
+            LB.prefetch([it.data(Qt.UserRole) for it in visible()[:400]])
+            icons()
+        find.textChanged.connect(filt)
+        catbox.currentIndexChanged.connect(filt)
+        tick = QTimer(dlg)
+        tick.setInterval(600)
+        tick.timeout.connect(icons)
+        tick.start()
+        filt()
+        if visible():
+            lst.setCurrentItem(visible()[0])
+        lay.addWidget(lst)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        lay.addWidget(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
+        _place_on_screen(dlg, QCursor.pos())
+        ok = dlg.exec() == QDialog.Accepted
+        tick.stop()
+        if not ok or lst.currentItem() is None:
+            return None
+        return lst.currentItem().data(Qt.UserRole)
+
+    def add_furniture_dialog(self, room_id):
+        """A library model set in a room, at its middle, on its floor —
+        then moved / turned with IngeTrazo's own tools (kept)."""
+        doc = self.doc()
+        rec = PJ.room_record(doc, room_id)
+        if rec is None:
+            return
+        cat = "Living room"
+        nm = str(rec.get("name", "")).upper()
+        for k_, c_ in (("BED", "Bedroom"), ("KITCHEN", "Kitchen"),
+                       ("BATH", "Bathroom"), ("TOILET", "Bathroom"),
+                       ("W.C", "Bathroom"), ("OFFICE", "Office"),
+                       ("STUDY", "Office"), ("DINING", "Living room"),
+                       ("GARDEN", "Exterior"), ("LAWN", "Exterior"),
+                       ("PARKING", "Vehicles"), ("PORCH", "Vehicles")):
+            if k_ in nm:
+                cat = c_
+                break
+        e = self.library_picker(
+            f"Furniture for {rec.get('name', 'the room')} — CAD2IngeTrazo",
+            f"<b>{rec.get('name', 'Room')}</b><br><i>The model is set in the "
+            "middle of the room on its floor; move or turn it with IngeTrazo's "
+            "Move / Rotate tools — it stays where you put it.</i>", cat)
+        if not e:
+            return
+        from . import library as LB
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            pr = LB.proto(e["key"], e.get("entry"))
+        finally:
+            QApplication.restoreOverrideCursor()
+        if pr is None:
+            self.flash(f"Couldn't get «{e['name']}» — check the connection",
+                       8000)
+            return
+        import uuid as _uuid
+        doc["furniture"].append({
+            "id": _uuid.uuid4().hex[:8], "level": rec["level"],
+            "room": rec["id"], "key": e["key"], "name": e["name"],
+            **({"entry": e["entry"]} if e.get("entry") else {}),
+            "x": float(rec["x"]), "y": float(rec["y"]), "rot": 0.0})
+        self.commit(doc, f"{e['name']} placed in {rec.get('name', 'the room')}")
+
     def replace_type_dialog(self, keys):
         """The types ``keys`` drawn as an IngeTrazo library component: the
         model picked (searchable), fitted to each element's box — or back
@@ -3254,48 +3990,104 @@ class Panel(QWidget):
         keys = [k for k in keys if k in cat]
         if not keys:
             return
-        comps = LB.list_all()
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QApplication as _QA
+        _QA.setOverrideCursor(Qt.WaitCursor)
+        try:
+            comps = LB.list_entries()
+        finally:
+            _QA.restoreOverrideCursor()
         if not comps:
-            self.flash("No IngeTrazo library components found (its "
-                       "resources/components folder)", 8000)
+            self.flash("No IngeTrazo library found — neither the bundled "
+                       "components nor the online catalogue (check the "
+                       "connection once; it is cached after)", 9000)
             return
         t0 = cat[keys[0]]
         now = (t0.get("lib") or {})
         dlg = QDialog(self)
         dlg.setWindowTitle("Replace with a library component — "
                            "CAD2IngeTrazo")
+        dlg.resize(560, 640)
         lay = QVBoxLayout(dlg)
         n = sum(len(cat[k]["items"]) for k in keys)
         what = CP.display(t0) if len(keys) == 1 else f"{len(keys)} types"
-        lay.addWidget(QLabel(f"<b>{what}</b> · {n} elements<br><i>Each is "
-                             "drawn as the library model, fitted to its own "
-                             "size; its record (opening in the wall, sizes, "
-                             "schedules) stays.</i>"))
+        n_on = sum(1 for e in comps if e["src"] == "online")
+        lay.addWidget(QLabel(
+            f"<b>{what}</b> · {n} elements<br><i>Each is drawn as the "
+            "library model, fitted to its own size; its record (opening in "
+            "the wall, sizes, schedules) stays.</i><br>"
+            f"<span style='color:gray'>{len(comps) - n_on} bundled + {n_on} "
+            "from IngeTrazo's online library (More components…)</span>"))
+        row = QHBoxLayout()
+        catbox = QComboBox()
+        catbox.addItem("All categories", "")
+        for c_ in sorted({e["cat"] for e in comps},
+                         key=lambda x: (x != LB.BUNDLED, x.lower())):
+            catbox.addItem(c_, c_)
+        # a door / window type opens on «Doors and windows»
+        kind0 = t0["items"][0][0] if t0.get("items") else ""
+        rec0 = PJ.find_record(doc, kind0, t0["items"][0][1]) \
+            if t0.get("items") else None
+        if kind0 == "opening" or (rec0 or {}).get("type") == "core":
+            i_ = catbox.findData("Doors and windows")
+            if i_ >= 0:
+                catbox.setCurrentIndex(i_)
+        elif kind0 in ("stair", "stairrail"):
+            i_ = catbox.findData("Staircases")
+            if i_ >= 0:
+                catbox.setCurrentIndex(i_)
+        row.addWidget(catbox)
         find = QLineEdit()
         find.setPlaceholderText("Search the library…")
-        lay.addWidget(find)
+        row.addWidget(find, 1)
+        lay.addLayout(row)
         lst = QListWidget()
-        lst.setMinimumHeight(260)
+        lst.setIconSize(QSize(48, 48))
+        lst.setMinimumHeight(320)
         it0 = QListWidgetItem("— CAD2IngeTrazo's own model (no library) —")
-        it0.setData(Qt.UserRole, "")
+        it0.setData(Qt.UserRole, None)
         lst.addItem(it0)
-        for k, label in comps:
-            it = QListWidgetItem(label)
-            it.setData(Qt.UserRole, k)
-            it.setToolTip(k + ".igz")
+        items = []
+        for e in comps:
+            it = QListWidgetItem(e["name"])
+            it.setData(Qt.UserRole, e)
+            it.setToolTip(f"{e['cat']} · {e['name']}"
+                          + (f"\n{e['tip']}" if e.get("tip") else ""))
             lst.addItem(it)
-            if k == now.get("key"):
+            items.append(it)
+            if e["key"] == now.get("key"):
                 lst.setCurrentItem(it)
         if lst.currentItem() is None:
             lst.setCurrentRow(0)
 
-        def filt(txt):
-            q = txt.strip().lower()
-            for i in range(1, lst.count()):
-                it = lst.item(i)
-                it.setHidden(bool(q) and q not in it.text().lower()
-                             and q not in it.data(Qt.UserRole).lower())
+        def visible():
+            return [it for it in items if not it.isHidden()]
+
+        def icons():
+            for it in visible()[:400]:
+                if it.icon().isNull():
+                    p_ = LB.thumbnail(it.data(Qt.UserRole))
+                    if p_ is not None:
+                        it.setIcon(QIcon(str(p_)))
+
+        def filt(*_a):
+            q = find.text().strip().lower()
+            c_ = catbox.currentData()
+            for it in items:
+                e = it.data(Qt.UserRole)
+                ok = (not c_ or e["cat"] == c_) and (
+                    not q or q in e["name"].lower() or q in e["cat"].lower())
+                it.setHidden(not ok)
+            LB.prefetch([it.data(Qt.UserRole) for it in visible()[:400]])
+            icons()
         find.textChanged.connect(filt)
+        catbox.currentIndexChanged.connect(filt)
+        tick = QTimer(dlg)
+        tick.setInterval(600)
+        tick.timeout.connect(icons)
+        tick.start()
+        filt()
         lay.addWidget(lst)
         form = QFormLayout()
         lay.addLayout(form)
@@ -3317,25 +4109,59 @@ class Panel(QWidget):
         lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
         dlg.adjustSize()
         _place_on_screen(dlg, QCursor.pos())
-        if dlg.exec() != QDialog.Accepted or lst.currentItem() is None:
+        ok_ = dlg.exec() == QDialog.Accepted
+        tick.stop()
+        if not ok_ or lst.currentItem() is None:
             return
-        lk = lst.currentItem().data(Qt.UserRole)
+        e = lst.currentItem().data(Qt.UserRole)
+        lk = e["key"] if e else None
         doc = self.doc()
         names = doc.setdefault("comp_names", {})
         CP.catalogue(doc)                      # every type has its entry
-        if lk and LB.proto(lk) is None:
-            self.flash(f"Can't read the library component «{lk}»", 8000)
-            return
+        if lk:
+            from PySide6.QtWidgets import QApplication as _QA2
+            _QA2.setOverrideCursor(Qt.WaitCursor)
+            try:                               # downloaded once, then cached
+                pr_ = LB.proto(lk, e.get("entry"))
+            finally:
+                _QA2.restoreOverrideCursor()
+            if pr_ is None:
+                self.flash(f"Couldn't get «{e['name']}» — check the "
+                           "connection (online models download once)", 9000)
+                return
         for k in keys:
             ent = names.setdefault(k, {})
             if lk:
                 ent["lib"] = {"key": lk, "fit": fit.currentData(),
-                              "rot": rot.currentData()}
+                              "rot": rot.currentData(), "name": e["name"],
+                              **({"entry": e["entry"]} if e.get("entry")
+                                 else {})}
             else:
                 ent.pop("lib", None)
-        lab = lst.currentItem().text()
+        lab = e["name"] if e else ""
         self.commit(doc, f"{what}: {lab}" if lk else
                     f"{what}: CAD2IngeTrazo's own model again")
+
+    def mirror_type(self, key, axis, on=None):
+        """Every element of the type ``key`` mirrored (or back) about its own
+        middle: ``axis`` "x" left ↔ right, "y" front ↔ back."""
+        from . import components as CP
+        doc = self.doc()
+        cat = CP.catalogue(doc)
+        t = cat.get(key)
+        if not t:
+            return
+        ent = doc.setdefault("comp_names", {}).setdefault(key, {})
+        m = dict(ent.get("mirror") or {})
+        m[axis] = (not m.get(axis)) if on is None else bool(on)
+        m = {k: v for k, v in m.items() if v}
+        if m:
+            ent["mirror"] = m
+        else:
+            ent.pop("mirror", None)
+        what = {"x": "left ↔ right", "y": "front ↔ back"}[axis]
+        self.commit(doc, f"Type {t['mark']} ({len(t['items'])}): "
+                         f"{'mirrored ' + what if m.get(axis) else 'mirror ' + what + ' off'}")
 
     def edit_type(self, key):
         """The type's fields (its first element's) in a dialog: what is
@@ -3369,6 +4195,15 @@ class Panel(QWidget):
             widgets = self._build_fields(form, fk, rec)
         finally:
             FIELDS[fk] = saved
+        mir0 = t.get("mirror") or {}
+        mx = QCheckBox("Left ↔ right")
+        my = QCheckBox("Front ↔ back")
+        mx.setChecked(bool(mir0.get("x")))
+        my.setChecked(bool(mir0.get("y")))
+        mrow = QHBoxLayout()
+        mrow.addWidget(mx)
+        mrow.addWidget(my)
+        form.addRow("Mirror", mrow)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         lay.addWidget(bb)
         bb.accepted.connect(dlg.accept)
@@ -3379,9 +4214,24 @@ class Panel(QWidget):
             return
         new = self._values_of(widgets, rec)
         changed = {k: v for k, v in new.items() if v != rec.get(k)}
-        if not changed:
+        mir1 = {k: True for k, w_ in (("x", mx), ("y", my))
+                if w_.isChecked()}
+        mir_changed = mir1 != {k: True for k, v in mir0.items() if v}
+        if not changed and not mir_changed:
             return
         doc = self.doc()
+        if mir_changed:
+            ent = doc.setdefault("comp_names", {}).setdefault(key, {})
+            if mir1:
+                ent["mirror"] = mir1
+            else:
+                ent.pop("mirror", None)
+        if not changed:
+            self.commit(doc, f"Type {t['mark']}: mirror "
+                             + (", ".join({"x": "left ↔ right",
+                                           "y": "front ↔ back"}[k]
+                                          for k in mir1) or "off"))
+            return
         n, bad = 0, []
         for kind_, rid_, _l in t["items"]:
             r = PJ.find_record(doc, kind_, rid_)
@@ -3413,6 +4263,8 @@ class Panel(QWidget):
     def _values_of(self, widgets, rec) -> dict:
         out = {}
         for key, (typ, w) in widgets.items():
+            if typ == "info":
+                continue
             if typ == "choice":
                 out[key] = w._opts[w.currentIndex()]
             elif typ == "height":
@@ -3652,45 +4504,33 @@ class Panel(QWidget):
                                              else ""), 9000)
 
     def export_skp(self):
-        """The model as a SketchUp .skp (Collada .dae when the SKP writer
-        is not in this IngeTrazo)."""
+        """The model as ONE SketchUp .skp (components, groups, tags,
+        colours) — written by CAD2IngeTrazo with the OpenSKP writer that
+        ships inside IngeTrazo; nothing else is written beside it."""
         doc = self.doc()
         name = str((doc["arch"].get("project") or {}).get("name") or
                    "CAD2IngeTrazo model").strip() or "CAD2IngeTrazo model"
         start = os.path.join(os.path.expanduser("~"), name + ".skp")
         path, _f = QFileDialog.getSaveFileName(
             self, "Export the model to SketchUp", start,
-            "SketchUp model (*.skp);;Collada for SketchUp (*.dae)")
+            "SketchUp model (*.skp)")
         if not path:
             return
+        if not path.lower().endswith(".skp"):
+            path += ".skp"
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if path.lower().endswith(".dae"):
-                from formats import dae
-                dae.save_dae(self.vp.scene, path, name)
-                done = path
-            else:
-                if not path.lower().endswith(".skp"):
-                    path += ".skp"
-                try:
-                    from formats import skp_out
-                    skp_out.save_skp(self.vp.scene, path)
-                    done = path
-                except (ImportError, RuntimeError):
-                    # no SKP writer here: SketchUp opens Collada (File ▸
-                    # Import), so a .dae beside it
-                    from formats import dae
-                    done = path[:-4] + ".dae"
-                    dae.save_dae(self.vp.scene, done, name)
+            from . import skpwriter
+            st = skpwriter.save_skp(self.vp.scene, path)
         except Exception as e:  # noqa: BLE001
             log_error("panel.export_skp")
-            self.flash(f"Not exported — {e}", 9000)
+            self.flash(f"SketchUp file not written — {e}", 12000)
             return
         finally:
             QApplication.restoreOverrideCursor()
-        note = "" if done.lower().endswith(".skp") else \
-            " (Collada: in SketchUp, File ▸ Import)"
-        self.flash(f"Model exported: {done}{note}", 10000)
+        self.flash(f"SketchUp model written: {path} — {st['definitions']} "
+                   f"components ({st['instances']} placed), {st['groups']} "
+                   f"groups, {st['faces']:,} faces", 12000)
 
     def export_dxf(self):
         from . import sheets, sheetsdxf
@@ -3807,6 +4647,10 @@ class Panel(QWidget):
                     cb.setChecked(bool(doc["settings"].get("cad_lines",
                                                            True)))
                     cb.blockSignals(False)
+            self.i_gffl.blockSignals(True)
+            self.i_gffl.setValue(float(doc["settings"].get("ground_ffl", 0.0)
+                                       or 0.0))
+            self.i_gffl.blockSignals(False)
             i_ = self.c_carmodel.findData(doc["settings"].get("car_model",
                                                               "suv"))
             self.c_carmodel.blockSignals(True)
@@ -3884,6 +4728,16 @@ class Panel(QWidget):
         except Exception:  # noqa: BLE001
             log_error("panel._fill_plot")
         self.s_found.setValue(float(doc["settings"].get("found_level", -1.5)))
+        try:
+            st_ = doc["settings"]
+            self.s_rt.setValue(float(st_.get("retain_t", 0.3048)))
+            self.s_sh.setChecked(bool(st_.get("shoring")))
+            self.s_sh_kind.setCurrentIndex(max(self.s_sh_kind.findData(
+                st_.get("shoring_type", "piles")), 0))
+            self.s_sh_d.setValue(float(st_.get("shoring_d", 0.6096)))
+            self.s_sh_e.setValue(float(st_.get("shoring_embed", 3.048)))
+        except Exception:  # noqa: BLE001
+            log_error("panel shoring fill")
         self.s_slab_pos.blockSignals(True)
         self.s_slab_pos.setCurrentIndex(max(self.s_slab_pos.findData(
             doc["settings"].get("slab_pos", "top")), 0))

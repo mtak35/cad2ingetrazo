@@ -1,0 +1,3 @@
+blank_v17.skp — the blank-document scaffold of OpenSKP (openskp.create), MIT licence.
+Shipped here because some IngeTrazo installers bundle openskp without its _scaffold
+data folder; skpwriter.py hands it to openskp only when openskp's own copy is missing.

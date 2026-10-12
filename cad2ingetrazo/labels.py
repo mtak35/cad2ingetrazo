@@ -64,14 +64,59 @@ def _items(scene, level_name):
                             f"{area_txt(r['area'])}", h * 0.75, 0.0, False, "c"))
                 if r["rec"] is not None:
                     used.add(r["name"])
+        # the parking bays numbered P1, P2… along each bay, and the count;
+        # the CAD's own bay numbers then go (TCH: 163 of them all «99»)
+        stalls = []
+        if st.get("park_nums", True):
+            pk = (doc.get("parking") or {}).get(lv["id"]) or {}
+            stalls = pk.get("stalls") or []
+            for k, sl in enumerate(stalls):
+                a = (float(sl.get("ang", 90.0)) + 90.0) % 180.0
+                if a > 90.0:
+                    a -= 180.0
+                h = max(0.18, min(0.45, float(sl.get("W", 2.4)) / 5.0))
+                out.append((sl["c"][0], sl["c"][1], z, f"P{k + 1}", h, a,
+                            True, "c"))
+            if stalls:
+                xs = [sl["c"][0] for sl in stalls]
+                ys = [sl["c"][1] for sl in stalls]
+                out.append(((min(xs) + max(xs)) / 2, max(ys) + 3.0, z,
+                            f"CAR PARKING: {len(stalls)} CARS", 0.9, 0.0,
+                            True, "c"))
+            bstalls = pk.get("bike_stalls") or []
+            for k, sl in enumerate(bstalls):
+                a = (float(sl.get("ang", 0.0)) + 90.0) % 180.0
+                if a > 90.0:
+                    a -= 180.0
+                out.append((sl["c"][0], sl["c"][1], z, f"M{k + 1}", 0.16, a,
+                            True, "c"))
+            if bstalls:
+                xs = [sl["c"][0] for sl in bstalls]
+                ys = [sl["c"][1] for sl in bstalls]
+                out.append(((min(xs) + max(xs)) / 2, min(ys) - 1.5, z,
+                            f"MOTORBIKE PARKING: {len(bstalls)} BIKES", 0.6,
+                            0.0, True, "c"))
+            stalls = list(stalls) + list(bstalls)
         if st.get("ann_texts", True):
             for t in doc["texts"]:
                 if t["level"] != lv["id"] or \
                         t["text"].split("\n")[0].strip() in used:
                     continue
+                if stalls and _bay_number(t, stalls):
+                    continue
                 out.append((t["x"], t["y"], z, t["text"],
                             max(float(t.get("h", 0.2)), 0.02),
                             float(t.get("rot", 0.0)), False, "l"))
+        try:                     # level marks placed by a double-click
+            from . import planedit as PE
+            for m in doc.get("ffl_marks") or []:
+                if m.get("level") == lv["id"]:
+                    out.append((float(m["x"]), float(m["y"]), z,
+                                "▽ " + PE.mark_text(doc, lv["id"],
+                                                    (m["x"], m["y"])),
+                                0.2, 0.0, True, "c"))
+        except Exception:  # noqa: BLE001
+            pass
         if any(w["level"] == lv["id"] for w in arch["walls"]):
             try:                              # the grid's bubbles
                 for x, y, tag in PJ.grid_tags(doc):
@@ -82,6 +127,35 @@ def _items(scene, level_name):
         _cache.clear()
     _cache[key] = out
     return out
+
+
+_BAYNO = None
+
+
+def _bay_number(t, stalls) -> bool:
+    """A CAD text that numbers a parking bay: on a parking-number layer
+    («TEXT-PARKING NO.», «PARK NUM», «BAY NO»), or a short number standing
+    in a bay."""
+    global _BAYNO
+    import re
+    if _BAYNO is None:
+        _BAYNO = re.compile(r"PARK.*(NO|NUM|#)|BAY.*(NO|NUM|#)|STALL.*(NO|NUM)"
+                            r"|P\.?\s?NO", re.I)
+    if _BAYNO.search(str(t.get("layer", ""))):
+        return True
+    w = str(t.get("text", "")).strip()
+    if not re.fullmatch(r"P?-?\d{1,4}[A-Z]?", w, re.I):
+        return False
+    x, y = float(t["x"]), float(t["y"])
+    for sl in stalls:
+        a = math.radians(float(sl.get("ang", 90.0)))
+        dx, dy = x - sl["c"][0], y - sl["c"][1]
+        u = dx * math.cos(a) + dy * math.sin(a)
+        v = -dx * math.sin(a) + dy * math.cos(a)
+        if abs(u) <= float(sl.get("L", 4.8)) / 2 + 0.3 and \
+                abs(v) <= float(sl.get("W", 2.4)) / 2 + 0.3:
+            return True
+    return False
 
 
 def _dims_by_zoom(viewport, scene, name, ppm) -> None:

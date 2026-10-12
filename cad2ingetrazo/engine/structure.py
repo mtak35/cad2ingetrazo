@@ -457,6 +457,23 @@ FRAME_DEPTH = 0.07      # m, a frame's depth through the wall
 LEAF = 0.04             # m, a door leaf
 FRAME_COLOR = (0.94, 0.94, 0.92, 1.0)
 GLASS_COLOR = (0.62, 0.80, 0.90, 0.35)
+#: glass types: key → (label, rgba) — windows, glazed doors, curtain walls
+GLASS_TYPES = [
+    ("clear", "Clear float", GLASS_COLOR),
+    ("double", "Double glazed (clear)", (0.60, 0.78, 0.86, 0.45)),
+    ("lowe", "Low-E (neutral)", (0.56, 0.74, 0.78, 0.42)),
+    ("grey", "Tinted grey", (0.33, 0.37, 0.40, 0.58)),
+    ("bronze", "Tinted bronze", (0.52, 0.40, 0.28, 0.58)),
+    ("green", "Tinted green", (0.42, 0.62, 0.52, 0.52)),
+    ("blue_ref", "Reflective blue", (0.28, 0.45, 0.62, 0.78)),
+    ("silver_ref", "Reflective silver (mirror)", (0.74, 0.77, 0.80, 0.86)),
+    ("frosted", "Frosted / obscure (toilets)", (0.88, 0.90, 0.92, 0.82)),
+]
+GLASS_BY = {k: c for k, _l, c in GLASS_TYPES}
+
+
+def glass_color(o) -> tuple:
+    return GLASS_BY.get((o or {}).get("glass") or "clear", GLASS_COLOR)
 LEAF_COLOR = (0.58, 0.42, 0.28, 1.0)
 END_GAP = 0.10          # m kept between an opening and its wall's end
 PANEL_W = 4 * 0.3048    # a sliding panel: 4' wide at most
@@ -790,7 +807,8 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
             for a_, b_, c_, d_ in cut(za, zb):
                 out += _box(a, u, n, a_ - sa, b_ - sa, -0.006, 0.006, c_, d_,
                             CW_SPANDREL if (panel and spandrel)
-                            else CW_GLASS)
+                            else (GLASS_BY.get(w.get("glass"), CW_GLASS)
+                                  if w.get("glass") else CW_GLASS))
     if straight:                              # a door's head: a transom
         p0, u0 = seg.at(0.0), seg.tangent(0.0)
         n0 = (-u0[1], u0[0])
@@ -852,6 +870,21 @@ def _sz_prism(p0, u, n, pts, c0, c1, color) -> list:
 
 
 def opening_parts(o: dict, seg, z0: float) -> list:
+    """The frame, glass (of its glass type), leaves and ironmongery of an
+    opening — with its head."""
+    faces = _opening_parts_head(o, seg, z0)
+    gc = glass_color(o)
+    if gc == GLASS_COLOR:
+        return faces
+    out = []
+    for f in faces:
+        if isinstance(f, dict) and tuple(f.get("color") or ()) == GLASS_COLOR:
+            f = dict(f, color=gc)
+        out.append(f)
+    return out
+
+
+def _opening_parts_head(o: dict, seg, z0: float) -> list:
     """The frame (and glass / leaves / ironmongery) of an opening — with
     its head: flat, a transom light over it, or an arch top."""
     hs = head_size(o) if o["kind"] != "void" else 0.0
@@ -1411,7 +1444,8 @@ def build(doc: dict, elevations) -> list[dict]:
                 else z0 + float(w["height"])
             if top - b < 0.01:
                 continue
-            ops = [o for o in openings if o["wall"] == w["id"]
+            ops = [] if w.get("rcc") else \
+                [o for o in openings if o["wall"] == w["id"]
                    and opening_room(o, w, openings, top - z0) is None]
             if w.get("rail"):                    # a railing, not a wall
                 from . import railings as RL
