@@ -572,14 +572,16 @@ def make(doc: dict, elevations, opts: dict):
                  "rect": (zx0 + (zw - fw) / 2, zy0 + (zh - TITLE_H - fh) / 2,
                           fw, fh),
                  "title": "Foundation plan", "kind": "plan", "number": "F"}
-        pads = sum(1 for f in foots if f.get("kind") == "pad")
-        strips = len(foots) - pads
+        from collections import Counter as _C
+        kinds_ = _C(f.get("kind", "pad") for f in foots)
+        note_ = "   ·   ".join(f"{n} {k}{'s' if n > 1 else ''}"
+                               for k, n in kinds_.items())
         deep = max(float(f["d"]) for f in foots)
         sheets.insert(0, {
             "name": f"{prefix}100 Foundation plan", "number": f"{prefix}100",
             "paper": paper, "title": "Foundation plan", "scale": n_plan,
             "frames": [frame], "rooms": [], "cotas": [], "levels": [],
-            "note": f"FOUNDATIONS:  {pads} pads   ·   {strips} strips   ·   "
+            "note": f"FOUNDATIONS:  {note_}   ·   "
                     f"founding level {ftop - deep:+.2f} m"})
 
     # ---- the site plan: the plot, its setbacks, the building's roof ------------

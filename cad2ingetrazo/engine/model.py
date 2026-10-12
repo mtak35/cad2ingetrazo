@@ -459,6 +459,12 @@ def _structure(raw, level_ids: set) -> list[dict]:
                         rec[k_] = True
                 if e.get("room"):          # sunk / raised for this room
                     rec["room"] = str(e["room"])
+                # its floor finish: by the rooms (default), over the whole
+                # slab, or none; its own thickness (0 = the default)
+                if e.get("fin") in ("whole", "off"):
+                    rec["fin"] = e["fin"]
+                if float(e.get("fin_t", 0) or 0) > 0:
+                    rec["fin_t"] = min(float(e["fin_t"]), 0.3)
                 # which of them are shafts (an X over them in the plans)
                 rec["shafts"] = [[_pt(p) for p in h]
                                  for h in e.get("shafts") or []
@@ -507,10 +513,16 @@ def _structure(raw, level_ids: set) -> list[dict]:
                                            0.0), 3.0),
                            pt=min(max(float(e.get("pt", 0.15)), 0.05), 1.0))
             else:                                   # footing
-                kind = "strip" if e.get("kind") == "strip" else "pad"
-                rec.update(kind=kind, w=min(max(float(e["w"]), 0.1), 10.0),
+                kind = e.get("kind") if e.get("kind") in (
+                    "strip", "raft", "combined") else "pad"
+                rec.update(kind=kind, w=min(max(float(e.get("w", 1.0)),
+                                                0.1), 500.0),
                            d=min(max(float(e["d"]), 0.05), 5.0))
-                if kind == "pad":
+                if kind in ("raft", "combined"):    # an outline
+                    rec["corners"] = [_pt(p) for p in e["corners"]]
+                    rec["holes"] = [[_pt(p) for p in h]
+                                    for h in e.get("holes") or []]
+                elif kind == "pad":
                     rec.update(x=float(e["x"]), y=float(e["y"]),
                                angle=float(e.get("angle", 0.0)))
                 else:

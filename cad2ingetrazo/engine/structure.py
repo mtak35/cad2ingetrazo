@@ -23,6 +23,7 @@ Records (``doc["structure"]``): {"id", "name", "type", "level", …}
     slab    corners [[x, y]…], t, offset
     footing kind "pad": x, y, w, d (depth), angle
             kind "strip": a, b (or an arc's "m"), w, d
+            kind "raft" | "combined": corners (+ holes), d
     roof    kind "gable"|"hip"|"flat", corners, slope, overhang, t,
             ridge "long"|"short", parapet, pt — on its level's wall tops
 """
@@ -240,6 +241,13 @@ def why_not(e: dict) -> str | None:
             if abs(_area(e["corners"])) < 0.05:
                 return "Too small for a slab"
         elif t == "footing":
+            if e.get("kind") in ("raft", "combined"):
+                if len(e.get("corners") or []) < 3 or \
+                        abs(_area(e["corners"])) < 0.2:
+                    return "Too small for a raft / combined footing"
+                if float(e["d"]) < 0.05:
+                    return "A footing needs a depth"
+                return None
             if float(e["w"]) < 0.1 or float(e["d"]) < 0.05:
                 return "A footing needs a width and a depth"
             if e.get("kind") == "strip" and math.dist(e["a"], e["b"]) < 0.1:
@@ -1421,6 +1429,98 @@ def roof_corners(corners, kind: str) -> list:
     return [[round(p[0], 4), round(p[1], 4)] for p in pts]
 
 
+# ---- car ramps: walls and beams stop at the ramp's slab -----------------------------
+class _Ramp:
+    """A built ramp in absolute heights: ``doc["_ramps"]`` items are
+    {"sections": [[a, b]…], "zs": [z of each section's top], "t"}."""
+
+    def __init__(self, r):
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        self.secs = [(tuple(a), tuple(b)) for a, b in r["sections"]]
+        self.zs = [float(z) for z in r["zs"]]
+        self.t = float(r.get("t", 0.2))
+        self.quads = [Polygon([a, b, d, c]).buffer(0)
+                      for (a, b), (c, d) in zip(self.secs, self.secs[1:])]
+        self.poly = unary_union(self.quads) if self.quads else None
+        self.mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                     for a, b in self.secs]
+
+    def top_at(self, p):
+        """The ramp's driving surface over ``p`` (None: not over it)."""
+        from shapely.geometry import Point
+        pt = Point(p)
+        for i, q in enumerate(self.quads):
+            if q.buffer(0.02).contains(pt):
+                m0, m1 = self.mids[i], self.mids[i + 1]
+                dx, dy = m1[0] - m0[0], m1[1] - m0[1]
+                L2 = dx * dx + dy * dy or 1e-9
+                f = ((p[0] - m0[0]) * dx + (p[1] - m0[1]) * dy) / L2
+                f = min(max(f, 0.0), 1.0)
+                return self.zs[i] + (self.zs[i + 1] - self.zs[i]) * f
+        return None
+
+
+def _ramps(doc):
+    out = []
+    for r in doc.get("_ramps") or []:
+        try:
+            rr = _Ramp(r)
+            if rr.poly is not None and not rr.poly.is_empty:
+                out.append(rr)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _wall_under_ramps(w, ramps, bot, top, step=0.4):
+    """A straight wall under / over a car ramp in pieces along it, each
+    with its own bottom and top: stopping under the ramp's soffit (or
+    standing on its driving surface) — [(s0, s1, bot, top)] along the
+    wall's line, or None when no ramp crosses it."""
+    from shapely.geometry import LineString
+    if w.get("kind", "line") != "line" or w.get("rail"):
+        return None
+    a, b = tuple(w["a"]), tuple(w["b"])
+    L = math.dist(a, b)
+    if L < 0.05:
+        return None
+    line = LineString([a, b]).buffer(float(w["t"]) / 2, cap_style=2)
+    hit = [r for r in ramps if r.poly.intersects(line)]
+    if not hit:
+        return None
+    n = max(1, int(math.ceil(L / step)))
+    segs = []
+    changed = False
+    for k in range(n):
+        s0, s1 = L * k / n, L * (k + 1) / n
+        lo, hi = bot, top
+        for sm in (s0, (s0 + s1) / 2, s1):
+            p = (a[0] + (b[0] - a[0]) * sm / L, a[1] + (b[1] - a[1]) * sm / L)
+            for r in hit:
+                zt = r.top_at(p)
+                if zt is None:
+                    continue
+                soff = zt - r.t
+                if bot + 0.05 < soff < top:           # the ramp over it
+                    hi = min(hi, soff)
+                    changed = True
+                elif bot - 6.0 < zt <= bot + 0.05 and zt < bot - 0.02:
+                    lo = min(lo, zt)                  # on the ramp below
+                    changed = True
+        segs.append([s0, s1, lo, hi])
+    if not changed:
+        return None
+    merged = []                                       # equal runs joined
+    for sg in segs:
+        if merged and abs(merged[-1][2] - sg[2]) < 1e-3 and \
+                abs(merged[-1][3] - sg[3]) < 1e-3:
+            merged[-1][1] = sg[1]
+        else:
+            merged.append(sg)
+    return [tuple(m) for m in merged]
+
+
 # ---- everything, with its faces ----------------------------------------------------
 def build(doc: dict, elevations) -> list[dict]:
     """[{"kind", "id", "name", "level", "faces"}] for every wall and
@@ -1434,6 +1534,55 @@ def build(doc: dict, elevations) -> list[dict]:
         z0, under = li["z0"], li["under"]
         # walls — cut by their openings
         mine = [w for w in walls if w["level"] == lid]
+        ramps = _ramps(doc)
+        # a wall a car ramp crosses: in pieces, each stopping under the
+        # ramp's soffit (its doors / windows go with the piece they are in)
+        if ramps:
+            mine2, ops_extra = [], []
+            for w in mine:
+                b_ = z0 + float(w.get("base", 0.0))
+                t_ = under if w.get("height", "level") == "level" \
+                    else z0 + float(w["height"])
+                try:
+                    runs = _wall_under_ramps(w, ramps, b_, t_)
+                except Exception:  # noqa: BLE001
+                    runs = None
+                if not runs:
+                    mine2.append(w)
+                    continue
+                a, b = w["a"], w["b"]
+                L = math.dist(a, b)
+                # a door / window keeps one piece round it (the lowest top)
+                for o in openings:
+                    if o["wall"] != w["id"]:
+                        continue
+                    o0 = float(o["pos"]) - float(o["w"]) / 2 - 0.1
+                    o1 = float(o["pos"]) + float(o["w"]) / 2 + 0.1
+                    hit_ = [r_ for r_ in runs if r_[1] > o0 and r_[0] < o1]
+                    if len(hit_) > 1:
+                        j = (min(r_[0] for r_ in hit_),
+                             max(r_[1] for r_ in hit_),
+                             min(r_[2] for r_ in hit_),
+                             min(r_[3] for r_ in hit_))
+                        runs = sorted([r_ for r_ in runs if r_ not in hit_] +
+                                      [j])
+                for k, (s0, s1, lo, hi) in enumerate(runs):
+                    if hi - lo < 0.05:
+                        continue
+                    pa = [a[0] + (b[0] - a[0]) * s0 / L,
+                          a[1] + (b[1] - a[1]) * s0 / L]
+                    pb = [a[0] + (b[0] - a[0]) * s1 / L,
+                          a[1] + (b[1] - a[1]) * s1 / L]
+                    pid = f"{w['id']}~{k}"
+                    mine2.append(dict(w, id=pid, _orig=w["id"], a=pa, b=pb,
+                                      base=lo - z0, height=hi - z0))
+                    for o in openings:
+                        if o["wall"] == w["id"] and \
+                                s0 <= float(o["pos"]) < s1:
+                            ops_extra.append(dict(o, wall=pid,
+                                                  pos=float(o["pos"]) - s0))
+            mine = mine2
+            openings = [o for o in openings] + ops_extra
         plans = W.plan(mine)
         for w in mine:
             pieces = plans.get(w["id"])
@@ -1475,8 +1624,8 @@ def build(doc: dict, elevations) -> list[dict]:
                                     "okind": o["kind"], "faces": parts})
             else:
                 faces = [f for pc in pieces for f in W.solid(pc, b, top)]
-            out.append({"kind": "wall", "id": w["id"], "name": w["name"],
-                        "level": lid, "faces": faces})
+            out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
+                        "name": w["name"], "level": lid, "faces": faces})
         els = [e for e in struct if e["level"] == lid and why_not(e) is None]
         # columns
         for c in (e for e in els if e["type"] == "column"):
@@ -1505,14 +1654,40 @@ def build(doc: dict, elevations) -> list[dict]:
             out.append(_el(c, lid, faces))
         # beams: joined among themselves like walls
         beams = [e for e in els if e["type"] == "beam"]
+        if ramps and beams:     # no beam through a car ramp: cut round it
+            from shapely.geometry import LineString
+            btop = under - SHRINK
+            nb = []
+            for e in beams:
+                bbot = btop - float(e["h"])
+                L_ = LineString([tuple(e["a"]), tuple(e["b"])])
+                cut_ = None
+                for r in ramps:
+                    zlo, zhi = min(r.zs) - r.t, max(r.zs)
+                    if zhi > bbot and zlo < btop and r.poly.intersects(
+                            L_.buffer(float(e["w"]) / 2)):
+                        g_ = r.poly.buffer(0.05)
+                        cut_ = g_ if cut_ is None else cut_.union(g_)
+                if cut_ is None:
+                    nb.append(e)
+                    continue
+                rest = L_.difference(cut_)
+                for k, g in enumerate(getattr(rest, "geoms", [rest])):
+                    if g.geom_type == "LineString" and g.length > 0.3:
+                        c_ = list(g.coords)
+                        nb.append(dict(e, id=f"{e['id']}~{k}", _orig=e["id"],
+                                       a=list(c_[0]), b=list(c_[-1])))
+            beams = nb
         bplans = W.plan([as_wall(e, shrink=FIT_SHRINK if e.get("fit")
                                  else SHRINK) for e in beams])
         for e in beams:
             top = under - SHRINK
             bot = top - float(e["h"]) + 2 * SHRINK
-            out.append(dict(_el(e, lid, [f for pc in bplans.get(e["id"], ())
-                                         for f in W.solid(pc, bot, top)]),
-                            inwall=in_one_wall(e, mine)))
+            el_ = _el(e, lid, [f for pc in bplans.get(e["id"], ())
+                               for f in W.solid(pc, bot, top)])
+            if e.get("_orig"):
+                el_["id"] = e["_orig"]
+            out.append(dict(el_, inwall=in_one_wall(e, mine)))
         # slabs
         slabs_ = [e for e in els if e["type"] == "slab" and not e.get("skip")]
         ids_ = [lv["id"] for lv in doc["levels"]]
@@ -1557,6 +1732,15 @@ def build(doc: dict, elevations) -> list[dict]:
             piece = {"outer": _ccw(pad_outline(f)), "holes": []}
             out.append(_el(f, lid, W.solid(piece, ftop - float(f["d"]),
                                            ftop)))
+        for f in (e for e in els if e["type"] == "footing"
+                  and e.get("kind") in ("raft", "combined")):
+            piece = {"outer": _ccw([tuple(p) for p in f["corners"]]),
+                     "holes": [list(reversed(_ccw([tuple(p) for p in h])))
+                               for h in f.get("holes") or []]}
+            # a raft 2 mm under the pads' top plane (no flicker where both)
+            top_ = ftop - (2 * SHRINK if f["kind"] == "raft" else 0.0)
+            out.append(_el(f, lid, W.solid(piece, top_ - float(f["d"]),
+                                           top_)))
         strips = [e for e in els if e["type"] == "footing"
                   and e.get("kind") == "strip"]
         splans = W.plan([as_wall(e, shrink=0.0) for e in strips])

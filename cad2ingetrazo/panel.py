@@ -188,7 +188,9 @@ FIELDS = {
     "beam": [("w", "Width", "len", (0.05, 3.0)),
              ("h", "Depth", "len", (0.05, 5.0))],
     "slab": [("t", "Thickness", "len", (0.02, 3.0)),
-             ("offset", "Top offset", "len", (-3.0, 3.0))],
+             ("offset", "Top offset", "len", (-3.0, 3.0)),
+             ("fin", "Floor finish", "choice", ("rooms", "whole", "off")),
+             ("fin_t", "Finish thickness (0 = default)", "len", (0.0, 0.3))],
     "footing": [("w", "Width", "len", (0.1, 10.0)),
                 ("d", "Depth", "len", (0.05, 5.0))],
     "stair": [("rise", "Riser (max)", "len", (0.10, 0.25)),
@@ -255,7 +257,9 @@ def _choice_labels() -> dict:
                 "glass": "Frameless glass", "glass_post":
                 "Glass panels between steel posts", "curtain": "Curtain wall",
                 "spandrel": "Spandrel panels", "transom": "Transom light",
-                "arch": "Arch top", "flat": "Flat"})
+                "arch": "Arch top", "flat": "Flat",
+                "rooms": "In the rooms and out to the slab edge",
+                "whole": "Over the whole slab", "off": "No floor finish"})
     return out
 
 
@@ -478,7 +482,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.13.3</span>")
+                   "3.14.0</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -499,6 +503,19 @@ class Panel(QWidget):
                                        "in the plan views")
         self.c_cadlines_top.toggled.connect(self.set_cad_lines)
         row.addWidget(self.c_cadlines_top)
+        self.lay.addLayout(row)
+        # the level picked at the top, alone in 3D (and its whole model)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Isolate level", self.isolate_level,
+                           "3D: only the level picked at the top — every "
+                           "other floor, the plot and the site hidden"))
+        row.addWidget(_btn("Show all", lambda: self.isolate_level(False),
+                           "Every floor shown again"))
+        row.addWidget(_btn("Select level", self.select_level,
+                           "Select the whole level picked at the top — its "
+                           "walls, doors, windows, structure, finishes, "
+                           "stairs… (one level = one layer: "
+                           "«C2I · <level>»)"))
         self.lay.addLayout(row)
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -530,6 +547,61 @@ class Panel(QWidget):
 
     def show_3d(self):
         self._apply_view("C2I · 3D")
+
+    def isolate_level(self, on=True):
+        """3D: only the level picked at the top (its layer), every other
+        CAD2IngeTrazo layer hidden; «Show all» puts them back as they
+        were."""
+        from .host import LAYER_PREFIX, is_ann_layer, level_layer
+        sc = self.vp.scene
+        if not on:
+            was = getattr(sc, "_c2i_iso", None) or {}
+            for L in sc.layers:
+                if L.name in was:
+                    L.visible = was[L.name]
+                elif L.name.startswith(LAYER_PREFIX) and \
+                        not is_ann_layer(L.name):
+                    L.visible = True
+            sc._c2i_iso = None
+            sc.version += 1
+            self.vp.update()
+            self.flash("Every floor shown")
+            return
+        lid, lv = self.level()
+        if not lid or not lv:
+            self.flash("Pick a level at the top first")
+            return
+        self.show_3d()
+        keep = level_layer(lv["name"])
+        if getattr(sc, "_c2i_iso", None) is None:
+            sc._c2i_iso = {L.name: L.visible for L in sc.layers}
+        n = 0
+        for L in sc.layers:
+            if not L.name.startswith(LAYER_PREFIX) or is_ann_layer(L.name):
+                continue
+            want = L.name == keep
+            if L.visible != want:
+                L.visible = want
+                n += 1
+        sc.version += 1
+        self.vp.update()
+        self.flash(f"«{lv['name']}» isolated — «Show all» brings the other "
+                   "floors back")
+
+    def select_level(self):
+        """Every CAD2IngeTrazo group of the level picked at the top."""
+        lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        sc = self.vp.scene
+        hits = [g for g in sc.groups if (PJ.tag_of(g) or {}).get("level")
+                == lid]
+        sc.selection.clear()
+        for g in hits:
+            sc.selection.add(g)
+        self.vp.update()
+        self.flash(f"«{lv['name']}»: {len(hits)} elements selected")
 
     def show_plan(self):
         if self.level_box.currentData() == SITE_LV:
@@ -759,6 +831,23 @@ class Panel(QWidget):
         self.i_portion.setStyleSheet("color: #8a94a3;")
         f.addRow(self.i_portion)
         row = QHBoxLayout()
+        self.i_gffl = _spin(0.0, 1.2192, 0.6096, 0.0762)   # 0 … 4'-0"
+        self.i_gffl.setSpecialValueText("As the CAD notes it")
+        self.i_gffl.setToolTip(
+            "The ground floor's finished level above the natural ground / "
+            "road (N.G.L. = 0), 1'-0\" to 4'-0\" as the project needs: the "
+            "ground floor, the floors above and the basements follow, and "
+            "the F.F.L. marks read from it. At the bottom of the range: the "
+            "CAD's own level note («LEV. +4'-0\"») decides.")
+        row.addWidget(self.i_gffl, 1)
+        row.addWidget(_btn("Apply", self._apply_gffl))
+        f.addRow("Ground floor level (F.F.L.)", row)
+        self.i_floor_h = _spin(1.5, 20.0, 3.048)        # 10'-0"
+        self.i_floor_h.setToolTip("The level's storey height, floor to "
+                                  "floor (the CAD's level notes, when read, "
+                                  "set it instead)")
+        f.addRow("Floor height (floor to floor)", self.i_floor_h)
+        row = QHBoxLayout()
         row.addWidget(_btn("Analyse", self._analyse,
                            "Read the file and list its layers — nothing "
                            "changes"))
@@ -856,23 +945,6 @@ class Panel(QWidget):
                                  "is its floor level, in the plans and in "
                                  "3D; the storey heights follow")
         sf.addRow(self.i_levels)
-        row = QHBoxLayout()
-        self.i_gffl = _spin(0.0, 1.2192, 0.0, 0.0762)   # 0 … 4'-0"
-        self.i_gffl.setSpecialValueText("As the CAD notes it")
-        self.i_gffl.setToolTip(
-            "The ground floor's finished level above the natural ground / "
-            "road (N.G.L. = 0), 1'-0\" to 4'-0\" as the project needs: the "
-            "ground floor, the floors above and the basements follow, and "
-            "the F.F.L. marks read from it. At the bottom of the range: the "
-            "CAD's own level note («LEV. +4'-0\"») decides.")
-        row.addWidget(self.i_gffl, 1)
-        row.addWidget(_btn("Apply", self._apply_gffl))
-        sf.addRow("Ground floor level (F.F.L.)", row)
-        self.i_floor_h = _spin(1.5, 20.0, 2.9972)       # 9'-10"
-        self.i_floor_h.setToolTip("The level's storey height, floor to "
-                                  "floor (the CAD's level notes, when read, "
-                                  "set it instead)")
-        sf.addRow("Floor height (floor to floor)", self.i_floor_h)
         f.addRow(sbox)
         f.addRow(lbox)
         self.i_report = QLabel("")
@@ -1314,6 +1386,8 @@ class Panel(QWidget):
             self.o_move.clear()
             for lv in reversed(real):
                 self.o_move.addItem(lv["name"], lv["id"])
+            if doc["arch"].get("plot"):
+                self.o_move.addItem("Plot + shoring (site)", PJ.PLOT_ITEM)
             self.o_move.setCurrentIndex(max(self.o_move.findData(mv), 0))
             self.o_move.blockSignals(False)
         mv = self.o_move.currentData()
@@ -1328,6 +1402,8 @@ class Panel(QWidget):
         self.o_rlev.clear()
         for lv in reversed(real):
             self.o_rlev.addItem(lv["name"], lv["id"])
+        if doc["arch"].get("plot"):
+            self.o_rlev.addItem("Plot + shoring (site)", PJ.PLOT_ITEM)
         kr = self.o_rlev.findData(rc)
         self.o_rlev.setCurrentIndex(kr if kr >= 0 else
                                     max(self.o_rlev.findData(mv), 0))
@@ -1348,6 +1424,16 @@ class Panel(QWidget):
                        "second floor first")
             return
         doc = self.doc()
+        if lid == PJ.PLOT_ITEM:            # the plot (and its shoring)
+            r = PJ.plot_overlap_offset(doc, ref, self.o_how.currentData())
+            if r is None:
+                self.flash("The plot and that level's walls are needed")
+                return
+            PJ.move_plot(doc, *r)
+            other = PJ.level_by_id(doc["arch"], ref)["name"]
+            self.commit(doc, f"Plot and shoring moved {r[0]:+.3f}, "
+                             f"{r[1]:+.3f} m over «{other}»")
+            return
         r = PJ.overlap_offset(doc, lid, ref, self.o_how.currentData())
         if r is None:
             self.flash("Both levels need walls")
@@ -1373,6 +1459,10 @@ class Panel(QWidget):
         if not dx and not dy:
             return
         doc = self.doc()
+        if lid == PJ.PLOT_ITEM:
+            PJ.move_plot(doc, dx, dy)
+            self.commit(doc, f"Plot and shoring moved {dx:+.3f}, {dy:+.3f} m")
+            return
         PJ.move_level(doc, lid, dx, dy)
         self.commit(doc, f"Level moved {dx:+.3f}, {dy:+.3f} m")
 
@@ -1384,6 +1474,10 @@ class Panel(QWidget):
         if not deg or abs(deg) % 360.0 < 1e-6:
             return
         doc = self.doc()
+        if lid == PJ.PLOT_ITEM:
+            if PJ.rotate_plot(doc, deg):
+                self.commit(doc, f"Plot and shoring rotated {deg:+g}°")
+            return
         if not PJ.rotate_level(doc, lid, deg):
             self.flash("That level has no walls to rotate")
             return
@@ -2056,6 +2150,19 @@ class Panel(QWidget):
         f.addRow("Pad width (under columns)", self.s_pad)
         self.s_strip = _spin(0.2, 4, 0.60)
         f.addRow("Strip width (under walls)", self.s_strip)
+        self.s_ftype = QComboBox()
+        for k_, lab_ in PJ.FOUNDATION_TYPES:
+            self.s_ftype.addItem(lab_, k_)
+        f.addRow("Foundation type", self.s_ftype)
+        row = QHBoxLayout()
+        self.s_raft_t = _spin(0.2, 3.0, 0.6096, 0.0508)       # 2'-0"
+        self.s_raft_t.setToolTip("Raft thickness")
+        self.s_raft_o = _spin(0.0, 5.0, 0.6096, 0.0508)
+        self.s_raft_o.setToolTip("How far the raft runs out past the walls "
+                                 "and columns")
+        row.addWidget(self.s_raft_t)
+        row.addWidget(self.s_raft_o)
+        f.addRow("Raft thickness / projection", row)
         f.addRow(_btn("Footings under the lowest level", self._footings,
                       "Pads under its columns, strips under its walls — "
                       "or import a foundation plan: Level ▸ Foundation"))
@@ -2171,7 +2278,7 @@ class Panel(QWidget):
             if rec is not None:
                 rec["fz"] = off
         made = 0
-        elev = M.elevations(arch)
+        elev = PJ.elevations(arch)
         for vs in areas:
             z = sum(v[2] for v in vs) / len(vs)
             lid = None
@@ -2490,12 +2597,121 @@ class Panel(QWidget):
                 " (add columns, or pick «Over the walls»)"
         self.commit(doc, msg)
 
+    def _beams_cc(self, lid):
+        doc = self.doc()
+        st = doc["settings"]
+        n = PJ.add_beams_on_columns(doc, lid, float(st.get("beam_w", 0.2032)),
+                                    float(st.get("beam_h", 0.6096)),
+                                    float(st.get("beam_span", 10.0)))
+        self.commit(doc, f"{n} beams column to column")
+
+    def _beam_z(self, b):
+        doc = self.doc()
+        el = PJ.elevations(doc["arch"])
+        i = next(k for k, lv in enumerate(doc["arch"]["levels"])
+                 if lv["id"] == b["level"])
+        top = el[i + 1] if i + 1 < len(el) else el[i] + 3.0
+        return top - float(b.get("h", 0.6))
+
+    def _beam_pick(self, bid):
+        """The beam's nearer end trimmed / extended to the point clicked."""
+        from . import planedit as PE_
+        b = PJ.find_record(self.doc(), "beam", bid)
+        pe = getattr(self, "_planedit", None)
+        if b is None or pe is None:
+            return
+
+        def done(p):
+            doc = self.doc()
+            ok, why = PE_.trim_extend_beam(doc, bid, "near", "point", pt=p)
+            if not ok:
+                self.flash(f"Not changed — {why}")
+                return
+            self.commit(doc, f"Beam trimmed / extended to the point "
+                             f"({why} long)")
+        pe.pick_point(self._beam_z(b), done,
+                      "Click where the beam should end — its nearer end "
+                      "moves there along its line (Esc cancels)")
+
+    def beam_trim_dialog(self, bid):
+        """A beam's end moved along its line: by a length, to a point, to
+        the nearest column's face or the nearest beam / wall."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+        from . import planedit as PE_
+        doc = self.doc()
+        b = PJ.find_record(doc, "beam", bid)
+        if b is None:
+            return
+        L = math.dist(b["a"], b["b"])
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Trim / extend beam — CAD2IngeTrazo")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"<b>{b.get('name', 'Beam')}</b> · "
+                             f"{len_txt(L)} long"))
+        form = QFormLayout()
+        lay.addLayout(form)
+        end = QComboBox()
+        end.addItem(f"Start ({b['a'][0]:.2f}, {b['a'][1]:.2f})", "a")
+        end.addItem(f"End ({b['b'][0]:.2f}, {b['b'][1]:.2f})", "b")
+        form.addRow("Which end", end)
+        how = QComboBox()
+        how.addItem("To the face of the nearest column in its line",
+                    "column")
+        how.addItem("To the nearest beam / wall in its line", "beam")
+        how.addItem("By a length (+ extend, − trim)", "length")
+        how.addItem("To a point I click in the model", "pick")
+        form.addRow("Trim / extend", how)
+        ln = _spin(-50.0, 50.0, 0.3048, 0.0254)
+        form.addRow("Length (+ / −)", ln)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        lay.addWidget(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        dlg.adjustSize()
+        _place_on_screen(dlg, QCursor.pos())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        mode = how.currentData()
+        e_ = end.currentData()
+        if mode == "pick":
+            pe = getattr(self, "_planedit", None)
+            if pe is None:
+                return
+
+            def done(p):
+                d2 = self.doc()
+                ok, why = PE_.trim_extend_beam(d2, bid, e_, "point", pt=p)
+                if not ok:
+                    self.flash(f"Not changed — {why}")
+                    return
+                self.commit(d2, f"Beam trimmed / extended ({why} long)")
+            pe.pick_point(self._beam_z(b), done)
+            return
+        doc = self.doc()
+        ok, why = PE_.trim_extend_beam(doc, bid, e_, mode, ln.value())
+        if not ok:
+            self.flash(f"Not changed — {why}", 8000)
+            return
+        self.commit(doc, f"Beam trimmed / extended ({why} long)")
+
     def _footings(self):
         doc = self.doc()
         doc["settings"]["found_level"] = self.s_found.value()
+        kind = self.s_ftype.currentData() or "isolated_strip"
+        doc["settings"]["raft_t"] = self.s_raft_t.value()
+        doc["settings"]["raft_off"] = self.s_raft_o.value()
         n = PJ.add_footings(doc, self.s_pad.value(), None,
-                            self.s_strip.value(), None)
-        self.commit(doc, f"{n} footings down to {self.s_found.value():+.2f}")
+                            self.s_strip.value(), None, kind,
+                            self.s_raft_t.value(), self.s_raft_o.value())
+        lab = dict(PJ.FOUNDATION_TYPES).get(kind, kind).split(" (")[0]
+        if not n:
+            self.flash("No footings made — the lowest level needs columns "
+                       "(isolated / combined) or walls (strip / raft)")
+            return
+        self.commit(doc, f"{lab}: {n} footing(s) down to "
+                         f"{self.s_found.value():+.2f}")
 
     def _import_foundation(self, doc, path):
         doc["settings"].update(self._settings_from_ui())
@@ -3335,6 +3551,8 @@ class Panel(QWidget):
                           lambda: self._slab_extend(sel[1]))
             sub.addAction("Extend slab to walls I pick…",
                           lambda: self._start_extend_pick(sel[1]))
+            sub.addAction("Extend slab up to the beams",
+                          lambda: self._slab_to_beams(sel[1]))
             mine = [m for m in doc.get("man_shafts") or []
                     if any(h in (rec.get("man") or [])
                            for h in [m["pts"]]) or self._shaft_in(m, rec)]
@@ -3351,6 +3569,14 @@ class Panel(QWidget):
                         + (" · through all floors" if m.get("through")
                            else ""),
                         lambda i=m["id"]: self._shaft_remove(i))
+        if sel[0] == "beam":
+            sub.addAction("Trim / extend this beam…",
+                          lambda: self.beam_trim_dialog(sel[1]))
+            sub.addAction("Trim / extend to a point I click",
+                          lambda: self._beam_pick(sel[1]))
+        if sel[0] in ("beam", "column"):
+            sub.addAction("Beams column to column on this level",
+                          lambda: self._beams_cc(rec["level"]))
         if sel[0] == "ramp":
             sub.addAction("Start at the other end", self._flip)
         if sel[0] == "room":
@@ -3444,6 +3670,14 @@ class Panel(QWidget):
             row.addWidget(_btn("Extend to walls I pick…",
                                lambda: (dlg.reject(),
                                         self._start_extend_pick(sel[1]))))
+            form.addRow(row)
+            row = QHBoxLayout()
+            row.addWidget(_btn("Extend slab to the walls",
+                               lambda: (dlg.reject(),
+                                        self._slab_extend(sel[1]))))
+            row.addWidget(_btn("Extend slab up to the beams",
+                               lambda: (dlg.reject(),
+                                        self._slab_to_beams(sel[1]))))
             form.addRow(row)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel
                               | QDialogButtonBox.Apply)
@@ -3600,7 +3834,7 @@ class Panel(QWidget):
         if slab is not None:
             lid = slab["level"]
             if slab.get("top"):
-                el = M.elevations(arch)
+                el = PJ.elevations(arch)
                 order = [arch["levels"][i]["id"] for i in
                          sorted(range(len(arch["levels"])),
                                 key=lambda i: el[i])]
@@ -3687,6 +3921,22 @@ class Panel(QWidget):
             self.flash("The slab already reaches its walls")
             return
         self.commit(doc, "Slab extended to its walls")
+
+    def _slab_to_beams(self, slab_id):
+        from . import slabedges as SE
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            return
+        if not SE.beams_for(doc, slab):
+            self.flash("No beams under this slab — add them in section 6 "
+                       "(Beams run: Column to column)")
+            return
+        n = SE.extend_to_beams(doc, slab)
+        if not n:
+            self.flash("The slab already covers its beams")
+            return
+        self.commit(doc, f"Slab extended up to {n} beam(s)")
 
     def slab_edges_dialog(self, slab_id):
         """A slab's edges: extended to its walls; a railing on its free
@@ -4730,7 +4980,7 @@ class Panel(QWidget):
                 "tmin": self.i_tmin.value(), "tmax": self.i_tmax.value(),
                 "win_style": self.o_wstyle.currentData(),
                 "levels_cad": self.i_levels.isChecked(),
-                "floor_h": self.i_floor_h.value(),
+                "floor_h_v2": self.i_floor_h.value(),
                 "door_style": self.o_dstyle.currentData(),
                 "door2_style": self.o_d2style.currentData(),
                 "door_head": self.o_dhead.currentData(),
@@ -4749,7 +4999,7 @@ class Panel(QWidget):
         self.i_tmin.setValue(g("tmin", d["tmin"]))
         self.i_tmax.setValue(g("tmax", d["tmax"]))
         self.o_door_h.setValue(g("door_h", d["door_h"]))
-        self.i_floor_h.setValue(g("floor_h", 2.9972))
+        self.i_floor_h.setValue(g("floor_h_v2", 3.048))
         self.o_win_h.setValue(g("win_h", d["win_h"]))
         self.o_sill.setValue(g("sill", d["sill"]))
         self.s_slab.setChecked(b("slab_on", d["slab_on"]))
@@ -4815,7 +5065,7 @@ class Panel(QWidget):
                                                            True)))
                     cb.blockSignals(False)
             self.i_gffl.blockSignals(True)
-            self.i_gffl.setValue(float(doc["settings"].get("ground_ffl", 0.0)
+            self.i_gffl.setValue(float(doc["settings"].get("ground_ffl", 0.6096)
                                        or 0.0))
             self.i_gffl.blockSignals(False)
             i_ = self.c_carmodel.findData(doc["settings"].get("car_model",
@@ -4901,6 +5151,10 @@ class Panel(QWidget):
         try:
             st_ = doc["settings"]
             self.s_rt.setValue(float(st_.get("retain_t", 0.3048)))
+            self.s_ftype.setCurrentIndex(max(self.s_ftype.findData(
+                st_.get("found_type", "isolated_strip")), 0))
+            self.s_raft_t.setValue(float(st_.get("raft_t", 0.6096)))
+            self.s_raft_o.setValue(float(st_.get("raft_off", 0.6096)))
             self.s_bon.setCurrentIndex(max(self.s_bon.findData(
                 st_.get("beam_on", "columns")), 0))
             self.s_bspan.setValue(float(st_.get("beam_span", 10.0)))

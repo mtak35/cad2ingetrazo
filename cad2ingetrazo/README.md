@@ -230,3 +230,18 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 ## 3.13.3
 - **Extend a slab to the walls you pick**: right-click a slab ▸ «Extend slab to walls I pick…» (also in the slab's Edit properties and its Edges dialog), select the walls (Ctrl+click for several; on any floor, standing on the slab or off it up to 12 m), right-click one ▸ «Extend the slab to the selected walls». Selecting the slab and the walls together and right-clicking works too. The slab takes in each wall and the strip between it and the slab.
 - **Beams column to column** (section 6 ▸ «Beams run: Column to column»): each column joined to the nearest column in each of its four grid directions (its own angle and square to it, within the longest span, 10 m by default), the beam between the two columns' faces; each beam its own element. «Over the walls» keeps the old way; a level with no columns says so.
+
+## 3.13.4
+- **Slab ▸ Edit properties ▸ Floor finish**: «In the rooms and out to the slab edge» (as before), «Over the whole slab» (one finish over all of it, less its openings, walls, columns and cores) or «No floor finish»; and «Finish thickness» (0 = the default) — the rooms on that slab without a finish of their own take it too.
+- **Beams: trim / extend** — select a beam: square handles at its ends (drag along its line to trim or extend; joined beams follow), a round one in the middle to move it. Right-click a beam ▸ «Trim / extend this beam…» (which end: to the face of the nearest column in its line, to the nearest beam / wall, by a length + / −, or to a point clicked in the model) or «Trim / extend to a point I click» (its nearer end goes there).
+- **Beams column to column** is also on the right-click menu of any beam or column («Beams column to column on this level»), besides section 6 ▸ «Beams run: Column to column» ▸ «Beams (this level)» / «All levels».
+
+## 3.14.0
+- **Slab ▸ «Extend slab up to the beams»** (right-click a slab, or its Edit properties): the slab carried out to the outer faces of the beams round it (within 4 m), the gap between filled.
+- **Isolate level / Show all / Select level** (under 3D · Plan · Sheets): 3D with only the level picked at the top (every other floor, the plot and site hidden), and back; the whole level selected at once. Each level is one layer «C2I · <level>».
+- **Car ramps**: a wall a ramp passes over stops under the ramp's soffit (and a wall over a ramp going down stands on it), following the slope — rebuilt with the ramp, so a changed slope changes the walls' heights; beams are cut round the ramp. Doors and windows in such a wall keep their piece.
+- **Stairs**: the well in the slab above is cut only over the steps that need it — 7'-0" clear over every step and landing (`stair_head`); the lower steps stay under the slab.
+- **Foundation type** (section 6): isolated pads + strips (as before), isolated footings, strip footings, combined footings (columns whose pads would touch or come within 1'-0" share one rectangular footing), or a raft (2'-0" thick, 2'-0" past the walls by default). The foundation plan's note counts each kind.
+- **Ground floor level and floor height** sit right under «Select floor on drawing…»; defaults +2'-0" and 10'-0" (projects from before take the ground floor at +2'-0" too; 0 = as the CAD's level note).
+- **Overlap floors: «Plot + shoring (site)»** in «Level to move» / «Level to rotate»: the plot (its setbacks, boundary wall, the shoring along it) and the excavations moved, laid over a level (centres or lower-left corners together) or turned.
+- Fix: a slab cast over a floor crashed «Edges, railing, sun shades…» and the shaft dialog (levels' heights read wrongly).

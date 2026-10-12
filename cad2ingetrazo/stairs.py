@@ -295,11 +295,19 @@ def auto(doc, cad=None, flip=False) -> dict:
                         p[1] for p in cs1) / len(cs1), 1)), {}))
             doc["stairs"].append(r)
             made += 1
+            # the well: only over the steps that need it — 7'-0" clear
+            # over every step (the lower steps stay under the slab)
+            well = r["corners"]
+            if stt0.get("stair_headroom_cut", True):
+                hc = headroom_cut(r, H, float(stt0.get("slab_t", 0.15)),
+                                  float(stt0.get("stair_head", HEADROOM)))
+                if hc:
+                    well = hc
             if PJ.slab_on_top(doc):
                 # the slab over this floor is its own: the well in it
-                cut += _cut(arch, lv["id"], r["corners"])
+                cut += _cut(arch, lv["id"], well)
             elif up is not None:
-                cut += _cut(arch, up["id"], r["corners"])
+                cut += _cut(arch, up["id"], well)
     return {"stairs": made, "cuts": cut, "traced": traced_n}
 
 
@@ -338,6 +346,57 @@ def _cut(arch, lid, corners) -> int:
                               for x, y in list(gpart.exterior.coords)[:-1]])
                 n += 1
     return n
+
+
+HEADROOM = 2.1336            # 7'-0" clear over every step
+
+
+def headroom_cut(st, H, slab_t, head=HEADROOM):
+    """The part of the stair's outline the slab above must leave open so
+    every step and landing keeps ``head`` clear under the slab's soffit:
+    the treads (and landings) higher than (H − slab − head) — the lower
+    steps, with headroom to spare, stay under the slab. Corners [[x, y]]
+    or None (cut the whole outline)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    try:
+        flights, lands = as_flights(st)
+        n = int(st.get("risers") or sum(len(f["lines"]) for f in flights))
+        rise = float(st.get("rise") or (H / max(n, 1)))
+        cut_z = H - float(slab_t) - float(head)
+        parts, k = [], 0
+        for f in flights:
+            d = f["d"]
+            g = float(f.get("g") or st.get("going") or 0.28)
+            for a, b in f["lines"]:
+                k += 1
+                ztop = k * rise                  # the tread over riser k
+                if ztop >= cut_z - 1e-6:
+                    q = [tuple(a), tuple(b),
+                         (b[0] + d[0] * g, b[1] + d[1] * g),
+                         (a[0] + d[0] * g, a[1] + d[1] * g)]
+                    pg = Polygon(q).buffer(0)
+                    if not pg.is_empty:
+                        parts.append(pg)
+        for ld in lands:
+            z = float(ld.get("after", 0)) * rise
+            if z >= cut_z - 1e-6 and len(ld.get("corners") or []) >= 3:
+                parts.append(Polygon(ld["corners"]).buffer(0))
+        if not parts:
+            return None
+        outline = Polygon(st["corners"]).buffer(0.02)
+        u = unary_union([p.buffer(0.03, join_style=2) for p in parts])
+        u = u.buffer(0.15, join_style=2).buffer(-0.15, join_style=2)
+        u = u.intersection(outline)
+        g_ = max(getattr(u, "geoms", [u]), key=lambda x: x.area)
+        if g_.geom_type != "Polygon" or g_.area < 0.5:
+            return None
+        if g_.area > 0.97 * Polygon(st["corners"]).area:
+            return None                          # all of it anyway
+        return [[round(x, 4), round(y, 4)]
+                for x, y in list(g_.simplify(0.01).exterior.coords)[:-1]]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _uncut(doc) -> None:

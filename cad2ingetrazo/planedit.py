@@ -68,7 +68,7 @@ class PlanEdit:
         """{"rec", "z", "level"} of the CAD2IngeTrazo wall selected (a
         straight one), or None — cached per selection and document."""
         sel = getattr(self.panel, "_sel_key", None)
-        if not sel or sel[0] != "wall":
+        if not sel or sel[0] not in ("wall", "beam"):
             return None
         raw = self._raw()
         key = (sel, id(raw))
@@ -78,13 +78,19 @@ class PlanEdit:
         try:
             from . import project as PJ
             doc = PJ.load(raw)
-            w = PJ.find_record(doc, "wall", sel[1])
-            if w is not None and w.get("kind", "line") == "line":
+            w = PJ.find_record(doc, sel[0], sel[1])
+            if w is not None and w.get("kind", "line") == "line" and \
+                    "a" in w:
                 el = PJ.elevations(doc["arch"])
                 i = next(k for k, lv in enumerate(doc["arch"]["levels"])
                          if lv["id"] == w["level"])
-                info = {"rec": w, "z": el[i] + float(w.get("base", 0.0))
-                        + 0.02, "level": w["level"]}
+                if sel[0] == "beam":       # its soffit, under the slab
+                    top = el[i + 1] if i + 1 < len(el) else el[i] + 3.0
+                    z = top - float(w.get("h", 0.6))
+                else:
+                    z = el[i] + float(w.get("base", 0.0)) + 0.02
+                info = {"rec": w, "z": z, "level": w["level"],
+                        "kind": sel[0]}
         except Exception:  # noqa: BLE001
             info = None
         self._cache = (key, info)
@@ -110,6 +116,11 @@ class PlanEdit:
                 ev.button() == Qt.LeftButton:
             self._release(ev)
             return True
+        if t == QEvent.KeyPress and getattr(self, "pick", None) is not None \
+                and ev.key() == Qt.Key_Escape:
+            self.pick = None
+            self.panel.flash("Cancelled")
+            return True
         if t == QEvent.KeyPress and self.drag is not None and \
                 ev.key() == Qt.Key_Escape:
             self.drag = None
@@ -121,7 +132,22 @@ class PlanEdit:
         tool = getattr(self.vp, "active_tool", None)
         return tool is None or bool(getattr(tool, "box_select", False))
 
+    def pick_point(self, z, cb, msg="Click the point in the model "
+                   "(Esc cancels)"):
+        """The next left click in the viewport → ``cb((x, y))`` (at height
+        ``z``); Esc cancels."""
+        self.pick = (z, cb)
+        self.panel.flash(msg, 10000)
+
     def _press(self, ev) -> bool:
+        pk = getattr(self, "pick", None)
+        if pk is not None:
+            self.pick = None
+            p = self._world(ev.position(), pk[0])
+            if p is not None:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: pk[1](p))
+            return True
         if not self._select_tool():
             return False
         info = self._wall()
@@ -205,14 +231,22 @@ class PlanEdit:
             return
         from . import project as PJ
         doc = PJ.load(self._raw())
-        n = apply_wall_edit(doc, d["info"]["rec"]["id"], d["a"], d["b"],
-                            d["na"], d["nb"])
-        msg = "Wall moved" if d["which"] == "m" else "Wall stretched"
+        kind = d["info"].get("kind", "wall")
+        if kind == "beam":
+            n = apply_beam_edit(doc, d["info"]["rec"]["id"], d["a"], d["b"],
+                                d["na"], d["nb"])
+            msg = "Beam moved" if d["which"] == "m" else \
+                ("Beam extended" if math.dist(d["na"], d["nb"]) >
+                 math.dist(d["a"], d["b"]) else "Beam trimmed")
+        else:
+            n = apply_wall_edit(doc, d["info"]["rec"]["id"], d["a"], d["b"],
+                                d["na"], d["nb"])
+            msg = "Wall moved" if d["which"] == "m" else "Wall stretched"
         if n:
             msg += f" ({n} joined wall(s) followed)"
         self.panel.commit(doc, msg)
         try:
-            self.panel._reselect(("wall", d["info"]["rec"]["id"]))
+            self.panel._reselect((kind, d["info"]["rec"]["id"]))
         except Exception:  # noqa: BLE001
             pass
 
@@ -372,3 +406,107 @@ def apply_wall_edit(doc, wid, a0, b0, a1, b1) -> int:
     w["a"] = [round(a1[0], 4), round(a1[1], 4)]
     w["b"] = [round(b1[0], 4), round(b1[1], 4)]
     return moved
+
+
+def apply_beam_edit(doc, bid, a0, b0, a1, b1) -> int:
+    """The beam ``bid`` from a0–b0 to a1–b1; the beams joined at a moved
+    end follow. The number of joined beams moved."""
+    st = doc["arch"]["structure"]
+    b = next((e for e in st if e["id"] == bid and e["type"] == "beam"), None)
+    if b is None:
+        return 0
+    moved = 0
+    for old, new in ((a0, a1), (b0, b1)):
+        if math.dist(old, new) < 1e-6:
+            continue
+        for e in st:
+            if e["id"] == bid or e["type"] != "beam" or \
+                    e["level"] != b["level"]:
+                continue
+            for k in ("a", "b"):
+                if math.dist(tuple(e[k]), old) <= 0.03:
+                    e[k] = [round(new[0], 4), round(new[1], 4)]
+                    moved += 1
+    b["a"] = [round(a1[0], 4), round(a1[1], 4)]
+    b["b"] = [round(b1[0], 4), round(b1[1], 4)]
+    return moved
+
+
+def trim_extend_beam(doc, bid, end, how, value=0.0, pt=None):
+    """One end of a beam moved along its own line: ``how`` = «length»
+    (``value`` m: + extends, − trims), «point» (to ``pt`` projected on the
+    beam), «column» (to the face of the nearest column ahead or behind it
+    in its line), «beam» (to the nearest beam / wall it meets). ``end`` =
+    "a" | "b" | "near" (the end nearest ``pt``). (ok, why)."""
+    from shapely.geometry import LineString, Point, Polygon
+
+    from . import project as PJ
+    from .engine import structure as S
+    st = doc["arch"]["structure"]
+    b = next((e for e in st if e["id"] == bid and e["type"] == "beam"), None)
+    if b is None:
+        return False, "No such beam"
+    a, c = tuple(b["a"]), tuple(b["b"])
+    L = math.dist(a, c)
+    if L < 1e-6:
+        return False, "The beam has no length"
+    if end == "near" and pt is not None:
+        end = "a" if math.dist(pt, a) <= math.dist(pt, c) else "b"
+    fixed, moving = (c, a) if end == "a" else (a, c)
+    ux, uy = (moving[0] - fixed[0]) / L, (moving[1] - fixed[1]) / L
+    if how == "length":
+        s_new = L + float(value)
+    elif how == "point":
+        if pt is None:
+            return False, "No point"
+        s_new = (pt[0] - fixed[0]) * ux + (pt[1] - fixed[1]) * uy
+    else:                                    # to a column / a beam or wall
+        ray = LineString([(fixed[0] - ux * 0.01, fixed[1] - uy * 0.01),
+                          (fixed[0] + ux * 60.0, fixed[1] + uy * 60.0)])
+        targets = []
+        if how == "column":
+            for e in st:
+                if e["type"] == "column" and e["level"] == b["level"]:
+                    try:
+                        targets.append(Polygon(S.column_outline(e, 0.0))
+                                       .buffer(0))
+                    except Exception:  # noqa: BLE001
+                        pass
+        else:
+            for e in st:
+                if e["type"] == "beam" and e["level"] == b["level"] and \
+                        e["id"] != bid:
+                    targets.append(LineString([tuple(e["a"]),
+                                               tuple(e["b"])]).buffer(
+                        float(e["w"]) / 2))
+            for w in doc["arch"]["walls"]:
+                if w["level"] == b["level"] and "a" in w:
+                    targets.append(LineString([tuple(w["a"]),
+                                               tuple(w["b"])]).buffer(
+                        float(w["t"]) / 2))
+        best = None
+        for tg in targets:
+            hit = ray.intersection(tg)
+            if hit.is_empty:
+                continue
+            ss = [(q[0] - fixed[0]) * ux + (q[1] - fixed[1]) * uy
+                  for g in getattr(hit, "geoms", [hit])
+                  for q in getattr(g, "coords", [])]
+            ss = [v for v in ss if v > 0.3]
+            if not ss:
+                continue
+            s_ = min(ss)                 # its face toward the beam
+            if best is None or abs(s_ - L) < abs(best - L):
+                best = s_                # the one nearest the end now
+        if best is None:
+            return False, ("No column in the beam's line" if how ==
+                           "column" else "Nothing in the beam's line")
+        s_new = best
+    if s_new < 0.2:
+        return False, "That would leave the beam under 0.2 m"
+    new = (fixed[0] + ux * s_new, fixed[1] + uy * s_new)
+    if end == "a":
+        apply_beam_edit(doc, bid, a, c, new, c)
+    else:
+        apply_beam_edit(doc, bid, a, c, a, new)
+    return True, f"{s_new:.2f} m"

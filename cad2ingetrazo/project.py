@@ -63,7 +63,7 @@ DEFAULTS = {
     "cars_lib": True, "cad_lines": True, "levels_cad": True, "car_model": "suv", "park_nums": True, "marks_on": True, "ramp_t": 0.20,
     "win_style": "sliding", "door_style": "hinged", "door2_style": "hinged",
     "door_head": "flat", "win_head": "flat",
-    "door_frame": "auto", "win_frame": "auto", "floor_h": 2.9972,
+    "door_frame": "auto", "win_frame": "auto", "floor_h": 3.048,
     "tmin": 0.08, "tmax": 0.40,
     "door_h": 2.10, "win_h": 1.20, "sill": 0.90,
     "slab_on": True, "slab_t": 0.15, "slab_pos": "top",
@@ -76,7 +76,10 @@ DEFAULTS = {
     "auto_layers": True,
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
     "plinth": 0.15,                # m, ground floor above the plot's ground
-    "ground_ffl": 0.0,             # m, ground F.F.L. above N.G.L. (0 = CAD)
+    "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
+    "gffl_v": 2,                   # 3.14: +2'-0" the default
+    "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
+    "found_type": "isolated_strip", "raft_t": 0.6096, "raft_off": 0.6096,
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
     "stair_riser": 0.1778, "stair_going": 0.2794,       # 7" riser, 11" tread
     "bike_model": "lib", "bike_lib": None,              # motorbikes: library
@@ -135,6 +138,9 @@ def load(raw) -> dict:
                     if isinstance(t, dict) and t.get("level") in ids]
     doc["settings"].update({k: v for k, v in (raw.get("settings") or {}).items()
                             if k in DEFAULTS})
+    if (raw.get("settings") or {}) and "gffl_v" not in raw["settings"]:
+        # a project from before 3.14: the ground floor at +2'-0" by default
+        doc["settings"]["ground_ffl"] = DEFAULTS["ground_ffl"]
     doc["site"] = SITE_.load_site(raw.get("site"))
     doc["materials"] = {k: {"name": str(v.get("name", ""))[:40],
                             "color": [float(c) for c in v.get("color",
@@ -2114,24 +2120,104 @@ def add_beams_on_columns(doc, lid, w=0.2032, h=0.6096,
     return len(recs)
 
 
-def add_footings(doc, pad=1.2, pad_d=None, strip=0.6, strip_d=None) -> int:
-    """Pads under the lowest level's columns, strips under its walls —
-    down to the foundation level (unless depths are given)."""
+FOUNDATION_TYPES = [
+    ("isolated_strip", "Isolated pads + strip footings (under columns and "
+                       "walls)"),
+    ("isolated", "Isolated footings (pads under the columns)"),
+    ("strip", "Strip footings (under the walls)"),
+    ("combined", "Combined footings (columns close together share one)"),
+    ("raft", "Raft / mat foundation (one slab under the building)")]
+
+
+def add_footings(doc, pad=1.2, pad_d=None, strip=0.6, strip_d=None,
+                 kind="isolated_strip", raft_t=0.6096,
+                 raft_off=0.6096) -> int:
+    """The foundation under the lowest level, down to the foundation level
+    (unless depths are given), replacing the footings there:
+
+    - ``isolated``: a pad under every column;
+    - ``strip``: a strip under every wall;
+    - ``isolated_strip``: both (as before);
+    - ``combined``: pads, columns whose pads would touch (or come within
+      1'-0") sharing one rectangular footing;
+    - ``raft``: one raft ``raft_t`` thick under the whole building, out
+      ``raft_off`` past its walls and columns."""
     arch = doc["arch"]
     d = footing_depth(doc)
     pad_d = d if pad_d is None else pad_d
     strip_d = d if strip_d is None else strip_d
     low = arch["levels"][0]["id"]
     arch["structure"] = [e for e in arch["structure"] if e["type"] != "footing"]
-    recs = [{"type": "footing", "level": low, "kind": "pad", "x": e["x"],
-             "y": e["y"], "w": pad, "d": pad_d, "angle": e.get("angle", 0.0)}
-            for e in arch["structure"]
+    cols = [e for e in arch["structure"]
             if e["type"] == "column" and e["level"] == low]
     walls = [w for w in arch["walls"] if w["level"] == low]
-    recs += [dict(r, type="footing", level=low, kind="strip", w=strip,
-                  d=strip_d) for r in S.strips_under(walls)]
+    pads = [{"type": "footing", "level": low, "kind": "pad", "x": e["x"],
+             "y": e["y"], "w": pad, "d": pad_d, "angle": e.get("angle", 0.0)}
+            for e in cols]
+    recs = []
+    if kind in ("isolated", "isolated_strip"):
+        recs += pads
+    if kind in ("strip", "isolated_strip"):
+        recs += [dict(r, type="footing", level=low, kind="strip", w=strip,
+                      d=strip_d) for r in S.strips_under(walls)]
+    if kind == "combined":
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        polys = [Polygon(S.pad_outline(p_)) for p_ in pads]
+        groups, seen = [], set()
+        for i in range(len(pads)):          # pads closer than 1'-0": joined
+            if i in seen:
+                continue
+            g, todo = [], [i]
+            seen.add(i)
+            while todo:
+                k = todo.pop()
+                g.append(k)
+                for j in range(len(pads)):
+                    if j not in seen and polys[k].distance(polys[j]) < 0.3048:
+                        seen.add(j)
+                        todo.append(j)
+            groups.append(g)
+        for g in groups:
+            if len(g) == 1:
+                recs.append(pads[g[0]])
+                continue
+            r = unary_union([polys[k] for k in g]).minimum_rotated_rectangle
+            recs.append({"type": "footing", "level": low, "kind": "combined",
+                         "corners": [[round(x, 4), round(y, 4)] for x, y in
+                                     list(r.exterior.coords)[:-1]],
+                         "w": round(min(r.bounds[2] - r.bounds[0],
+                                        r.bounds[3] - r.bounds[1]), 3),
+                         "d": pad_d,
+                         "name": f"Combined footing ({len(g)} columns)"})
+    if kind == "raft":
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        parts = []
+        try:
+            plans = W.plan([w for w in walls if W.why_not(w) is None])
+            parts += [Polygon(pc["outer"]) for ps in plans.values()
+                      for pc in ps]
+        except Exception:  # noqa: BLE001
+            pass
+        parts += [Polygon(S.column_outline(c, 0.0)) for c in cols]
+        parts = [p_.buffer(0) for p_ in parts if not p_.is_empty]
+        if parts:
+            u = unary_union(parts).buffer(3.0, join_style=2).buffer(
+                -3.0, join_style=2)
+            for g_ in getattr(u, "geoms", [u]):
+                if g_.geom_type != "Polygon" or g_.area < 4.0:
+                    continue
+                r = Polygon(g_.exterior).buffer(raft_off, join_style=2)
+                r = r.simplify(0.02)
+                recs.append({"type": "footing", "level": low, "kind": "raft",
+                             "corners": [[round(x, 4), round(y, 4)] for x, y
+                                         in list(r.exterior.coords)[:-1]],
+                             "w": 1.0, "d": round(float(raft_t), 4),
+                             "name": "Raft foundation"})
     recs = [r for r in recs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], recs)
+    doc["settings"]["found_type"] = kind
     return len(recs)
 
 
@@ -2449,7 +2535,16 @@ def _groups(arch, doc=None):
     for e_ in arch["structure"]:
         recs[(e_["type"], e_["id"])] = e_
     cat = CP.catalogue(doc) if doc is not None else {}
-    elems = S.build(arch, M.elevations)
+    try:                    # the car ramps: walls and beams stop under them
+        arch["_ramps"] = ramp_solids(doc) if doc is not None else []
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ramp_solids")
+        arch["_ramps"] = []
+    try:
+        elems = S.build(arch, M.elevations)
+    finally:
+        arch.pop("_ramps", None)
     # 1: each element in its own frame, and how many share its shape
     prep, count = [], {}
     for e in elems:
@@ -3189,6 +3284,65 @@ def _floor_voids(doc, lid):
     return unary_union(hs) if hs else None
 
 
+def _slab_finish_zones(doc, lid):
+    """The floor slabs of ``lid`` set apart in their edit dialog: (the
+    union of those set «whole» or «off» — the rooms' and edges' finish
+    is kept off them —, [(slab, its finish outline)] of those set
+    «whole» (the slab less its openings, walls, columns and cores),
+    [(slab outline, its own thickness)] of those with a thickness)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    slabs = _floor_slabs(doc, lid)
+    zone, whole, thick = [], [], []
+    for s_ in slabs:
+        try:
+            p = Polygon([tuple(q[:2]) for q in s_["corners"]]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if p.is_empty:
+            continue
+        if float(s_.get("fin_t", 0) or 0) > 0:
+            thick.append((p, float(s_["fin_t"])))
+        if s_.get("fin") not in ("whole", "off"):
+            continue
+        zone.append(p)
+        if s_["fin"] == "whole":
+            q = p
+            for h in s_.get("holes") or []:
+                if len(h) >= 3:
+                    q = q.difference(Polygon([tuple(v[:2]) for v in h])
+                                     .buffer(0))
+            mine = [w for w in doc["arch"]["walls"] if w["level"] == lid]
+            solid = SE.wall_polys(mine) + [
+                Polygon(S.column_outline(e, 0.0)).buffer(0)
+                if e["type"] == "column" else
+                Polygon([tuple(v[:2]) for v in e["corners"]]).buffer(0)
+                for e in doc["arch"]["structure"]
+                if e["level"] == lid and (e["type"] == "column" or
+                                          (e["type"] == "core" and
+                                           e.get("corners")))]
+            if solid:
+                q = q.difference(unary_union(solid))
+            whole.append((s_, q))
+    return (unary_union(zone) if zone else None), whole, thick
+
+
+def _finish_t_at(doc, rec, thick, pt):
+    """A room's finish: its own, else the slab's own thickness under it,
+    else the default."""
+    if rec and rec.get("finish") is not None:
+        return float(rec["finish"])
+    if thick:
+        from shapely.geometry import Point
+        P_ = Point(pt)
+        for p, t in thick:
+            if p.contains(P_):
+                return t
+    return float(doc["settings"].get("finish_t", 0.0508))
+
+
 def _finish_groups(doc):
     """Every room's floor finish: a layer of its own thickness on its
     floor (over the slab, its level sunk / raised with it), named by its
@@ -3212,19 +3366,26 @@ def _finish_groups(doc):
         if not any(w["level"] == lid for w in arch["walls"]):
             continue
         voids = _floor_voids(doc, lid)      # the slab's openings: cut too
+        try:                                # slabs set apart (whole / off)
+            zone, _whole, thick = _slab_finish_zones(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project._slab_finish_zones")
+            zone, thick = None, []
         for room in spaces.of_level(arch, lid):
             if room["area"] < 1.0:          # a duct / shaft: no finish
                 continue
-            f = room_finish(doc, room.get("rec"))
+            f = _finish_t_at(doc, room.get("rec"), thick, room["at"])
             if f < 0.001:
                 continue
             z = elev[i] + floor_offset_at(doc, lid, room["at"])
             poly = room["poly"]
-            if voids is not None and poly.intersects(voids):
-                try:
-                    poly = poly.difference(voids)
-                except Exception:  # noqa: BLE001
-                    pass
+            for cut_ in (voids, zone):
+                if cut_ is not None and poly.intersects(cut_):
+                    try:
+                        poly = poly.difference(cut_)
+                    except Exception:  # noqa: BLE001
+                        pass
             faces = []
             for pg in getattr(poly, "geoms", [poly]):
                 if pg.geom_type != "Polygon" or pg.area < 0.05:
@@ -3246,14 +3407,24 @@ def _finish_groups(doc):
         from . import slabedges as SE
         for i, lv in enumerate(arch["levels"]):
             lid = lv["id"]
-            if lid in (doc.get("parking") or {}) or \
-                    not any(w["level"] == lid for w in arch["walls"]):
-                continue
+            no_edge = lid in (doc.get("parking") or {}) or \
+                not any(w["level"] == lid for w in arch["walls"])
             try:
-                rooms_ = spaces.of_level(arch, lid)
-                for k_, p_ in enumerate(SE.edge_finish_polys(doc, lid,
-                                                             rooms_), 1):
-                    f = float(st.get("finish_t", 0.0508))
+                rooms_ = [] if no_edge else spaces.of_level(arch, lid)
+                zone, whole, thick = _slab_finish_zones(doc, lid)
+                pieces = []
+                for p_ in ([] if no_edge else
+                           SE.edge_finish_polys(doc, lid, rooms_)):
+                    if zone is not None:
+                        p_ = p_.difference(zone)
+                    pieces += [g for g in getattr(p_, "geoms", [p_])
+                               if g.geom_type == "Polygon" and g.area >= 0.3]
+                for s_, q in whole:        # «Over the whole slab»
+                    pieces += [g for g in getattr(q, "geoms", [q])
+                               if g.geom_type == "Polygon" and g.area >= 0.3]
+                for k_, p_ in enumerate(pieces, 1):
+                    c0 = p_.representative_point()
+                    f = _finish_t_at(doc, None, thick, (c0.x, c0.y))
                     c_ = p_.representative_point()
                     z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y))
                     piece = {"outer": S._ccw([tuple(q) for q in
@@ -3300,6 +3471,26 @@ def _finish_groups(doc):
     return out, []
 
 _BIKE_MESH = []
+
+
+def ramp_solids(doc) -> list:
+    """Every car ramp as built, in absolute heights — for the walls and
+    beams it crosses to stop under it: [{"sections", "zs", "t"}]."""
+    from . import parking as PK
+    arch = doc["arch"]
+    elev = elevations(arch)
+    z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
+    st = doc["settings"]
+    out = []
+    for r in doc.get("ramps") or []:
+        lid = r.get("level")
+        if lid not in z_of or len(r.get("sections") or []) < 2:
+            continue
+        z = z_of[lid] + open_offset(doc, lid)
+        out.append({"sections": r["sections"],
+                    "zs": [z + v for v in PK.ramp_z(r)],
+                    "t": float(r.get("t", st.get("ramp_t", 0.2)))})
+    return out
 
 
 def _bike_groups(doc, lid, pk, z, lname):
@@ -4542,6 +4733,67 @@ def move_level(doc, lid, dx, dy) -> None:
     if how:
         how["ix"] = round(float(how.get("ix", 0.0)) + dx, 4)
         how["iy"] = round(float(how.get("iy", 0.0)) + dy, 4)
+
+
+PLOT_ITEM = "__plot__"      # «Plot + shoring (site)» in the overlap lists
+
+
+def plot_centre(doc):
+    plot = doc["arch"].get("plot") or {}
+    pts = [p for p in plot.get("corners") or [] if _is_pt(p)]
+    if len(pts) < 3:
+        return None
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+
+def transform_plot(doc, fn) -> bool:
+    """The plot (its corners — the setbacks, boundary wall, gates and
+    the shoring along it follow) and the excavations / fills mapped by
+    ``fn((x, y)) → (x, y)``. False when there is no plot."""
+    arch = doc["arch"]
+    plot = arch.get("plot")
+    if not plot or len(plot.get("corners") or []) < 3:
+        return False
+    plot["corners"] = [[round(q[0], 4), round(q[1], 4)] + list(p[2:])
+                       for p in plot["corners"] for q in [fn(p)]]
+    for d in arch.get("digs") or []:
+        d["corners"] = [[round(q[0], 4), round(q[1], 4)] + list(p[2:])
+                        for p in d.get("corners") or [] for q in [fn(p)]]
+    return True
+
+
+def move_plot(doc, dx, dy) -> bool:
+    return transform_plot(doc, lambda p: (p[0] + dx, p[1] + dy))
+
+
+def rotate_plot(doc, deg, centre=None) -> bool:
+    c = centre or plot_centre(doc)
+    if c is None:
+        return False
+    a = math.radians(deg)
+    ca, sa = math.cos(a), math.sin(a)
+    return transform_plot(doc, lambda p: (
+        c[0] + (p[0] - c[0]) * ca - (p[1] - c[1]) * sa,
+        c[1] + (p[0] - c[0]) * sa + (p[1] - c[1]) * ca))
+
+
+def plot_overlap_offset(doc, ref, how="centre"):
+    """(dx, dy) that lays the plot over level ``ref``'s building: centres
+    together («best» too), or the lower-left corners together."""
+    plot = doc["arch"].get("plot") or {}
+    pp = [p for p in plot.get("corners") or [] if _is_pt(p)]
+    wp = [p for w in doc["arch"]["walls"] if w["level"] == ref
+          for p in (w.get("a"), w.get("b")) if _is_pt(p)]
+    if len(pp) < 3 or not wp:
+        return None
+    if how == "ll":
+        return (min(p[0] for p in wp) - min(p[0] for p in pp),
+                min(p[1] for p in wp) - min(p[1] for p in pp))
+    cb = ((min(p[0] for p in wp) + max(p[0] for p in wp)) / 2,
+          (min(p[1] for p in wp) + max(p[1] for p in wp)) / 2)
+    cp = plot_centre(doc)
+    return cb[0] - cp[0], cb[1] - cp[1]
 
 
 def level_centre(doc, lid):

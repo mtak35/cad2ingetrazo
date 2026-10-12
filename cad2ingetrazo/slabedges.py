@@ -78,7 +78,8 @@ def floor_level_of(doc, slab) -> str:
         return lid
     from .engine import model as M
     arch = doc["arch"]
-    el = M.elevations(arch)
+    from . import project as _PJ
+    el = _PJ.elevations(arch)
     order = [arch["levels"][i]["id"] for i in
              sorted(range(len(arch["levels"])), key=lambda i: el[i])]
     k = order.index(lid) if lid in order else -1
@@ -113,6 +114,56 @@ def extend_to_walls(doc, slab) -> bool:
         return False
     slab["corners"] = _ring_pts(p)
     return True
+
+
+def beams_for(doc, slab) -> list:
+    """The beams under a slab: those of the level it is cast over (a slab
+    over a floor), else of the floor below it."""
+    from .engine import model as M
+    arch = doc["arch"]
+    lid = slab["level"]
+    if not slab.get("top"):
+        from . import project as _PJ
+        el = _PJ.elevations(arch)
+        order = [arch["levels"][i]["id"] for i in
+                 sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+        k = order.index(lid) if lid in order else -1
+        lid = order[k - 1] if k > 0 else lid
+    return [e for e in arch["structure"]
+            if e["type"] == "beam" and e["level"] == lid]
+
+
+def extend_to_beams(doc, slab, reach=4.0) -> int:
+    """The slab carried out to the outer faces of the beams round it (up
+    to ``reach`` from its edge): the gap between its edge and a beam
+    filled, the beam's width taken in. The number of beams it reached."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    sp = _poly(slab["corners"])
+    if sp.is_empty:
+        return 0
+    zone = sp.buffer(reach, join_style=2)
+    bs = []
+    for e in beams_for(doc, slab):
+        L = LineString([tuple(e["a"]), tuple(e["b"])])
+        if L.length > 0.1 and L.intersects(zone):
+            bs.append((L, float(e.get("w", 0.2))))
+    if not bs:
+        return 0
+    bp = unary_union([L.buffer(w / 2, cap_style=2, join_style=2)
+                      for L, w in bs])
+    grown = unary_union([sp, bp])
+    R = reach / 2.0 + 0.1
+    closed = grown.buffer(R, join_style=2).buffer(-R, join_style=2)
+    clip = unary_union([sp, unary_union([L for L, _w in bs]).buffer(
+        reach, cap_style=2, join_style=2)]).intersection(
+        unary_union([sp, bp]).convex_hull)
+    p = _largest(closed.intersection(clip).union(sp).buffer(0.01).buffer(
+        -0.01), sp.representative_point())
+    if p is None or p.area <= sp.area + 0.05:
+        return 0
+    slab["corners"] = _ring_pts(p)
+    return len(bs)
 
 
 def extend_to_selected(doc, slab, wall_ids, reach=12.0) -> int:
