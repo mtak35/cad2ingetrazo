@@ -79,6 +79,7 @@ DEFAULTS = {
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
+    "stair_well": "railing",
     "level_groups": False, "shoring_on": "plot",          # each level one group in 3D
     "found_type": "isolated_strip", "raft_t": 0.6096, "raft_off": 0.6096,
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
@@ -3592,6 +3593,33 @@ def all_groups(scene) -> list:
                 walk(kids)
     walk(getattr(scene, "groups", []) or [])
     return out
+
+
+def wall_attach(doc, rec, top=None, bot=None, new=None) -> dict:
+    """A wall's top and bottom attached to the slabs or not: top «slab» =
+    up to the slab over its floor (height «level», following it when the
+    storey changes), «free» = its own height (the storey's clear height
+    when it was attached); bottom «slab» = standing on its floor slab
+    (base 0), «free» = its own base (kept). ``new`` (the values being
+    set) comes back changed."""
+    new = dict(rec if new is None else new)
+    was_top = "slab" if rec.get("height", "level") == "level" else "free"
+    was_bot = "slab" if abs(float(rec.get("base", 0.0) or 0.0)) < 1e-4 \
+        else "free"
+    if top == "slab" and was_top != "slab":
+        new["height"] = "level"
+    elif top == "free" and new.get("height", "level") == "level":
+        try:
+            info = S.levels_info(doc["arch"], M.elevations)
+            li = info.get(rec["level"]) or {}
+            new["height"] = round(max(float(li["under"]) -
+                                      float(li["z0"]), 0.1), 4)
+        except Exception:  # noqa: BLE001
+            lv = level_by_id(doc["arch"], rec["level"]) or {}
+            new["height"] = round(float(lv.get("height") or 3.0) - 0.15, 4)
+    if bot == "slab" and was_bot != "slab":
+        new["base"] = 0.0
+    return new
 
 
 def ramp_solids(doc) -> list:

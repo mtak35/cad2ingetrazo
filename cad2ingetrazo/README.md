@@ -255,3 +255,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Sliding windows**: no pulls on the panels (doors keep theirs).
 - **Shafts on a drawn rectangle**: draw a rectangle on a slab (Rectangle tool), select it, right-click ▸ «CAD2IngeTrazo · Shaft» ▸ «Open a shaft here», «… through every floor», or «Close the shaft / opening here» (the openings it covers closed again).
 - Fix: the panel's buttons are called with no arguments — «Isolate level» ran as «Show all» and «Basement outer walls → RCC» as «Undo RCC» (Qt's «checked» flag landed in their first argument).
+
+## 3.14.2
+- **Walls attached / detached** (Edit properties ▸ Top / Bottom, or right-click ▸ Attach / detach for every wall selected): top attached = up to the slab over its floor (follows the storey), detached = its own height (the clear height it had); bottom attached = standing on its floor slab (base 0), detached = its own base.
+- **Shaft open / close by drawing a rectangle**: right-click a slab ▸ «Open a shaft — draw a rectangle on this slab» (or «… through every floor», «Close a shaft / opening — draw a rectangle round it»), then click two opposite corners on it — a dashed rectangle follows the mouse, Esc cancels. Also in section 6 (select a slab first). 3.14.1's way needed IngeTrazo's Rectangle tool and selecting a face lying on the slab, which picks the slab instead.
+- **Stair opening in the slab above** (section 7): following the railing (each flight that needs headroom opened its whole length, so the opening's edge runs along its railing — the default), only over the steps short of 7'-0", or the whole stair outline.
+- **Isolate level**: works from a plan view too (the 3D view's scene no longer puts the hidden floors back a moment later); with Floors as groups, the other floors' groups are hidden whole.

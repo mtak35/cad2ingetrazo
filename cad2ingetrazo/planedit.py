@@ -105,6 +105,8 @@ class PlanEdit:
     def event(self, ev) -> bool:
         from PySide6.QtCore import QEvent, Qt
         t = ev.type()
+        if getattr(self, "rect", None) is not None:
+            return self._rect_event(ev)
         if t == QEvent.MouseButtonDblClick and ev.button() == Qt.LeftButton:
             return self._double(ev)
         if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -138,6 +140,51 @@ class PlanEdit:
         ``z``); Esc cancels."""
         self.pick = (z, cb)
         self.panel.flash(msg, 10000)
+
+    def pick_rect(self, z, cb, msg="Click one corner of the rectangle, "
+                  "then the opposite corner (Esc cancels)"):
+        """Two clicks in the viewport at height ``z`` → ``cb(a, b)``, the
+        rectangle's opposite corners; a rubber rectangle follows the mouse
+        between them. Esc cancels."""
+        self.rect = {"z": z, "cb": cb, "a": None, "cur": None}
+        self.panel.flash(msg, 15000)
+
+    def _rect_event(self, ev) -> bool:
+        from PySide6.QtCore import QEvent, Qt, QTimer
+        rc = getattr(self, "rect", None)
+        if rc is None:
+            return False
+        t = ev.type()
+        if t == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+            self.rect = None
+            self.panel.flash("Cancelled")
+            self.vp.update()
+            return True
+        if t == QEvent.MouseMove and rc["a"] is not None:
+            p = self._world(ev.position(), rc["z"])
+            if p is not None:
+                rc["cur"] = p
+                self.vp.update()
+            return False
+        if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+            p = self._world(ev.position(), rc["z"])
+            if p is None:
+                return True
+            if rc["a"] is None:
+                rc["a"] = p
+                rc["cur"] = p
+                self.panel.flash("Now click the opposite corner (Esc "
+                                 "cancels)", 15000)
+                return True
+            a, cb = rc["a"], rc["cb"]
+            self.rect = None
+            self.vp.update()
+            QTimer.singleShot(0, lambda: cb(a, p))
+            return True
+        if t in (QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick) \
+                and ev.button() == Qt.LeftButton:
+            return True
+        return False
 
     def _press(self, ev) -> bool:
         pk = getattr(self, "pick", None)
@@ -295,6 +342,24 @@ class PlanEdit:
     def draw(self, viewport, painter):
         from PySide6.QtCore import QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPen
+        rc = getattr(self, "rect", None)
+        if rc is not None and rc.get("a") is not None and rc.get("cur"):
+            (x0, y0), (x1, y1) = rc["a"], rc["cur"]
+            pts = [self._px(x, y, rc["z"]) for x, y in
+                   ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+            if all(pts):
+                painter.save()
+                painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+                painter.setPen(QPen(QColor(230, 60, 30), 2.0, Qt.DashLine))
+                for i in range(4):
+                    pa, pb = pts[i], pts[(i + 1) % 4]
+                    painter.drawLine(QPointF(pa[0], pa[1]),
+                                     QPointF(pb[0], pb[1]))
+                from .host import len_txt
+                painter.drawText(QPointF(pts[2][0] + 8, pts[2][1] + 14),
+                                 f"{len_txt(abs(x1 - x0))} × "
+                                 f"{len_txt(abs(y1 - y0))}")
+                painter.restore()
         info = self._wall() if self.drag is None else self.drag["info"]
         if info is None:
             return

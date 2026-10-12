@@ -298,9 +298,11 @@ def auto(doc, cad=None, flip=False) -> dict:
             # the well: only over the steps that need it — 7'-0" clear
             # over every step (the lower steps stay under the slab)
             well = r["corners"]
-            if stt0.get("stair_headroom_cut", True):
+            wm = stt0.get("stair_well", "railing")
+            if wm != "outline" and stt0.get("stair_headroom_cut", True):
                 hc = headroom_cut(r, H, float(stt0.get("slab_t", 0.15)),
-                                  float(stt0.get("stair_head", HEADROOM)))
+                                  float(stt0.get("stair_head", HEADROOM)),
+                                  wm)
                 if hc:
                     well = hc
             if PJ.slab_on_top(doc):
@@ -351,7 +353,13 @@ def _cut(arch, lid, corners) -> int:
 HEADROOM = 2.1336            # 7'-0" clear over every step
 
 
-def headroom_cut(st, H, slab_t, head=HEADROOM):
+WELL_MODES = [("railing", "Following the railing (whole flights that "
+                         "need headroom, their landings)"),
+              ("headroom", "Only over the steps short of 7'-0\" headroom"),
+              ("outline", "The whole stair outline")]
+
+
+def headroom_cut(st, H, slab_t, head=HEADROOM, mode="headroom"):
     """The part of the stair's outline the slab above must leave open so
     every step and landing keeps ``head`` clear under the slab's soffit:
     the treads (and landings) higher than (H − slab − head) — the lower
@@ -368,10 +376,15 @@ def headroom_cut(st, H, slab_t, head=HEADROOM):
         for f in flights:
             d = f["d"]
             g = float(f.get("g") or st.get("going") or 0.28)
+            k0 = k
+            need = any((k0 + j + 1) * rise >= cut_z - 1e-6
+                       for j in range(len(f["lines"])))
             for a, b in f["lines"]:
                 k += 1
                 ztop = k * rise                  # the tread over riser k
-                if ztop >= cut_z - 1e-6:
+                # «railing»: a flight that needs headroom opened its whole
+                # length, so the opening's edge runs along its railing
+                if ztop >= cut_z - 1e-6 or (mode == "railing" and need):
                     q = [tuple(a), tuple(b),
                          (b[0] + d[0] * g, b[1] + d[1] * g),
                          (a[0] + d[0] * g, a[1] + d[1] * g)]

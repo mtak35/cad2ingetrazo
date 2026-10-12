@@ -156,6 +156,8 @@ FIELDS = {
              ("cw_up", "Curtain wall: upper panel height", "len", (0.0, 6.0)),
              ("cw_fill", "Curtain wall: lower / upper panels", "choice",
               ("glass", "spandrel")),
+             ("top_att", "Top", "choice", ("slab", "free")),
+             ("bot_att", "Bottom", "choice", ("slab", "free")),
              ("height", "Height", "height", (0.1, 50.0)),
              ("base", "Base offset", "len", (-5.0, 10.0))],
     "opening": [("kind", "Type", "choice", ("door", "window", "void")),
@@ -267,6 +269,8 @@ def _choice_labels() -> dict:
 
 
 CHOICE_LABELS = _choice_labels()
+CHOICE_LABELS.update({"slab": "Attached to the slab",
+                      "free": "Detached (its own height / base)"})
 
 
 class _WheelGuard(QObject):
@@ -485,7 +489,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.14.1</span>")
+                   "3.14.2</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -618,24 +622,39 @@ class Panel(QWidget):
                 return lv_ == lid
             return lv_ == lid
         hid = []
-        for g in PJ.all_groups(sc):
+        for g in sc.groups:                 # the top-level groups
             t = PJ.tag_of(g)
             if not t or t.get("type") == "symbols":
                 continue
-            if t.get("type") == "levelgroup" and t.get("level") == below:
-                # the floor below's group: only its slab over (our floor)
-                for c in getattr(g, "children", None) or []:
-                    tc = PJ.tag_of(c) or {}
-                    if not keep(tc) and not c.hidden:
-                        c.hidden = True
-                        hid.append(c)
+            if t.get("type") == "levelgroup":
+                # floors as groups: a whole floor group shown or hidden
+                if t.get("level") != lid and not g.hidden:
+                    g.hidden = True
+                    hid.append(g)
                 continue
             if not keep(t) and not g.hidden:
                 g.hidden = True
                 hid.append(g)
         sc._c2i_iso_hidden = hid
+        sc._c2i_before = None           # a plan view left: not «restored»
         sc.version += 1
         self.vp.update()
+
+        def again(_h=hid, _sc=sc):
+            # the 3D view's scene (and the plan's restore) may put hidden
+            # objects back a moment later: hidden again
+            if getattr(_sc, "_c2i_iso_hidden", None) is not _h:
+                return
+            n_ = 0
+            for g_ in _h:
+                if not g_.hidden:
+                    g_.hidden = True
+                    n_ += 1
+            if n_:
+                _sc.version += 1
+                self.vp.update()
+        for ms in (150, 600, 1500):
+            QTimer.singleShot(ms, again)
         self.flash(f"«{lv['name']}» isolated (on its floor slab, the slab "
                    "over it off) — «Show all» brings everything back")
 
@@ -2220,12 +2239,20 @@ class Panel(QWidget):
         f.addRow(row)
         f.addRow(_btn("Columns at wall corners (this level)",
                       self._corner_columns))
-        f.addRow(_btn("Shaft open / close on this level…",
-                      lambda: self.shaft_dialog(None),
-                      "Cut an opening in the floor slab: a rectangle at "
-                      "X, Y, or a rectangle you drew and selected; on this "
-                      "floor or through every floor. Right-click a slab "
-                      "for the same, and to remove one"))
+        row = QHBoxLayout()
+        row.addWidget(_btn("Open shaft (draw ▭)",
+                           lambda: self.shaft_rect(None, "open"),
+                           "Select a slab, click this, then click two "
+                           "opposite corners on it: a shaft opened there"))
+        row.addWidget(_btn("Through all floors",
+                           lambda: self.shaft_rect(None, "through")))
+        row.addWidget(_btn("Close shaft (draw ▭)",
+                           lambda: self.shaft_rect(None, "close"),
+                           "Select a slab, click this, then draw a rectangle "
+                           "round the opening to close"))
+        f.addRow("Shaft open / close", row)
+        f.addRow(_btn("Shaft by size (W × D at X, Y)…",
+                      lambda: self.shaft_dialog(None)))
         row = QHBoxLayout()
         self.s_bw = _spin(0.1, 2, 0.2032, 0.0254)        # 8"
         self.s_bh = _spin(0.1, 3, 0.6096, 0.0254)        # 24"
@@ -2445,6 +2472,13 @@ class Panel(QWidget):
         self.st_waist.setToolTip("Monolithic RCC: the waist slab's thickness "
                                  "under the steps (6\" = 152 mm)")
         f.addRow("Waist slab", self.st_waist)
+        self.st_well = QComboBox()
+        for k_, lab_ in ST.WELL_MODES:
+            self.st_well.addItem(lab_, k_)
+        self.st_well.setToolTip("The opening each stair cuts in the slab "
+                                "above it (Stairs on all floors makes them "
+                                "again)")
+        f.addRow("Opening in the slab above", self.st_well)
         row = QHBoxLayout()
         self.st_riser = _spin(0.10, 0.25, 0.1778, 0.0127)     # 7"
         self.st_going = _spin(0.18, 0.45, 0.2794, 0.0127)     # 11"
@@ -2609,6 +2643,8 @@ class Panel(QWidget):
         from . import stairs as ST
         doc = self.doc()
         self._stair_opts(doc)
+        doc["settings"]["stair_well"] = self.st_well.currentData() or \
+            "railing"
         r = ST.auto(doc, flip=self.st_flip.isChecked())
         if not r["stairs"]:
             self.flash("No stair well found — draw it on a STAIR layer, or "
@@ -3325,6 +3361,11 @@ class Panel(QWidget):
         if kind in ("stair", "stairrail"):   # its own values, else defaults
             from . import stairs as ST
             rec = dict(rec, **ST.eff(rec, self.doc()["settings"]))
+        if kind == "wall":                 # attached to the slabs or not
+            rec = dict(rec, top_att="slab" if rec.get("height", "level") ==
+                       "level" else "free",
+                       bot_att="slab" if abs(float(rec.get("base", 0.0) or
+                                                   0.0)) < 1e-4 else "free")
         for key, label, typ, opt in FIELDS.get(kind, []):
             if typ == "choice":
                 w = QComboBox()
@@ -3427,6 +3468,9 @@ class Panel(QWidget):
         for k_ in [k_ for k_ in new if k_.startswith("_pct_changed_")]:
             new.pop(k_)
         new.pop("slope", None)
+        if sel[0] == "wall":
+            new = PJ.wall_attach(doc, rec, new.pop("top_att", None),
+                                 new.pop("bot_att", None), new)
         if sel[0] == "opening" and new["kind"] == "door":
             new["sill"] = 0.0
         if sel[0] == "stair":           # riser / tread / steps re-laid
@@ -3673,6 +3717,14 @@ class Panel(QWidget):
                 sub.addAction(f"Convert {what} to a curtain wall",
                               lambda: self.convert_walls(walls, "curtain"))
         if sel[0] == "slab":
+            sub.addAction("Open a shaft — draw a rectangle on this slab",
+                          lambda: self.shaft_rect(sel[1], "open"))
+            sub.addAction("Open a shaft through every floor — draw a "
+                          "rectangle", lambda: self.shaft_rect(sel[1],
+                                                               "through"))
+            sub.addAction("Close a shaft / opening — draw a rectangle "
+                          "round it", lambda: self.shaft_rect(sel[1],
+                                                              "close"))
             sub.addAction("Add shaft / opening in this slab…",
                           lambda: self.shaft_dialog(sel[1]))
             sub.addAction("Edges, railing, sun shades, close openings…",
@@ -3699,6 +3751,21 @@ class Panel(QWidget):
                         + (" · through all floors" if m.get("through")
                            else ""),
                         lambda i=m["id"]: self._shaft_remove(i))
+        if sel[0] == "wall":
+            walls_ = [i for k, i in self._selected_all() if k == "wall"] or \
+                [sel[1]]
+            am = sub.addMenu(f"Attach / detach ({len(walls_)} wall"
+                             f"{'s' if len(walls_) > 1 else ''})")
+            for lab_, ta, ba in (("Attach top to the slab above", "slab", None),
+                                 ("Detach top (keep its height)", "free",
+                                  None),
+                                 ("Attach bottom to the floor slab", None,
+                                  "slab"),
+                                 ("Detach bottom (keep its base)", None,
+                                  "free"),
+                                 ("Attach top and bottom", "slab", "slab")):
+                am.addAction(lab_, lambda t_=ta, b_=ba, ws_=walls_:
+                             self._wall_attach(ws_, t_, b_))
         if sel[0] == "beam":
             sub.addAction("Trim / extend this beam…",
                           lambda: self.beam_trim_dialog(sel[1]))
@@ -4224,13 +4291,13 @@ class Panel(QWidget):
         return best[1] if best else (arch["levels"][0]["id"]
                                     if arch["levels"] else None)
 
-    def _shaft_drawn(self, drawn, through):
+    def _shaft_drawn(self, drawn, through, lid0=None):
         doc = self.doc()
         names = {lv["id"]: lv["name"] for lv in doc["arch"]["levels"]}
         made, where = 0, set()
         for vs in drawn:
             z = sum(v[2] for v in vs) / len(vs)
-            lid = self._level_at_z(doc, z)
+            lid = lid0 or self._level_at_z(doc, z)
             if lid and PJ.add_man_shaft(doc, lid, [v[:2] for v in vs],
                                         through):
                 made += 1
@@ -4244,7 +4311,92 @@ class Panel(QWidget):
                          + (" and every floor" if through else "")
                          + " — the drawn rectangle can be deleted")
 
-    def _shaft_close_drawn(self, drawn):
+    def _wall_attach(self, ids, top, bot):
+        doc = self.doc()
+        n = 0
+        for wid in ids:
+            w = PJ.find_record(doc, "wall", wid)
+            if w is None:
+                continue
+            new = PJ.wall_attach(doc, w, top, bot, dict(w))
+            if new != w:
+                w.update(new)
+                n += 1
+        if not n:
+            self.flash("Nothing to change")
+            return
+        self.commit(doc, f"{n} wall(s): " + ", ".join(
+            x for x in (("top attached" if top == "slab" else
+                         "top detached") if top else "",
+                        ("bottom attached" if bot == "slab" else
+                         "bottom detached") if bot else "") if x))
+
+    def _group_top_z(self, kind, eid):
+        """The highest point of the element's groups in the model."""
+        zs = []
+        for g in PJ.all_groups(self.vp.scene):
+            t = PJ.tag_of(g) or {}
+            if t.get("type") != kind or t.get("id") != eid:
+                continue
+            m = getattr(g, "mesh", None)
+            xf = getattr(g, "xform", None)
+            for v in (m.vertices if m is not None else []):
+                p = v.position
+                if xf is not None:
+                    p = xf.map(p)
+                zs.append(p.z())
+        return max(zs) if zs else None
+
+    def shaft_rect(self, slab_id=None, mode="open"):
+        """A shaft opened (or closed) where a rectangle is drawn on a slab:
+        click two opposite corners on its top face. ``mode``: «open» (this
+        floor), «through» (every floor), «close»."""
+        pe = getattr(self, "_planedit", None)
+        if pe is None:
+            self.flash("Not available — restart IngeTrazo")
+            return
+        if slab_id is None:
+            sel = self._selected()
+            if sel and sel[0] == "slab":
+                slab_id = sel[1]
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id) if slab_id else None
+        if slab is not None:
+            z = self._group_top_z("slab", slab_id)
+        else:
+            lid, lv = self.level()
+            if not lid:
+                self.flash("Select a slab (or pick a level at the top) first")
+                return
+            el = PJ.elevations(doc["arch"])
+            i = next(k for k, l_ in enumerate(doc["arch"]["levels"])
+                     if l_["id"] == lid)
+            z = el[i]
+        if z is None:
+            z = 0.0
+
+        def done(a, b):
+            if abs(b[0] - a[0]) < 0.1 or abs(b[1] - a[1]) < 0.1:
+                self.flash("Too small — click two opposite corners")
+                return
+            vs = [(a[0], a[1], z), (b[0], a[1], z), (b[0], b[1], z),
+                  (a[0], b[1], z)]
+            lid0 = None
+            if slab_id:
+                from . import slabedges as SE
+                s_ = PJ.find_record(self.doc(), "slab", slab_id)
+                if s_ is not None:
+                    lid0 = SE.floor_level_of(self.doc(), s_)
+            if mode == "close":
+                self._shaft_close_drawn([vs], lid0)
+            else:
+                self._shaft_drawn([vs], mode == "through", lid0)
+        what = {"open": "open a shaft", "through": "open a shaft through "
+                "every floor", "close": "close the opening"}[mode]
+        pe.pick_rect(z, done, f"Click one corner, then the opposite corner "
+                              f"on the slab to {what} (Esc cancels)")
+
+    def _shaft_close_drawn(self, drawn, lid0=None):
         """The shafts / slab openings under the rectangle drawn closed:
         those drawn by hand forgotten, the slab's own holes filled."""
         from shapely.geometry import Polygon
@@ -4257,7 +4409,7 @@ class Panel(QWidget):
             if rp.is_empty:
                 continue
             z = sum(v[2] for v in vs) / len(vs)
-            lid = self._level_at_z(doc, z)
+            lid = lid0 or self._level_at_z(doc, z)
             before = len(doc.get("man_shafts") or [])
             doc["man_shafts"] = [
                 m for m in doc.get("man_shafts") or []
@@ -4924,6 +5076,9 @@ class Panel(QWidget):
                     v = old
                 out[key] = v
         out.pop("slope", None)
+        if "top_att" in out:             # a wall type edited: as attached
+            out = PJ.wall_attach(self.doc(), rec, out.pop("top_att", None),
+                                 out.pop("bot_att", None), out)
         return out
 
     def _cp_save_names(self):
@@ -5393,6 +5548,8 @@ class Panel(QWidget):
                 st_.get("found_type", "isolated_strip")), 0))
             self.s_raft_t.setValue(float(st_.get("raft_t", 0.6096)))
             self.s_raft_o.setValue(float(st_.get("raft_off", 0.6096)))
+            self.st_well.setCurrentIndex(max(self.st_well.findData(
+                st_.get("stair_well", "railing")), 0))
             self.s_bon.setCurrentIndex(max(self.s_bon.findData(
                 st_.get("beam_on", "columns")), 0))
             self.s_bspan.setValue(float(st_.get("beam_span", 10.0)))
