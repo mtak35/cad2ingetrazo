@@ -316,21 +316,68 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
                    wall_recs=recs)
     if not legs:
         return 0
-    sill = float(st.get("sill", 0.9))
-    head = sill + float(st.get("win_h", 1.2))
-    storey = float(how.get("floor_h", st.get("floor_h", 3.048)))
-    up = max(storey - float(st.get("slab_t", 0.15)) - head, 0.1)
-    crecs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
-              "b": [round(b[0], 4), round(b[1], 4)], "t": round(t, 3),
-              "align": "centre", "side": 1, "height": "level", "base": 0.0,
-              "level": lid, "type": "curtain", "cw_low": round(sill, 4),
-              "cw_up": round(up, 4), "cw_fill": "spandrel", "grid": 1.2,
-              "tgrid": 3.0}
-             for a, b, t in legs if math.dist(a, b) >= 0.25]
+    # each leg: a wall like the one it carries on (its type, height,
+    # base, finish…) with a window in it — the two windows meeting at the
+    # corner post, as the plan draws the glass turning the corner
+    base_ws = [w for w in made if w.get("kind", "line") == "line"
+               and W.why_not(w) is None
+               and not str(w.get("name", "")).startswith("Corner window")]
+
+    def _like(a, b, t):
+        u = ((b[0] - a[0]), (b[1] - a[1]))
+        L = math.hypot(*u) or 1.0
+        u = (u[0] / L, u[1] / L)
+        best, bd = None, 1e9
+        for w in base_ws:
+            c_ = W.centre(w)
+            v = (c_.p1[0] - c_.p0[0], c_.p1[1] - c_.p0[1])
+            Lv = math.hypot(*v) or 1.0
+            if abs(u[0] * v[1] / Lv - u[1] * v[0] / Lv) > 0.09:
+                continue
+            dd = min(math.dist(p_, q_) for p_ in (a, b)
+                     for q_ in (c_.p0, c_.p1))
+            if dd < bd:
+                best, bd = w, dd
+        if best is None:
+            best = min(base_ws, key=lambda w: min(
+                math.dist(p_, tuple(q_)) for p_ in (a, b)
+                for q_ in (w["a"], w["b"]))) if base_ws else None
+        return best
+    keep = ("type", "height", "base", "h", "material", "finish", "layer",
+            "rcc", "top_att", "bot_att", "plaster", "skirting")
+    crecs, wins = [], []
+    for a, b, t in legs:
+        if math.dist(a, b) < 0.25:
+            continue
+        like = _like(a, b, t) or {}
+        rec = {"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+               "b": [round(b[0], 4), round(b[1], 4)], "t": round(t, 3),
+               "align": "centre", "side": 1, "height": "level", "base": 0.0,
+               "level": lid, "type": "solid"}
+        for k_ in keep:
+            if k_ in like:
+                rec[k_] = copy.deepcopy(like[k_])
+        if rec.get("type") == "curtain":
+            rec["type"] = "solid"
+        rec["level"] = lid
+        crecs.append(rec)
     made_c = M.new_walls(arch["walls"], crecs)
     for k_, w_ in enumerate(made_c, 1):
         w_["name"] = f"Corner window {k_}"
     arch["walls"] += made_c
+    gap = S.END_GAP + 0.005
+    orecs = []
+    for w_ in made_c:
+        L = W.drawn(w_).L
+        if L - 2 * gap < 0.3:
+            continue
+        o = {"kind": "window", "wall": w_["id"], "pos": round(L / 2, 4),
+             "w": round(L - 2 * gap, 3), "h": float(st.get("win_h", 1.2)),
+             "sill": float(st.get("sill", 0.9)), "swing": "left", "face": 1,
+             "style": st.get("win_style", "sliding")}
+        opening_types(o, st)
+        orecs.append(o)
+    arch["openings"] += M.new_openings(arch["openings"], orecs)
     return len(made_c)
 
 
@@ -435,9 +482,11 @@ def redetect_corner_windows(doc, lids=None) -> dict:
                            (how.get("ix", 0.0), how.get("iy", 0.0)),
                            how.get("rot", 0.0))
         P, _found = layer_patterns(drawing, how, st)
-        arch["walls"] = [w for w in arch["walls"] if not (
-            w["level"] == lid and
-            str(w.get("name", "")).startswith("Corner window"))]
+        gone = {w["id"] for w in arch["walls"] if w["level"] == lid and
+                str(w.get("name", "")).startswith("Corner window")}
+        arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
+        arch["openings"] = [o for o in arch["openings"]
+                            if o["wall"] not in gone]
         mine = [w for w in arch["walls"] if w["level"] == lid]
         out[lid] = _corner_windows(doc, lid, pl, P, how, mine)
         if out[lid]:

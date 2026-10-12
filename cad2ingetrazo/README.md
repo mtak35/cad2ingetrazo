@@ -273,3 +273,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Covered by the slab / roof**: the slab over the floor (and the roof of that level) is carried out over the corner windows; a small block closed by them (a guard room) gets its own slab.
 - **Glass inside the building is left alone**: shower screens and glass partitions (glazing that meets a wall square-on, inside the outline) are no longer taken for corner windows. Single lines, door leaves and stair rails are left out too.
 - Mr. Zahid's ground floor: the entrance corner (by the living room) and the guard room corner — found; the two shower screens taken in 3.14.3 — gone. «Find corner windows (this level)» replaces the corner windows made before.
+
+## 3.14.5
+- **Corner windows are windows in a wall** (not a curtain wall): each leg is a wall like the one it continues (same type, thickness, height, finish) with a window in it — the import's window type, sill and height. The two windows meet at a small corner post. «Find corner windows (this level)» removes the old corner walls and their windows before adding the new ones.

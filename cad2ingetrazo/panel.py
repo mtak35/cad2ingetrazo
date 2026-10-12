@@ -489,7 +489,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.14.4</span>")
+                   "3.14.5</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -2026,7 +2026,7 @@ class Panel(QWidget):
             self.flash("No corner window found on this level's plan")
             return
         self.commit(doc, f"{r[lid]} corner window leg(s) on «{lv['name']}» "
-                         "— in the wall line, slab carried over them")
+                         "— windows in the wall, slab over them")
 
     def _update_levels(self):
         """Every level's storey height = the floor height typed (basements
