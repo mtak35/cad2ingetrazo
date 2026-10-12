@@ -267,3 +267,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **False ceilings**: a ceiling set only on rooms (the room's Edit properties) was never built — only a level's ceiling was looked for. Fixed.
 - **Shafts**: a shaft drawn by hand was cut again into the slab at every rebuild (the slab forgot which holes were hand cuts), so the same hole stacked up — three times over in your plan — and a slab with holes on top of each other is not drawn with them. Now each hand cut is made once; the same shaft added twice counts once; holes that overlap (a shaft over a stair well) are joined.
 - Fix: a stair whose opening came out in two parts crashed the stair making on import («'MultiPolygon' object is not iterable»).
+
+## 3.14.4
+- **Corner windows in the wall line**: a corner window now closes the building's outline where a corner has no wall — glazing drawn double (the wall's two faces) that turns the corner and carries on the walls at both its ends. Each leg is put on that wall's centre line, made as thick as it (9" walls → 9" window wall) and run up to the wall's end, the two legs meeting at the corner. A bay window standing out from a wall is still found.
+- **Covered by the slab / roof**: the slab over the floor (and the roof of that level) is carried out over the corner windows; a small block closed by them (a guard room) gets its own slab.
+- **Glass inside the building is left alone**: shower screens and glass partitions (glazing that meets a wall square-on, inside the outline) are no longer taken for corner windows. Single lines, door leaves and stair rails are left out too.
+- Mr. Zahid's ground floor: the entrance corner (by the living room) and the guard room corner — found; the two shower screens taken in 3.14.3 — gone. «Find corner windows (this level)» replaces the corner windows made before.

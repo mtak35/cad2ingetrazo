@@ -305,8 +305,15 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
     wpl = W.plan([w for w in made if W.why_not(w) is None
                   and not str(w.get("name", "")).startswith("Corner window")])
     wpolys = [_PgW(pc["outer"]).buffer(0) for ps in wpl.values() for pc in ps]
-    legs = CW.find(wsegs, wpolys, wall_lines=[
-        (tuple(w["a"]), tuple(w["b"])) for w in made if "a" in w])
+    recs = []
+    for w in made:
+        if w.get("kind", "line") != "line" or W.why_not(w) is not None or \
+                str(w.get("name", "")).startswith("Corner window"):
+            continue
+        c_ = W.centre(w)
+        recs.append((tuple(c_.p0), tuple(c_.p1), float(w["t"])))
+    legs = CW.find(wsegs, wpolys, wall_lines=[(a, b) for a, b, _t in recs],
+                   wall_recs=recs)
     if not legs:
         return 0
     sill = float(st.get("sill", 0.9))
@@ -325,6 +332,86 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
         w_["name"] = f"Corner window {k_}"
     arch["walls"] += made_c
     return len(made_c)
+
+
+def cover_corner_windows(doc, lid) -> int:
+    """The slabs over and under level ``lid`` (and its roof) carried out
+    over its corner windows — the floor under them, the slab or roof over
+    them; a slab made over a block that had none. The number changed."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    cws = [w for w in arch["walls"] if w["level"] == lid and
+           str(w.get("name", "")).startswith("Corner window")]
+    if not cws:
+        return 0
+    lines = []
+    for w in cws:
+        c_ = W.centre(w)
+        lines.append((tuple(c_.p0), tuple(c_.p1), float(w["t"])))
+    glass = unary_union([LineString([a, b]).buffer(t / 2, cap_style=2,
+                                                   join_style=2)
+                         for a, b, t in lines])
+    el = elevations(arch)
+    order = [arch["levels"][i]["id"] for i in
+             sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+    k = order.index(lid) if lid in order else -1
+    above = order[k + 1] if 0 <= k < len(order) - 1 else None
+    on_top = slab_on_top(doc)
+    over = [s for s in arch["structure"] if s["type"] == "slab" and (
+        (s["level"] == lid and (s.get("top") or (
+            on_top and not s.get("zone") and not s.get("user")))) or
+        (not on_top and above is not None and s["level"] == above
+         and not s.get("top")))]
+    over += [s for s in arch["structure"]
+             if s["type"] == "roof" and s["level"] == lid]
+    cands = over + [s for s in _floor_slabs(doc, lid) if s not in over]
+    n = 0
+    for s in cands:
+        if not s.get("corners") or s.get("zone"):
+            continue
+        sp = SE._poly(s["corners"])
+        if sp.is_empty or sp.distance(glass) > 2.0 or \
+                sp.buffer(0.02).contains(glass):
+            continue
+        hw = max(t for _a, _b, t in lines) / 2
+        new = SE.extend_outline(s["corners"], [(a, b) for a, b, _t in lines],
+                                reach=2.5, half=hw)
+        if new is not s["corners"]:
+            s["corners"] = [[round(p[0], 4), round(p[1], 4)] for p in new]
+            n += 1
+    # a block of walls closed by its corner windows with no slab over it
+    covered = unary_union([SE._poly(s["corners"]) for s in over
+                           if s.get("corners")] or [glass.buffer(0)])
+    if not doc["settings"].get("slab_on", True):
+        return n
+    mine = [w for w in arch["walls"] if w["level"] == lid]
+    plans = W.plan([w for w in mine if W.why_not(w) is None])
+    recs = []
+    for o in _outer_loops([pc for ps in plans.values() for pc in ps],
+                          least=2.0):
+        poly = SE._poly(o)
+        if poly.is_empty or not poly.buffer(0.05).intersects(glass):
+            continue
+        if over and covered.intersection(poly).area > 0.5 * poly.area:
+            continue
+        rec = {"type": "slab", "level": lid if on_top or above is None
+               else above,
+               "corners": [[round(p[0], 4), round(p[1], 4)]
+                           for p in S._ccw(o)],
+               "holes": [], "shafts": [],
+               "t": float(doc["settings"].get("slab_t", 0.15)),
+               "offset": 0.0}
+        if on_top or above is None:
+            rec["top"] = True
+        if S.why_not(rec) is None:
+            recs.append(rec)
+    if recs:
+        arch["structure"] += M.new_elements(arch["structure"], recs)
+        n += len(recs)
+    return n
 
 
 def redetect_corner_windows(doc, lids=None) -> dict:
@@ -353,6 +440,12 @@ def redetect_corner_windows(doc, lids=None) -> dict:
             str(w.get("name", "")).startswith("Corner window"))]
         mine = [w for w in arch["walls"] if w["level"] == lid]
         out[lid] = _corner_windows(doc, lid, pl, P, how, mine)
+        if out[lid]:
+            try:
+                cover_corner_windows(doc, lid)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project cover_corner_windows")
     return out
 
 
@@ -972,7 +1065,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                   or _match(lay[s_[4]], P["ramps"])]
             if pk and mine:
                 try:
-                    blocks = _parking_slab(mine, pk, blocks)
+                    blocks = _parking_slab(
+                        [w for w in mine if not str(w.get("name", ""))
+                         .startswith("Corner window")], pk, blocks)
                 except Exception:  # noqa: BLE001
                     from .host import log_error
                     log_error("project._parking_slab")
@@ -1040,6 +1135,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["shafts"] += len(sh_open)
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
+    if rep.get("corner_windows"):    # the slab carried over them too
+        try:
+            cover_corner_windows(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project cover_corner_windows")
     rep["columns"] = sum(1 for r in new if r["type"] == "column")
     rep["beams"] = sum(1 for r in new if r["type"] == "beam")
     rep["cores"] = sum(1 for r in new if r["type"] == "core")
