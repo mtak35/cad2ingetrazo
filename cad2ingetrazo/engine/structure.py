@@ -1016,6 +1016,8 @@ def _opening_parts(o: dict, seg, z0: float) -> list:
                 # the pull on the jamb side of the end panels, both faces —
                 # never on the edges where the panels meet (the inner
                 # panels of a 3- or 4-panel set have none)
+                if o["kind"] != "door":     # windows: no pulls (3.14.1)
+                    continue
                 if k == 0:
                     sh = a0 + 0.05
                 elif k == npan - 1:

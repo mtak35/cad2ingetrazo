@@ -245,3 +245,13 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Ground floor level and floor height** sit right under «Select floor on drawing…»; defaults +2'-0" and 10'-0" (projects from before take the ground floor at +2'-0" too; 0 = as the CAD's level note).
 - **Overlap floors: «Plot + shoring (site)»** in «Level to move» / «Level to rotate»: the plot (its setbacks, boundary wall, the shoring along it) and the excavations moved, laid over a level (centres or lower-left corners together) or turned.
 - Fix: a slab cast over a floor crashed «Edges, railing, sun shades…» and the shaft dialog (levels' heights read wrongly).
+
+## 3.14.1
+- **Isolate level works**: IngeTrazo draws a group whatever its layer's visibility, so 3.14.0's hidden layers changed nothing. Now the other floors' elements (and the plot, site, other floors' slabs) are hidden themselves; the level stands on its floor slab and the slab cast over it is taken off so it can be seen into. «Show all» shows everything again.
+- **Floors as groups** (checkbox beside Select level): each floor's whole 3D model one group «Level · Ground Floor» — move, hide, copy or export a floor as one; double-click a floor group to reach its elements. Off: the elements loose, as before.
+- **Align beams with the columns**: right-click a beam (or a column: all its beams) ▸ «Align beam(s) with the columns» ▸ left / top face, centre, or right / bottom face of the columns at its ends.
+- **Update floors and levels (all levels)** under Floor height: every storey set to the floor height typed and the ground floor to the level typed (the CAD's level notes still applied when that option is on), then the model, stairs and ramps made again — like Update from CAD, for the levels.
+- **Shoring along**: the plot limits, or round the basement's outer (RCC) walls (one shoring all the way round, just outside them).
+- **Sliding windows**: no pulls on the panels (doors keep theirs).
+- **Shafts on a drawn rectangle**: draw a rectangle on a slab (Rectangle tool), select it, right-click ▸ «CAD2IngeTrazo · Shaft» ▸ «Open a shaft here», «… through every floor», or «Close the shaft / opening here» (the openings it covers closed again).
+- Fix: the panel's buttons are called with no arguments — «Isolate level» ran as «Show all» and «Basement outer walls → RCC» as «Undo RCC» (Qt's «checked» flag landed in their first argument).

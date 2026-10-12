@@ -119,7 +119,10 @@ def _spin(lo, hi, val, step=0.05, dec=2, suffix=" m"):
 
 def _btn(text, fn, tip="", primary=False):
     b = QPushButton(text)
-    b.clicked.connect(fn)
+    # called with no arguments: Qt's «checked» flag would otherwise land in
+    # a handler's first optional argument (Isolate level ran as Show all,
+    # «Basement outer walls → RCC» as Undo)
+    b.clicked.connect(lambda _c=False, f=fn: f())
     if tip:
         b.setToolTip(tip)
     if primary:
@@ -482,7 +485,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.14.0</span>")
+                   "3.14.1</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -506,11 +509,19 @@ class Panel(QWidget):
         self.lay.addLayout(row)
         # the level picked at the top, alone in 3D (and its whole model)
         row = QHBoxLayout()
-        row.addWidget(_btn("Isolate level", self.isolate_level,
+        row.addWidget(_btn("Isolate level", lambda _=False: self.isolate_level(True),
                            "3D: only the level picked at the top — every "
                            "other floor, the plot and the site hidden"))
         row.addWidget(_btn("Show all", lambda: self.isolate_level(False),
                            "Every floor shown again"))
+        self.c_lvgroups = QCheckBox("Floors as groups")
+        self.c_lvgroups.setToolTip(
+            "Each floor's whole 3D model — walls, doors, windows, columns, "
+            "beams, slabs, stairs, finishes, cars… — one group "
+            "«Level · Ground Floor» (move, hide, copy, export it as one); "
+            "double-click a floor group to reach its elements")
+        self.c_lvgroups.toggled.connect(self._level_groups)
+        row.addWidget(self.c_lvgroups)
         row.addWidget(_btn("Select level", self.select_level,
                            "Select the whole level picked at the top — its "
                            "walls, doors, windows, structure, finishes, "
@@ -549,20 +560,32 @@ class Panel(QWidget):
         self._apply_view("C2I · 3D")
 
     def isolate_level(self, on=True):
-        """3D: only the level picked at the top (its layer), every other
-        CAD2IngeTrazo layer hidden; «Show all» puts them back as they
-        were."""
-        from .host import LAYER_PREFIX, is_ann_layer, level_layer
+        """3D: only the level picked at the top — its walls, doors,
+        windows, columns, beams, stairs, finishes… standing on its floor
+        slab (the slab under it), the slab cast over it taken off so the
+        floor can be seen into; every other floor, the plot and the site
+        hidden. «Show all» puts everything back."""
         sc = self.vp.scene
-        if not on:
-            was = getattr(sc, "_c2i_iso", None) or {}
+        was = getattr(sc, "_c2i_iso_hidden", None) or []
+        for g in was:                       # whatever an earlier isolate hid
+            try:
+                g.hidden = False
+            except Exception:  # noqa: BLE001
+                pass
+        sc._c2i_iso_hidden = []
+        # (3.14.0 hid layers: those back on too)
+        from .host import LAYER_PREFIX, is_ann_layer
+        lay_was = getattr(sc, "_c2i_iso", None)
+        if lay_was:
             for L in sc.layers:
-                if L.name in was:
-                    L.visible = was[L.name]
-                elif L.name.startswith(LAYER_PREFIX) and \
-                        not is_ann_layer(L.name):
-                    L.visible = True
+                if L.name in lay_was:
+                    L.visible = lay_was[L.name]
             sc._c2i_iso = None
+        if not on:
+            for L in sc.layers:
+                if L.name.startswith(LAYER_PREFIX) and \
+                        not is_ann_layer(L.name) and not L.visible:
+                    L.visible = True
             sc.version += 1
             self.vp.update()
             self.flash("Every floor shown")
@@ -572,21 +595,59 @@ class Panel(QWidget):
             self.flash("Pick a level at the top first")
             return
         self.show_3d()
-        keep = level_layer(lv["name"])
-        if getattr(sc, "_c2i_iso", None) is None:
-            sc._c2i_iso = {L.name: L.visible for L in sc.layers}
-        n = 0
-        for L in sc.layers:
-            if not L.name.startswith(LAYER_PREFIX) or is_ann_layer(L.name):
+        doc = self.doc()
+        arch = doc["arch"]
+        el = PJ.elevations(arch)
+        order = [arch["levels"][i]["id"] for i in
+                 sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+        k = order.index(lid) if lid in order else -1
+        below = order[k - 1] if k > 0 else None
+        slabs = {e["id"]: e for e in arch["structure"] if e["type"] == "slab"}
+        on_top = PJ.slab_on_top(doc)
+
+        def keep(t):
+            lv_ = t.get("level")
+            if t.get("type") == "levelgroup":
+                return lv_ in (lid, below)
+            if t.get("type") == "slab":
+                s_ = slabs.get(t.get("id")) or {}
+                if on_top:              # slabs cast over each floor
+                    if lv_ == lid:
+                        return not s_.get("top")      # its ceiling: off
+                    return lv_ == below and bool(s_.get("top"))  # its floor
+                return lv_ == lid
+            return lv_ == lid
+        hid = []
+        for g in PJ.all_groups(sc):
+            t = PJ.tag_of(g)
+            if not t or t.get("type") == "symbols":
                 continue
-            want = L.name == keep
-            if L.visible != want:
-                L.visible = want
-                n += 1
+            if t.get("type") == "levelgroup" and t.get("level") == below:
+                # the floor below's group: only its slab over (our floor)
+                for c in getattr(g, "children", None) or []:
+                    tc = PJ.tag_of(c) or {}
+                    if not keep(tc) and not c.hidden:
+                        c.hidden = True
+                        hid.append(c)
+                continue
+            if not keep(t) and not g.hidden:
+                g.hidden = True
+                hid.append(g)
+        sc._c2i_iso_hidden = hid
         sc.version += 1
         self.vp.update()
-        self.flash(f"«{lv['name']}» isolated — «Show all» brings the other "
-                   "floors back")
+        self.flash(f"«{lv['name']}» isolated (on its floor slab, the slab "
+                   "over it off) — «Show all» brings everything back")
+
+    def _level_groups(self, on):
+        if self._building:
+            return
+        doc = self.doc()
+        if bool(doc["settings"].get("level_groups")) == bool(on):
+            return
+        doc["settings"]["level_groups"] = bool(on)
+        self.commit(doc, "Each floor one group in 3D" if on else
+                    "Floors' elements loose again (no floor groups)")
 
     def select_level(self):
         """Every CAD2IngeTrazo group of the level picked at the top."""
@@ -596,7 +657,7 @@ class Panel(QWidget):
             return
         sc = self.vp.scene
         hits = [g for g in sc.groups if (PJ.tag_of(g) or {}).get("level")
-                == lid]
+                == lid and (PJ.tag_of(g) or {}).get("type") != "symbols"]
         sc.selection.clear()
         for g in hits:
             sc.selection.add(g)
@@ -847,6 +908,13 @@ class Panel(QWidget):
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
+        f.addRow(_btn("Update floors and levels (all levels)",
+                      self._update_levels,
+                      "Every floor made again at the ground floor level and "
+                      "floor height above (the CAD's level notes, when "
+                      "«Floor levels from the CAD's level notes» is on, "
+                      "still set the floors they note) — the walls, slabs, "
+                      "stairs, ramps and everything on them follow"))
         row = QHBoxLayout()
         row.addWidget(_btn("Analyse", self._analyse,
                            "Read the file and list its layers — nothing "
@@ -1911,6 +1979,49 @@ class Panel(QWidget):
                 w.blockSignals(False)
         self._store_flag("cad_lines", on)
 
+    def _update_levels(self):
+        """Every level's storey height = the floor height typed (basements
+        too), the ground floor at the level typed, the CAD's level notes
+        applied over that when asked — then the model made again."""
+        doc = self.doc()
+        st = doc["settings"]
+        h = round(float(self.i_floor_h.value()), 4)
+        st["floor_h"] = h
+        v = self.i_gffl.value()
+        if 0.0 < v < 0.3048 - 1e-6:
+            v = 0.3048
+        st["ground_ffl"] = round(v, 4)
+        if v > 0:
+            st["plinth"] = round(v, 4)
+        n = 0
+        for lv_ in doc["arch"]["levels"]:
+            if str(lv_.get("name", "")).strip().lower() == "roof":
+                continue
+            if abs(float(lv_.get("height") or 0) - h) > 1e-4:
+                lv_["height"] = h
+                n += 1
+        doc["arch"]["levels"] = M.fix_levels(doc["arch"]["levels"])
+        noted = []
+        if self.i_levels.isChecked() and st.get("levels_cad", True):
+            try:
+                noted = PJ.levels_from_cad(doc) or []
+            except Exception:  # noqa: BLE001
+                log_error("panel._update_levels")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                PJ.recut_wells(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel._update_levels recut")
+        finally:
+            QApplication.restoreOverrideCursor()
+        from .host import len_txt
+        self.commit(doc, f"Floors and levels updated: {n} storey height(s) "
+                         f"set to {len_txt(h)}, ground floor at "
+                         + (PJ.ffl_text(v) if v > 0 else "the CAD's note")
+                         + (f", {len(noted)} floor(s) as the CAD notes them"
+                            if noted else ""))
+
     def _apply_gffl(self):
         doc = self.doc()
         v = self.i_gffl.value()
@@ -2109,7 +2220,7 @@ class Panel(QWidget):
         f.addRow(row)
         f.addRow(_btn("Columns at wall corners (this level)",
                       self._corner_columns))
-        f.addRow(_btn("Shaft / slab opening on this level…",
+        f.addRow(_btn("Shaft open / close on this level…",
                       lambda: self.shaft_dialog(None),
                       "Cut an opening in the floor slab: a rectangle at "
                       "X, Y, or a rectangle you drew and selected; on this "
@@ -2181,7 +2292,7 @@ class Panel(QWidget):
         row.addWidget(_btn("Undo RCC", lambda: self._retaining(False)))
         f.addRow(row)
         from . import shoring as SH
-        self.s_sh = QCheckBox("Shoring along the plot limits")
+        self.s_sh = QCheckBox("Shoring (basement dig)")
         self.s_sh.setToolTip("Piles (or sheet piles) round the plot, from "
                              "the ground to under the lowest basement")
         f.addRow(self.s_sh)
@@ -2189,6 +2300,11 @@ class Panel(QWidget):
         for k, lab in SH.TYPES:
             self.s_sh_kind.addItem(lab, k)
         f.addRow("Shoring type", self.s_sh_kind)
+        self.s_sh_on = QComboBox()
+        self.s_sh_on.addItem("Along the plot limits", "plot")
+        self.s_sh_on.addItem("Round the basement's outer (RCC) walls",
+                             "walls")
+        f.addRow("Shoring along", self.s_sh_on)
         row = QHBoxLayout()
         self.s_sh_d = _spin(0.3, 1.5, 0.6096, 0.0254)      # 24" piles
         self.s_sh_d.setToolTip("Pile diameter")
@@ -2218,9 +2334,11 @@ class Panel(QWidget):
         st = doc["settings"]
         st["shoring"] = self.s_sh.isChecked()
         st["shoring_type"] = self.s_sh_kind.currentData() or "piles"
+        st["shoring_on"] = self.s_sh_on.currentData() or "plot"
         st["shoring_d"] = self.s_sh_d.value()
         st["shoring_embed"] = self.s_sh_e.value()
-        if st["shoring"] and not doc["arch"].get("plot"):
+        if st["shoring"] and st["shoring_on"] == "plot" and \
+                not doc["arch"].get("plot"):
             self.flash("Set the plot first (Site ▸ Plot) — shoring follows "
                        "its limits")
         elif st["shoring"] and not any(lv.get("kind") == "basement"
@@ -3420,6 +3538,18 @@ class Panel(QWidget):
     def context_menu(self, menu) -> None:
         """The right-click menu of a CAD2IngeTrazo element: its fields in a
         dialog, its quick changes, delete."""
+        try:            # a rectangle drawn on a slab: open / close a shaft
+            drawn = self._drawn_outlines()
+        except Exception:  # noqa: BLE001
+            drawn = []
+        if drawn:
+            m_ = menu.addMenu("CAD2IngeTrazo · Shaft (the rectangle drawn)")
+            m_.addAction("Open a shaft here (this floor's slab)",
+                         lambda d_=drawn: self._shaft_drawn(d_, False))
+            m_.addAction("Open a shaft through every floor",
+                         lambda d_=drawn: self._shaft_drawn(d_, True))
+            m_.addAction("Close the shaft / opening here",
+                         lambda d_=drawn: self._shaft_close_drawn(d_))
         sel = self._selected()
         if not sel:
             return
@@ -3577,6 +3707,14 @@ class Panel(QWidget):
         if sel[0] in ("beam", "column"):
             sub.addAction("Beams column to column on this level",
                           lambda: self._beams_cc(rec["level"]))
+            am = sub.addMenu("Align beam(s) with the columns" if sel[0] ==
+                             "beam" else "Align this column's beams")
+            for how_, lab_ in (("left", "Left / top face of the columns"),
+                               ("centre", "Centre of the columns"),
+                               ("right", "Right / bottom face of the "
+                                         "columns")):
+                am.addAction(lab_, lambda h=how_, k=sel[0], i=sel[1]:
+                             self._align_beams(k, i, h))
         if sel[0] == "ramp":
             sub.addAction("Start at the other end", self._flip)
         if sel[0] == "room":
@@ -3938,6 +4076,26 @@ class Panel(QWidget):
             return
         self.commit(doc, f"Slab extended up to {n} beam(s)")
 
+    def _align_beams(self, kind, eid, how):
+        """The beams selected (or the one clicked, or a column's beams)
+        slid onto the columns' left / top face, centre or right / bottom
+        face."""
+        doc = self.doc()
+        if kind == "column":
+            ids = PJ.beams_at_column(doc, eid)
+        else:
+            ids = [i for k, i in self._selected_all() if k == "beam"] \
+                if hasattr(self, "_selected_all") else []
+            if eid not in ids:
+                ids = [eid]
+        n = sum(1 for i in ids if PJ.align_beam(doc, i, how))
+        if not n:
+            self.flash("No column at the beam's ends to align it with")
+            return
+        word = {"left": "left / top face", "centre": "centre",
+                "right": "right / bottom face"}[how]
+        self.commit(doc, f"{n} beam(s) on the columns' {word}")
+
     def slab_edges_dialog(self, slab_id):
         """A slab's edges: extended to its walls; a railing on its free
         edges (or taken off); sun shades over its floor's windows; its
@@ -4053,6 +4211,78 @@ class Panel(QWidget):
             return
         self.commit(doc, "Slab: " + ", ".join(msgs))
 
+    def _level_at_z(self, doc, z):
+        """The level whose floor a point at height ``z`` lies on (the
+        nearest floor at or under it)."""
+        arch = doc["arch"]
+        el = PJ.elevations(arch)
+        best = None
+        for i, lv_ in enumerate(arch["levels"]):
+            dz = z - el[i]
+            if dz > -0.6 and (best is None or abs(dz) < abs(best[0])):
+                best = (dz, lv_["id"])
+        return best[1] if best else (arch["levels"][0]["id"]
+                                    if arch["levels"] else None)
+
+    def _shaft_drawn(self, drawn, through):
+        doc = self.doc()
+        names = {lv["id"]: lv["name"] for lv in doc["arch"]["levels"]}
+        made, where = 0, set()
+        for vs in drawn:
+            z = sum(v[2] for v in vs) / len(vs)
+            lid = self._level_at_z(doc, z)
+            if lid and PJ.add_man_shaft(doc, lid, [v[:2] for v in vs],
+                                        through):
+                made += 1
+                where.add(names.get(lid, lid))
+        if not made:
+            self.flash("No shaft made — draw the rectangle on the slab "
+                       "(inside it), select it, then right-click", 8000)
+            return
+        self.commit(doc, f"{made} shaft(s) opened in the floor of "
+                         + ", ".join(sorted(where))
+                         + (" and every floor" if through else "")
+                         + " — the drawn rectangle can be deleted")
+
+    def _shaft_close_drawn(self, drawn):
+        """The shafts / slab openings under the rectangle drawn closed:
+        those drawn by hand forgotten, the slab's own holes filled."""
+        from shapely.geometry import Polygon
+
+        from . import slabedges as SE
+        doc = self.doc()
+        n = 0
+        for vs in drawn:
+            rp = Polygon([v[:2] for v in vs]).buffer(0)
+            if rp.is_empty:
+                continue
+            z = sum(v[2] for v in vs) / len(vs)
+            lid = self._level_at_z(doc, z)
+            before = len(doc.get("man_shafts") or [])
+            doc["man_shafts"] = [
+                m for m in doc.get("man_shafts") or []
+                if not (Polygon(m["pts"]).buffer(0).intersects(rp) and
+                        (m.get("through") or m.get("level") == lid))]
+            n += before - len(doc["man_shafts"])
+            PJ.apply_man_shafts(doc)
+            for s_ in PJ._floor_slabs(doc, lid):
+                for k in sorted(range(len(s_.get("holes") or [])),
+                                reverse=True):
+                    try:
+                        hp = Polygon(s_["holes"][k]).buffer(0)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if hp.intersects(rp) and \
+                            hp.intersection(rp).area > 0.2 * min(
+                                hp.area, rp.area):
+                        if SE.close_hole(doc, s_, k):
+                            n += 1
+        if not n:
+            self.flash("No shaft or opening under the rectangle drawn")
+            return
+        self.commit(doc, f"{n} shaft(s) / opening(s) closed — the drawn "
+                         "rectangle can be deleted")
+
     def _drawn_outlines(self) -> list:
         """Flat faces selected in the model that are not CAD2IngeTrazo's
         (a rectangle drawn with the Rectangle tool): their corners."""
@@ -4062,7 +4292,12 @@ class Panel(QWidget):
                    if g is not None):
                 continue
             if hasattr(e, "loop") and hasattr(e, "vertices"):
-                vs = [(v.x(), v.y(), v.z()) for v in e.vertices]
+                vs = []
+                for v in e.vertices:
+                    q = getattr(v, "position", v)
+                    if callable(q):
+                        q = q()
+                    vs.append((float(q.x()), float(q.y()), float(q.z())))
                 if len(vs) >= 3 and max(v[2] for v in vs) - \
                         min(v[2] for v in vs) < 0.05:
                     out.append(vs)
@@ -5151,6 +5386,9 @@ class Panel(QWidget):
         try:
             st_ = doc["settings"]
             self.s_rt.setValue(float(st_.get("retain_t", 0.3048)))
+            self.c_lvgroups.blockSignals(True)
+            self.c_lvgroups.setChecked(bool(st_.get("level_groups")))
+            self.c_lvgroups.blockSignals(False)
             self.s_ftype.setCurrentIndex(max(self.s_ftype.findData(
                 st_.get("found_type", "isolated_strip")), 0))
             self.s_raft_t.setValue(float(st_.get("raft_t", 0.6096)))
@@ -5162,6 +5400,8 @@ class Panel(QWidget):
             self.s_sh_kind.setCurrentIndex(max(self.s_sh_kind.findData(
                 st_.get("shoring_type", "piles")), 0))
             self.s_sh_d.setValue(float(st_.get("shoring_d", 0.6096)))
+            self.s_sh_on.setCurrentIndex(max(self.s_sh_on.findData(
+                st_.get("shoring_on", "plot")), 0))
             self.s_sh_e.setValue(float(st_.get("shoring_embed", 3.048)))
         except Exception:  # noqa: BLE001
             log_error("panel shoring fill")

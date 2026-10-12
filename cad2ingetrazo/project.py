@@ -79,6 +79,7 @@ DEFAULTS = {
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
+    "level_groups": False, "shoring_on": "plot",          # each level one group in 3D
     "found_type": "isolated_strip", "raft_t": 0.6096, "raft_off": 0.6096,
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
     "stair_riser": 0.1778, "stair_going": 0.2794,       # 7" riser, 11" tread
@@ -2129,6 +2130,79 @@ FOUNDATION_TYPES = [
     ("raft", "Raft / mat foundation (one slab under the building)")]
 
 
+def align_beam(doc, bid, how="centre", reach=0.8) -> bool:
+    """A beam slid sideways onto its columns: ``how`` = «centre» (on the
+    columns' centre line), «left» / «right» — flush with the columns' face
+    on that side in plan (for a beam running across the plan: «left» = the
+    top face, «right» = the bottom face). The columns are those at its
+    ends (within ``reach``). False when it reaches no column."""
+    from shapely.geometry import Point, Polygon
+    arch = doc["arch"]
+    b = next((e for e in arch["structure"]
+              if e["type"] == "beam" and e["id"] == bid), None)
+    if b is None:
+        return False
+    a_, b_ = tuple(b["a"]), tuple(b["b"])
+    L = math.dist(a_, b_)
+    if L < 0.05:
+        return False
+    u = ((b_[0] - a_[0]) / L, (b_[1] - a_[1]) / L)
+    n = (-u[1], u[0])
+    # «left / top» in plan: the side of smaller x for a beam running up the
+    # plan, of larger y for one running across it
+    if abs(u[1]) > abs(u[0]):
+        if n[0] > 0:
+            n = (-n[0], -n[1])
+    elif n[1] < 0:
+        n = (-n[0], -n[1])
+    cols = [e for e in arch["structure"]
+            if e["type"] == "column" and e["level"] == b["level"]]
+    ext = []
+    for end in (a_, b_):
+        best = None
+        for c in cols:
+            try:
+                pg = Polygon(S.column_outline(c, 0.0))
+            except Exception:  # noqa: BLE001
+                continue
+            d = pg.distance(Point(end))
+            if d <= reach and (best is None or d < best[0]):
+                best = (d, pg)
+        if best is not None:
+            vs = [(q[0] - a_[0]) * n[0] + (q[1] - a_[1]) * n[1]
+                  for q in list(best[1].exterior.coords)]
+            ext.append((min(vs), max(vs)))
+    if not ext:
+        return False
+    w = float(b.get("w", 0.2))
+    if how == "left":
+        off = min(hi for _lo, hi in ext) - w / 2
+    elif how == "right":
+        off = max(lo for lo, _hi in ext) + w / 2
+    else:
+        off = sum((lo + hi) / 2 for lo, hi in ext) / len(ext)
+    if abs(off) < 1e-4:
+        return True
+    b["a"] = [round(a_[0] + n[0] * off, 4), round(a_[1] + n[1] * off, 4)]
+    b["b"] = [round(b_[0] + n[0] * off, 4), round(b_[1] + n[1] * off, 4)]
+    return True
+
+
+def beams_at_column(doc, cid, reach=0.8) -> list:
+    """The ids of the beams that end at column ``cid``."""
+    from shapely.geometry import Point, Polygon
+    arch = doc["arch"]
+    c = next((e for e in arch["structure"]
+              if e["type"] == "column" and e["id"] == cid), None)
+    if c is None:
+        return []
+    pg = Polygon(S.column_outline(c, 0.0))
+    return [e["id"] for e in arch["structure"]
+            if e["type"] == "beam" and e["level"] == c["level"] and
+            min(pg.distance(Point(e["a"])), pg.distance(Point(e["b"])))
+            <= reach]
+
+
 def add_footings(doc, pad=1.2, pad_d=None, strip=0.6, strip_d=None,
                  kind="isolated_strip", raft_t=0.6096,
                  raft_off=0.6096) -> int:
@@ -3473,6 +3547,53 @@ def _finish_groups(doc):
 _BIKE_MESH = []
 
 
+def group_by_level(groups, arch) -> list:
+    """Every level's 3D elements (on its own layer) put into ONE group per
+    level, «Level · Ground Floor» — the floor moved, hidden, copied or
+    exported as one thing; double-click it to reach its elements. The 2D
+    notes and the site stay as they are."""
+    from core.group import Group
+    from core.mesh import Mesh
+    names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    buckets, rest = {}, []
+    for g in groups:
+        t = tag_of(g) or {}
+        lid = t.get("level")
+        if lid in names and getattr(g, "layer", None) == \
+                level_layer(names[lid]):
+            buckets.setdefault(lid, []).append(g)
+        else:
+            rest.append(g)
+    out = []
+    for lv in arch["levels"]:
+        kids = buckets.get(lv["id"])
+        if not kids:
+            continue
+        c = Group(Mesh(), name=f"Level · {lv['name']}")
+        c.adopt(kids)
+        c.component = False
+        c.layer = level_layer(lv["name"])
+        c.ext = {KEY: {"type": "levelgroup", "id": f"lvgrp-{lv['id']}",
+                       "level": lv["id"]}}
+        out.append(c)
+    return out + rest
+
+
+def all_groups(scene) -> list:
+    """The scene's groups and the groups inside them (a level group's
+    elements)."""
+    out = []
+
+    def walk(gs):
+        for g in gs:
+            out.append(g)
+            kids = getattr(g, "children", None)
+            if kids:
+                walk(kids)
+    walk(getattr(scene, "groups", []) or [])
+    return out
+
+
 def ramp_solids(doc) -> list:
     """Every car ramp as built, in absolute heights — for the walls and
     beams it crosses to stop under it: [{"sections", "zs", "t"}]."""
@@ -4142,6 +4263,11 @@ def _shoring_groups(doc):
     names = {lv["id"]: lv["name"] for lv in arch["levels"]}
     kind = doc["settings"].get("shoring_type", "piles")
     out = []
+    if doc["settings"].get("shoring_on", "plot") == "walls" and sides:
+        # round the basement walls: one shoring, all the way round
+        tot = sum(L for _k, L, _f, _l in sides)
+        sides = [(1, tot, [f for _k, _L, fs, _l in sides for f in fs],
+                  sides[0][3])]
     for k, L, fs, lid in sides:
         if not fs:
             continue
@@ -4511,6 +4637,12 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._grid_groups")
     _apply_materials(new_groups, doc.get("materials") or {})
+    if doc["settings"].get("level_groups"):
+        try:
+            new_groups = group_by_level(new_groups, arch)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.group_by_level")
     data = copy.deepcopy(doc)
     want = [level_layer(lv["name"]) for lv in arch["levels"]] + \
         [ann_layer(lv["name"]) for lv in arch["levels"]] + \

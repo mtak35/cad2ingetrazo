@@ -61,14 +61,18 @@ def _band(a, b, w):
     return [a, b, (b[0] + nx * w, b[1] + ny * w), (a[0] + nx * w, a[1] + ny * w)]
 
 
-def sides(plot_pts, z_top, z_bot, kind="piles", d=0.6096) -> list:
-    """[(side no, length, [faces])] — the shoring along each plot side."""
+def sides(plot_pts, z_top, z_bot, kind="piles", d=0.6096,
+          out_=False) -> list:
+    """[(side no, length, [faces])] — the shoring along each side of
+    ``plot_pts``: inside it (the plot limits), or just outside it
+    (``out_``: round the basement's outer walls)."""
+    sg = -1.0 if out_ else 1.0
     d = min(max(float(d), 0.3), 1.5)
     out = []
     if z_top - z_bot < 0.5 or not plot_pts or len(plot_pts) < 3:
         return out
     if kind == "sheet":
-        ring = _ring(plot_pts, 0.15)
+        ring = _ring(plot_pts, sg * 0.15)
         for k, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1]), 1):
             L = math.dist(a, b)
             if L < 0.3:
@@ -94,7 +98,7 @@ def sides(plot_pts, z_top, z_bot, kind="piles", d=0.6096) -> list:
             out.append((k, L, fs))
         return out
     step = d * (0.8 if kind == "secant" else 1.05)
-    ring = _ring(plot_pts, d / 2 + 0.05)
+    ring = _ring(plot_pts, sg * (d / 2 + 0.05))
     capw = d + 0.15
     for k, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1]), 1):
         L = math.dist(a, b)
@@ -124,13 +128,26 @@ def build(doc, elevations_) -> list:
     arch = doc["arch"]
     if not st.get("shoring"):
         return []
-    plot = arch.get("plot") or {}
-    pts = [tuple(p[:2]) for p in plot.get("corners") or []]
     levels = arch["levels"]
     bs = [i for i, lv in enumerate(levels) if lv.get("kind") == "basement"]
-    if not pts or not bs:
+    if not bs:
         return []
     low = min(bs, key=lambda i: elevations_[i])
+    along = st.get("shoring_on", "plot")
+    pts = []
+    if along == "walls":            # round the basement's outer (RCC) walls
+        from . import slabedges as SE
+        ws = [w for w in arch["walls"]
+              if w["level"] in {levels[i]["id"] for i in bs}]
+        fp = SE._footprint(ws)
+        if fp is not None and not fp.is_empty:
+            g_ = max(getattr(fp, "geoms", [fp]), key=lambda q: q.area)
+            pts = [tuple(p) for p in list(g_.exterior.coords)[:-1]]
+    else:
+        plot = arch.get("plot") or {}
+        pts = [tuple(p[:2]) for p in plot.get("corners") or []]
+    if not pts:
+        return []
     g = next((i for i, lv in enumerate(levels) if lv.get("kind") == "ground"),
              None)
     # the natural ground (0.0), or the ground floor when it sits lower
@@ -138,4 +155,4 @@ def build(doc, elevations_) -> list:
     z_bot = elevations_[low] - float(st.get("shoring_embed", 3.048))
     return [(k, L, fs, levels[low]["id"]) for k, L, fs in
             sides(pts, z_top, z_bot, st.get("shoring_type", "piles"),
-                  st.get("shoring_d", 0.6096))]
+                  st.get("shoring_d", 0.6096), along == "walls")]
