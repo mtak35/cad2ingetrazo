@@ -489,7 +489,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.14.2</span>")
+                   "3.14.3</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -927,6 +927,11 @@ class Panel(QWidget):
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
+        f.addRow(_btn("Find corner windows (this level)",
+                      self._corner_windows,
+                      "Glazing drawn outside the walls turning a corner "
+                      "(square or chamfered) made window walls — from this "
+                      "level's CAD plan; the rest of the level stays"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -1997,6 +2002,29 @@ class Panel(QWidget):
                 w.setChecked(on)
                 w.blockSignals(False)
         self._store_flag("cad_lines", on)
+
+    def _corner_windows(self):
+        lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        doc = self.doc()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            r = PJ.redetect_corner_windows(doc, [lid])
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._corner_windows")
+            self.flash(f"Not read — {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if lid not in r:
+            self.flash("This level has no CAD plan imported")
+            return
+        if not r[lid]:
+            self.flash("No corner window found on this level's plan")
+            return
+        self.commit(doc, f"{r[lid]} corner window leg(s) on «{lv['name']}»")
 
     def _update_levels(self):
         """Every level's storey height = the floor height typed (basements

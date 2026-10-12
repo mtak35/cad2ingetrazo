@@ -331,7 +331,8 @@ def _cut(arch, lid, corners) -> int:
         if any(Polygon(h).intersects(part) for h in holes):
             # an opening drawn there already (the CAD's stair hole):
             # widened to the whole well
-            merged = Polygon(part)
+            from shapely.ops import unary_union as _uu
+            merged = _uu([part])
             keep = []
             for h in holes:
                 if Polygon(h).intersects(merged):

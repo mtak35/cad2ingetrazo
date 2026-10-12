@@ -79,7 +79,7 @@ DEFAULTS = {
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
-    "stair_well": "railing",
+    "stair_well": "railing", "corner_windows": True,
     "level_groups": False, "shoring_on": "plot",          # each level one group in 3D
     "found_type": "isolated_strip", "raft_t": 0.6096, "raft_off": 0.6096,
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
@@ -289,6 +289,70 @@ def column_layers_for(pats, floor: int) -> list:
         r = floor_range(p)
         if r is None or r[0] <= floor <= r[1]:
             out.append(p)
+    return out
+
+
+def _corner_windows(doc, lid, pl, P, how, made) -> int:
+    """Corner windows of the placed plan ``pl`` on level ``lid`` (its walls
+    ``made``): window walls «Corner window n» added; the number."""
+    from shapely.geometry import Polygon as _PgW
+
+    from . import cornerwin as CW
+    arch = doc["arch"]
+    st = doc["settings"]
+    lay = pl["layers"]
+    wsegs = [s_ for s_ in pl["segs"] if _match(lay[s_[4]], P["windows"])]
+    wpl = W.plan([w for w in made if W.why_not(w) is None
+                  and not str(w.get("name", "")).startswith("Corner window")])
+    wpolys = [_PgW(pc["outer"]).buffer(0) for ps in wpl.values() for pc in ps]
+    legs = CW.find(wsegs, wpolys, wall_lines=[
+        (tuple(w["a"]), tuple(w["b"])) for w in made if "a" in w])
+    if not legs:
+        return 0
+    sill = float(st.get("sill", 0.9))
+    head = sill + float(st.get("win_h", 1.2))
+    storey = float(how.get("floor_h", st.get("floor_h", 3.048)))
+    up = max(storey - float(st.get("slab_t", 0.15)) - head, 0.1)
+    crecs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+              "b": [round(b[0], 4), round(b[1], 4)], "t": round(t, 3),
+              "align": "centre", "side": 1, "height": "level", "base": 0.0,
+              "level": lid, "type": "curtain", "cw_low": round(sill, 4),
+              "cw_up": round(up, 4), "cw_fill": "spandrel", "grid": 1.2,
+              "tgrid": 3.0}
+             for a, b, t in legs if math.dist(a, b) >= 0.25]
+    made_c = M.new_walls(arch["walls"], crecs)
+    for k_, w_ in enumerate(made_c, 1):
+        w_["name"] = f"Corner window {k_}"
+    arch["walls"] += made_c
+    return len(made_c)
+
+
+def redetect_corner_windows(doc, lids=None) -> dict:
+    """Corner windows of levels ``lids`` (all imported ones by default) read
+    again from their CAD plans — the rest of the level as it is (rooms,
+    edits kept). {level id: n}."""
+    arch = doc["arch"]
+    st = doc["settings"]
+    out = {}
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file") or \
+                lid not in {lv["id"] for lv in arch["levels"]}:
+            continue
+        raw = cadread.read(how["file"], how.get("unit"))
+        drawing = cadread.crop(raw, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base,
+                           (how.get("ix", 0.0), how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _found = layer_patterns(drawing, how, st)
+        arch["walls"] = [w for w in arch["walls"] if not (
+            w["level"] == lid and
+            str(w.get("name", "")).startswith("Corner window"))]
+        mine = [w for w in arch["walls"] if w["level"] == lid]
+        out[lid] = _corner_windows(doc, lid, pl, P, how, mine)
     return out
 
 
@@ -825,6 +889,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         opening_types(o, st)
     arch["openings"] += M.new_openings(arch["openings"], orecs)
 
+    # corner / bay windows: glazing drawn outside the walls, turning a
+    # corner — window walls (glass between an opaque sill and head panel)
+    if st.get("corner_windows", True):
+        try:
+            rep["corner_windows"] = _corner_windows(doc, lid, pl, P, how,
+                                                    made)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project corner windows")
+
     # columns: closed outlines, loose lines and circles on the column
     # layers — rectangles (long shear walls too), and L / T / C sections
     cols = columns_from(pl, column_layers_for(P["columns"],
@@ -1357,11 +1431,51 @@ def apply_man_shafts(doc) -> dict:
     from shapely.geometry import Polygon
     arch = doc["arch"]
     slabs = [s for s in arch["structure"] if s["type"] == "slab"]
-    for s in slabs:                         # the earlier hand cuts out
+    # the same shaft drawn twice: once
+    seen_, ms_ = set(), []
+    for m in doc.get("man_shafts") or []:
+        k_ = (m.get("level"), bool(m.get("through")),
+              tuple(sorted((round(p[0], 2), round(p[1], 2))
+                           for p in m["pts"])))
+        if k_ not in seen_:
+            seen_.add(k_)
+            ms_.append(m)
+    doc["man_shafts"] = ms_
+
+    def _key(h):
+        return tuple(sorted((round(p[0], 2), round(p[1], 2)) for p in h))
+    # the earlier hand cuts out — by the «man» list, and (the loader does
+    # not keep it) by their shapes: the holes cut by a hand-drawn shaft
+    cut_keys = set()
+    for m in ms_:
+        try:
+            hp = Polygon(m["pts"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        for s in slabs:
+            try:
+                g = hp.intersection(Polygon(s["corners"]).buffer(0)
+                                    .buffer(-0.01))
+            except Exception:  # noqa: BLE001
+                continue
+            for g_ in getattr(g, "geoms", [g]):
+                if g_.geom_type == "Polygon" and g_.area >= 0.04:
+                    cut_keys.add(_key([[x, y] for x, y in
+                                       list(g_.exterior.coords)[:-1]]))
+    for s in slabs:
         man = s.pop("man", None) or []
-        if man:
-            s["holes"] = [h for h in s.get("holes") or [] if h not in man]
-            s["shafts"] = [h for h in s.get("shafts") or [] if h not in man]
+        mk = {_key(h) for h in man} | cut_keys
+        if mk:
+            s["holes"] = [h for h in s.get("holes") or [] if _key(h) not in mk]
+            s["shafts"] = [h for h in s.get("shafts") or []
+                           if _key(h) not in mk]
+        # and any hole twice: once
+        u_, hs_ = set(), []
+        for h in s.get("holes") or []:
+            if _key(h) not in u_:
+                u_.add(_key(h))
+                hs_.append(h)
+        s["holes"] = hs_
     out = {}
     for m in doc.get("man_shafts") or []:
         hp = Polygon(m["pts"]).buffer(0)
@@ -1384,6 +1498,25 @@ def apply_man_shafts(doc) -> dict:
                 s.setdefault("man", []).append(h)
                 n += 1
         out[m["id"]] = n
+    # holes that overlap (a shaft drawn over a stair well, over another
+    # shaft) joined: a slab face never has two holes over each other
+    from shapely.ops import unary_union
+    for s in slabs:
+        hs = s.get("holes") or []
+        if len(hs) < 2:
+            continue
+        try:
+            ps = [Polygon(h).buffer(0) for h in hs if len(h) >= 3]
+            if not any(ps[i].intersects(ps[j]) for i in range(len(ps))
+                       for j in range(i + 1, len(ps))):
+                continue
+            u = unary_union(ps)
+            s["holes"] = [[[round(x, 4), round(y, 4)] for x, y in
+                           list(g.exterior.coords)[:-1]]
+                          for g in getattr(u, "geoms", [u])
+                          if g.geom_type == "Polygon" and g.area >= 0.04]
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 
@@ -4190,8 +4323,9 @@ def _ceiling_groups(doc):
     from core.mesh import Mesh
 
     from . import ceilings as CE
-    if not doc.get("ceilings"):
-        return []
+    if not doc.get("ceilings") and not any(
+            r.get("ceiling") in CE.BY for r in doc["arch"]["rooms"]):
+        return []                 # no level's ceiling, no room's own
     arch = doc["arch"]
     elev = elevations(arch)
     z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
