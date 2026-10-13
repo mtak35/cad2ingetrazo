@@ -293,6 +293,12 @@ def _walls(raw, level_ids: set) -> list[dict]:
                 rec["glass"] = w["glass"]
             if w.get("rcc"):                 # an RCC (retaining) wall
                 rec["rcc"] = True
+            if w.get("rail") and float(w.get("curb_h") or 0) > 0:
+                rec["curb_h"] = min(max(float(w["curb_h"]), 0.0), 1.0)
+                rec["curb_t"] = min(max(float(w.get("curb_t") or 0.0762),
+                                        0.03), 0.5)
+                rec["curb_d"] = min(max(float(w.get("curb_d") or 0.0),
+                                        0.0), 1.0)
             if w.get("cwin"):                # a leg of a corner window
                 rec["cwin"] = str(w["cwin"])[:40]
                 rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
@@ -548,6 +554,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
 
 
 _OP_LABEL = {"door": "Door", "window": "Window", "void": "Opening"}
+#: a door's ironmongery (Edit ▸ Door handle)
+HANDLE_KEYS = ("auto", "lever_rose", "lever_plate", "knob", "pull_bar",
+               "d_pull", "flush", "none")
 #: a wooden door leaf's face (Edit ▸ Door panel)
 PANEL_KEYS = ("auto", "flush", "panel2", "panel4", "panel6", "glazed_half",
               "glazed_full", "louvred", "ledged")
@@ -597,6 +606,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
                 rec[k_] = min(max(v_, lo_), hi_)
         if o.get("panel") in PANEL_KEYS and o.get("panel") != "auto":
             rec["panel"] = o["panel"]
+        if o.get("handle") in HANDLE_KEYS and o.get("handle") != "auto":
+            rec["handle"] = o["handle"]
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

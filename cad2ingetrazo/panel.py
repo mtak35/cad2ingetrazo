@@ -176,13 +176,15 @@ FIELDS = {
                 ("head", "Head", "choice", ("flat", "transom", "arch")),
                 ("frame", "Frame", "choice",
                  ("auto", "wood", "aluminium", "steel", "upvc")),
-                ("frame_w", "Frame width (face, 0 = the frame's)", "len",
-                 (0.0, 0.30)),
-                ("frame_d", "Frame thickness (depth, 0 = the frame's)",
-                 "len", (0.0, 0.50)),
+                ("frame_w", "Frame width (its face)", "len", (0.02, 0.30)),
+                ("frame_d", "Frame thickness (its depth)", "len",
+                 (0.03, 0.50)),
                 ("panel", "Door panel", "choice",
                  ("auto", "flush", "panel2", "panel4", "panel6",
                   "glazed_half", "glazed_full", "louvred", "ledged")),
+                ("handle", "Door handle", "choice",
+                 ("auto", "lever_rose", "lever_plate", "knob", "pull_bar",
+                  "d_pull", "flush", "none")),
                 ("glass", "Glass type", "choice",
                  ("clear", "double", "lowe", "grey", "bronze", "green",
                   "blue_ref", "silver_ref", "frosted"))],
@@ -278,6 +280,8 @@ def _choice_labels() -> dict:
 CHOICE_LABELS = _choice_labels()
 from .engine import structure as _S_PT  # noqa: E402
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
+                      if k != "auto"})
+CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
@@ -499,7 +503,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.15.1</span>")
+                   "3.15.2</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -2150,6 +2154,29 @@ class Panel(QWidget):
         self._sb_dlg = dlg
         dlg.show()
 
+    def _terrace_rails(self):
+        lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        doc = self.doc()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            r = PJ.terrace_railings(doc, lid)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._terrace_rails")
+            self.flash(f"Not made — {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        n = r["lines"] + r["edges"]
+        if not n:
+            self.flash("No terrace on this level (no slab under it out past "
+                       "its walls)")
+            return
+        self.commit(doc, f"{n} terrace railing(s) on «{lv['name']}», "
+                         f"each on a 3\" upstand")
+
     def _empty_openings(self):
         lid, lv = self.level()
         if not lid:
@@ -2739,6 +2766,12 @@ class Panel(QWidget):
         f.addRow(_btn("Apply to every parapet and balcony", self._parapet_rail,
                       "Terrace and roof parapets, balcony railings — on all "
                       "levels"))
+        f.addRow(_btn("Terrace railings from the CAD (this level)",
+                      self._terrace_rails,
+                      "Railings all round this level's terraces: along the "
+                      "railing lines its CAD plan draws there (the terrace "
+                      "slab stops at them — nothing beyond the railing) and "
+                      "on every other open edge, each on a 3\" upstand"))
         f.addRow(_btn("Terraces over the floors below", self._terrace,
                       "The part of the floor below's roof this floor leaves "
                       "open: a parapet on its open edges, joined clean at "
@@ -3218,6 +3251,17 @@ class Panel(QWidget):
                            "Curtains on / off, colour and length — every "
                            "level"))
         v.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Wall plaster (each face)"))
+        self.r_plaster = _spin(0.0, 0.05, 0.0127, 0.0016, 4)
+        self.r_plaster.setToolTip("The plaster coat on both faces of every "
+                                  "wall, carried up over the slab's edge — "
+                                  "no slab line on the elevations (0 = "
+                                  "none)")
+        row.addWidget(self.r_plaster)
+        row.addWidget(_btn("Apply", self._plaster,
+                           "Every wall plastered this thick, each face"))
+        v.addLayout(row)
         self.rooms = QTableWidget(0, 4)
         self.rooms.setHorizontalHeaderLabels(["Name", "Area", "Finish",
                                               "Floor ±"])
@@ -3378,6 +3422,7 @@ class Panel(QWidget):
         self.r_fin_on.blockSignals(False)
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
         self.r_curt.setChecked(bool(st.get("curtains")))
+        self.r_plaster.setValue(float(st.get("plaster_t", 0.0127) or 0.0))
         k_ = self.r_curt_col.findData(st.get("curtain_color", "cream"))
         self.r_curt_col.setCurrentIndex(max(k_, 0))
         k_ = self.r_curt_len.findData(st.get("curtain_len", "floor"))
@@ -3403,6 +3448,13 @@ class Panel(QWidget):
         self.rooms_total.setText(
             f"Net {area_txt(net)}  ·  gross {area_txt(spaces.gross(walls))}"
             if rooms else "No rooms — walls enclose them")
+
+    def _plaster(self):
+        doc = self.doc()
+        doc["settings"]["plaster_t"] = round(self.r_plaster.value(), 4)
+        self.commit(doc, "Wall plaster " + (len_txt(
+            doc["settings"]["plaster_t"]) if doc["settings"]["plaster_t"]
+            else "off"))
 
     def _curtains(self):
         doc = self.doc()
@@ -3540,7 +3592,9 @@ class Panel(QWidget):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
                 if tag and tag["type"] != "symbols":
+                    self._sel_seg = tag.get("seg")
                     return tag["type"], tag["id"]
+        self._sel_seg = None
         return None
 
     def _watch_selection(self):
@@ -3573,6 +3627,12 @@ class Panel(QWidget):
             return
         kind = sel[0] if sel[0] != "opening" else rec["kind"]
         self.sel_title.setText(f"<b>{rec.get('name', kind)}</b>")
+        if sel[0] == "opening" and rec.get("kind") in ("door", "window"):
+            from .engine import structure as S_
+            rec = dict(rec)                  # the frame's own size shown
+            _l, _c, fw_, fd_ = S_.frame_size(rec)
+            rec.setdefault("frame_w", round(fw_, 4))
+            rec.setdefault("frame_d", round(fd_, 4))
         self._sel_widgets = self._build_fields(self.sel_form, sel[0], rec)
 
     def _build_fields(self, form, kind, rec) -> dict:
@@ -3677,6 +3737,15 @@ class Panel(QWidget):
                 new["_pct_changed_" + key] = abs(w.value() - w._start) > 0.05
             else:
                 new[key] = round(w.value(), 4)
+        if sel[0] == "opening":          # the frame's size left at its
+            from .engine import structure as S_     # material's: not set
+            base_ = {k_: v_ for k_, v_ in new.items()
+                     if k_ not in ("frame_w", "frame_d")}
+            _l, _c, fw_, fd_ = S_.frame_size(base_)
+            for k_, dv_ in (("frame_w", fw_), ("frame_d", fd_)):
+                if k_ in new and k_ not in rec and \
+                        abs(float(new[k_]) - dv_) < 5e-4:
+                    new.pop(k_)
         # a ramp's slope typed: its climb from its length (the way it
         # goes kept) — unless the climb itself was typed
         if sel[0] == "ramp" and new.pop("_pct_changed_slope", False) and \
@@ -4011,9 +4080,14 @@ class Panel(QWidget):
         if sel[0] == "room":
             sub.addAction("Add furniture from the library…",
                           lambda: self.add_furniture_dialog(sel[1]))
+        if sel[0] == "stairrail":
+            sub.addAction("Put back the railing's deleted pieces",
+                          lambda: self._rail_restore(sel[1]))
         sub.addSeparator()
         sub.addAction("Show in the panel", self._fill_selected)
-        sub.addAction("Delete", self._delete_selected)
+        sub.addAction("Delete this railing piece" if sel[0] == "stairrail"
+                      and getattr(self, "_sel_seg", None) is not None
+                      else "Delete", self._delete_selected)
 
     def close_openings(self, ids):
         """Windows (or openings) taken out: the wall runs through solid."""
@@ -4080,6 +4154,12 @@ class Panel(QWidget):
         rec = PJ.find_record(self.doc(), *sel)
         if rec is None:
             return
+        if sel[0] == "opening" and rec.get("kind") in ("door", "window"):
+            from .engine import structure as S_
+            rec = dict(rec)                  # the frame's own size shown
+            _l, _c, fw_, fd_ = S_.frame_size(rec)
+            rec.setdefault("frame_w", round(fw_, 4))
+            rec.setdefault("frame_d", round(fd_, 4))
         dlg = QDialog(self)
         dlg.setWindowTitle(f"{rec.get('name', sel[0])} — CAD2IngeTrazo")
         lay = QVBoxLayout(dlg)
@@ -4713,14 +4793,27 @@ class Panel(QWidget):
                     out.append(vs)
         return out
 
+    def _rail_restore(self, sid):
+        doc = self.doc()
+        s_ = PJ.find_record(doc, "stair", sid)
+        if s_ is None:
+            return
+        s_.pop("rail_skip", None)
+        if s_.get("rail") == "none":
+            s_.pop("rail", None)
+        self.commit(doc, "Stair railing: every piece back")
+
     def _delete_selected(self):
         sel = self._sel_key
         if not sel:
             return
         doc = self.doc()
-        PJ.delete_record(doc, *sel)
+        seg = getattr(self, "_sel_seg", None) if sel[0] == "stairrail" \
+            else None
+        PJ.delete_record(doc, *sel, seg=seg)
         self._sel_key = None
-        self.commit(doc, "Deleted")
+        self.commit(doc, "Railing piece deleted" if seg is not None
+                    else "Deleted")
         self._fill_selected()
 
     def _reselect(self, sel):
@@ -5517,6 +5610,8 @@ class Panel(QWidget):
     def make_sheets(self):
         from . import sheets
         doc = self.doc()
+        doc["arch"]["_plaster"] = float(doc["settings"].get("plaster_t",
+                                                            0.0127) or 0.0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             planes, views, sh = sheets.make(doc["arch"], M.elevations,

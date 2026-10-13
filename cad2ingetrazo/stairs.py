@@ -475,8 +475,84 @@ def groups(doc, z_of, layer_of):
         rails = build_rail(st, z0, e["rail"], e["rail_h"], e["rail_sides"],
                            e["rail_off"], e["rail_gap"], e["rail_ext"],
                            _floor_of(parts), _walls_of(doc, st["level"]))
+        if e["rail"] and e["rail"] != "none" and e["rail_sides"] != "none":
+            try:                         # round the opening, upstairs
+                guard = _well_guard(doc, st, z0, e["rail"], e["rail_h"],
+                                    e["rail_gap"])
+            except Exception:  # noqa: BLE001
+                guard = []
+            skip = {int(k) for k in st.get("rail_skip") or []
+                    if str(k).lstrip("-").isdigit()}
+            n0 = len(rails)
+            rails = rails + [(fs, c) if (n0 + k) not in skip else ([], c)
+                             for k, (fs, c) in enumerate(guard)]
         out.append((f"Stair {len(out) + 1}", st["id"], st["level"], parts,
                     layer_of(st["level"]), rails))
+    return out
+
+
+def _well_guard(doc, st, z0, kind, h, gap) -> list:
+    """[(faces, None)] — a railing round the stair's opening in the floor
+    above: along each edge of the slab's hole over the stair, on the slab
+    beside it, but where a wall stands and where the stair arrives (its
+    last nosing) — each straight edge one piece."""
+    from shapely.geometry import LineString, Polygon
+
+    from .engine import railings as RL
+    if not st.get("to"):
+        return []
+    arch = doc["arch"]
+    ztop = z0 + int(st["risers"]) * float(st["rise"])
+    foot = Polygon([tuple(p[:2]) for p in st["corners"]])
+    holes = []
+    for e in arch["structure"]:
+        if e["type"] != "slab":
+            continue
+        from . import slabedges as SE
+        if SE.floor_level_of({"arch": arch, "settings": doc["settings"]},
+                             e) != st["to"]:
+            continue
+        for hl in e.get("holes") or []:
+            try:
+                hp = Polygon([tuple(p[:2]) for p in hl])
+            except Exception:  # noqa: BLE001
+                continue
+            if hp.is_valid and hp.intersection(foot).area > 0.3 * min(
+                    hp.area, foot.area):
+                holes.append(hp)
+    if not holes:
+        return []
+    walls = _walls_of(doc, st["to"])
+    flights, _l = as_flights(st)
+    arr = None
+    if flights and flights[-1]["lines"]:
+        ln = flights[-1]["lines"][-1]
+        arr = LineString([tuple(ln[0][:2]), tuple(ln[1][:2])])
+    out = []
+    for hp in holes:
+        pts = list(hp.exterior.coords)[:-1]
+        ccw = hp.exterior.is_ccw
+        for a, b in zip(pts, pts[1:] + pts[:1]):
+            L = math.dist(a, b)
+            if L < 0.3:
+                continue
+            u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            out_n = (u[1], -u[0]) if ccw else (-u[1], u[0])  # onto the slab
+            o_ = 0.04
+            pa = (a[0] + out_n[0] * o_, a[1] + out_n[1] * o_)
+            pb = (b[0] + out_n[0] * o_, b[1] + out_n[1] * o_)
+            seg = LineString([pa, pb])
+            if walls is not None:
+                seg = seg.difference(walls.buffer(0.12))
+            if arr is not None:
+                seg = seg.difference(arr.buffer(0.35))
+            for g in getattr(seg, "geoms", [seg]):
+                if g.geom_type != "LineString" or g.length < 0.3:
+                    continue
+                c = list(g.coords)
+                out.append((RL.faces([(c[0][0], c[0][1], ztop),
+                                      (c[-1][0], c[-1][1], ztop)], h, kind,
+                                     gap=gap), None))
     return out
 
 
@@ -565,8 +641,13 @@ def build_rail(st, z0, rail, h=0.9, sides="inner", off=0.05, gap=0.0,
     if not rail or rail == "none" or sides == "none":
         return []
     runs = _runs(st, z0, off)
-    return railing(st, runs, rail, h, sides, gap, ext, off, floor, walls) \
+    out = railing(st, runs, rail, h, sides, gap, ext, off, floor, walls) \
         if runs else []
+    # the pieces deleted by hand (right-click ▸ Delete on one): not made
+    skip = {int(k) for k in st.get("rail_skip") or []
+            if str(k).lstrip("-").isdigit()}
+    return [(fs, c) if k not in skip else ([], c)
+            for k, (fs, c) in enumerate(out)]
 
 def _ccw(loop):
     a = 0.5 * sum(p[0] * q[1] - q[0] * p[1]
@@ -1314,8 +1395,7 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
                     path = _ext(path, ext, False)
                 if i == nfl - 1:
                     path = _ext(path, ext, True)
-                out.append((RL.faces(path, h, kind, gap=gap, floor=floor),
-                            None))
+                out += _pieces(path, h, kind, gap, floor)
         return out
     picked = []
     for i in range(nfl):
@@ -1385,8 +1465,40 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
         paths[0] = _ext(paths[0], ext, False)
         paths[-1] = _ext(paths[-1], ext, True)
     paths = [_smooth(pth) for pth in paths]
-    return [(RL.faces(pth, h, kind, gap=gap, floor=floor), None)
-            for pth in paths if len(pth) >= 2]
+    out = []
+    for pth in paths:
+        if len(pth) >= 2:
+            out += _pieces(pth, h, kind, gap, floor)
+    return out
+
+
+def _pieces(path, h, kind, gap, floor) -> list:
+    """[(faces, None)] — the railing along ``path`` in straight pieces
+    (each run between two turns, level or sloping, its own piece: one
+    component in the model to edit or delete)."""
+    from .engine import railings as RL
+    pts = [tuple(p) for p in path]
+    runs, cur = [], [pts[0]]
+    for q in pts[1:]:
+        if len(cur) >= 2:
+            a, b = cur[-2], cur[-1]
+            u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+            v = (q[0] - b[0], q[1] - b[1], q[2] - b[2])
+            Lu = math.sqrt(sum(c * c for c in u)) or 1.0
+            Lv = math.sqrt(sum(c * c for c in v)) or 1.0
+            cos = sum(x * y for x, y in zip(u, v)) / (Lu * Lv)
+            if cos < 0.999:                      # a turn: a new piece
+                runs.append(cur)
+                cur = [b]
+        cur.append(q)
+    runs.append(cur)
+    out = []
+    for r in runs:
+        if len(r) >= 2 and math.hypot(r[-1][0] - r[0][0],
+                                      r[-1][1] - r[0][1]) > 0.05:
+            out.append((RL.faces([r[0], r[-1]], h, kind, gap=gap,
+                                 floor=floor), None))
+    return out
 
 
 def _fmid(runs, i):

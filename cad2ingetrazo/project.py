@@ -88,7 +88,8 @@ DEFAULTS = {
     "bike_model": "lib", "bike_lib": None,              # motorbikes: library
     "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
     "thresholds": True, "finish_to_edge": True,
-    "curtains": False, "curtain_color": "cream", "curtain_len": "floor",
+    "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
+    "terrace_rails": True, "plaster_t": 0.0127,
     "section_box": None,
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
     "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
@@ -365,23 +366,8 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
                    for q_ in legs[j_][:2]) < 0.02:
                 grp[_root(j_)] = _root(i_)
     # glazing round a terrace (two lines only, thinner than the walls it
-    # joins: the railing's outline) is the terrace's railing, not a window
-    if rails_:
-        rk = st.get("parapet_rail", "ss_bars")
-        rk = rk if rk and rk != "solid" else "ss_bars"
-        rrecs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
-                  "b": [round(b[0], 4), round(b[1], 4)], "t": 0.05,
-                  "align": "centre", "side": 1,
-                  "height": round(float(st.get("rail_h", 1.0668)), 4),
-                  "base": 0.0, "level": lid, "rail": rk}
-                 for a, b, _t in rails_ if math.dist(a, b) >= 0.25]
-        made_r = M.new_walls(arch["walls"], rrecs)
-        n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
-                 .startswith("Terrace railing"))
-        for k_, w_ in enumerate(made_r, 1):
-            w_["name"] = f"Terrace railing {n0 + k_}"
-            w_["rail"] = rk
-        arch["walls"] += made_r
+    # joins: the railing's outline) is the terrace's railing, not a window —
+    # made by terrace_railings (with every other railing round the terrace)
     if not legs:
         return 0
     have = {str(w.get("name", "")).split(" ·")[0] for w in arch["walls"]
@@ -522,8 +508,7 @@ def redetect_corner_windows(doc, lids=None) -> dict:
                            how.get("rot", 0.0))
         P, _found = layer_patterns(drawing, how, st)
         gone = {w["id"] for w in arch["walls"] if w["level"] == lid and
-                (str(w.get("name", "")).startswith("Corner window") or
-                 str(w.get("name", "")).startswith("Terrace railing"))}
+                str(w.get("name", "")).startswith("Corner window")}
         arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
         arch["openings"] = [o for o in arch["openings"]
                             if o["wall"] not in gone]
@@ -535,6 +520,208 @@ def redetect_corner_windows(doc, lids=None) -> dict:
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project cover_corner_windows")
+    return out
+
+
+def _placed_plan(doc, lid):
+    """(placed plan, layer patterns) of level ``lid``'s CAD import, or
+    (None, None)."""
+    how = (doc.get("imports") or {}).get(lid)
+    if not isinstance(how, dict) or not how.get("file"):
+        return None, None
+    raw = cadread.read(how["file"], how.get("unit"))
+    drawing = cadread.crop(raw, how.get("region"))
+    base = cadread.base_point(drawing, how.get("base", "origin"),
+                              (how.get("bx", 0.0), how.get("by", 0.0)))
+    pl = cadread.place(drawing, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
+                       how.get("rot", 0.0))
+    P, _f = layer_patterns(drawing, how, doc["settings"])
+    return pl, P
+
+
+CURB_H, CURB_T = 0.1524, 0.0762          # the terrace railing's upstand
+
+
+def terrace_railings(doc, lid, pl=None, P=None) -> dict:
+    """The railings round level ``lid``'s terraces (the slab under it out
+    past its walls): along the railing lines the CAD plan draws there
+    (window / rail layers) — the terrace slab cut back to them, nothing
+    beyond the railing — and along every other free edge of the terrace;
+    each on a 3" × 6" upstand. The old «Terrace railing n» go first.
+    {"lines", "edges", "trimmed"}."""
+    import math as _m
+
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    from . import cornerwin as CW
+    from . import slabedges as SE
+    arch = doc["arch"]
+    st = doc["settings"]
+    out = {"lines": 0, "edges": 0, "trimmed": 0}
+    arch["walls"] = [w for w in arch["walls"] if not (
+        w["level"] == lid and
+        str(w.get("name", "")).startswith("Terrace railing"))]
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and W.why_not(w) is None]
+    wps = SE.wall_polys(walls)
+    if not wps:
+        return out
+    u_ = unary_union(wps).buffer(1.0, join_style=2).buffer(-1.0,
+                                                           join_style=2)
+    foot = unary_union([Polygon(g.exterior) for g in getattr(u_, "geoms", [u_])
+                        if g.geom_type == "Polygon"])
+    slabs = [e for e in arch["structure"] if e["type"] == "slab"
+             and not e.get("zone") and e.get("corners")
+             and SE.floor_level_of(doc, e) == lid and
+             (e["level"] != lid or not e.get("top"))]
+    terr = []
+    for e in slabs:
+        sp = SE._poly(e["corners"])
+        if sp.is_empty or sp.distance(foot) > 0.5:
+            continue                     # a separate roof (a guard room)
+        if sp.difference(foot.buffer(0.05)).area < 1.0:
+            continue                     # nothing out past the walls
+        terr.append(e)
+    if not terr:
+        return out
+    rk = st.get("parapet_rail", "ss_bars")
+    rk = rk if rk and rk != "solid" else "ss_bars"
+    rh = float(st.get("rail_h", 1.0668))
+    # the railing lines the plan draws round the terraces
+    lines = []
+    if pl is None and lid in (doc.get("imports") or {}):
+        try:
+            pl, P = _placed_plan(doc, lid)
+        except Exception:  # noqa: BLE001
+            pl = None
+    if pl is not None and P is not None:
+        lay = pl["layers"]
+        zone = unary_union([SE._poly(e["corners"]) for e in terr]).buffer(0.4)
+        near_walls = foot.buffer(0.3)
+        segs = []
+        for s_ in pl["segs"]:
+            if not (_match(lay[s_[4]], P["windows"]) or
+                    _match(lay[s_[4]], P.get("rails") or [])):
+                continue
+            L = LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+            if L.length < 0.5:
+                continue
+            ang = _m.degrees(_m.atan2(s_[3] - s_[1], s_[2] - s_[0])) % 90.0
+            if min(ang, 90.0 - ang) > 4.0:
+                continue
+            m_ = L.interpolate(0.5, normalized=True)
+            if near_walls.contains(m_) or not zone.contains(m_):
+                continue
+            segs.append(s_)
+        for a, b, spread, _n in CW._clusters(segs, gap=0.3):
+            if _m.dist(a, b) >= 0.8:
+                lines.append((a, b))
+    # the terrace cut back to its railing lines (nothing beyond them)
+    for a, b in lines:
+        L = _m.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        nrm = (-u[1], u[0])
+        # which side is «beyond» the railing: the side with less terrace
+        # slab out there; alike, the side farther from the building
+        allsl = unary_union([SE._poly(e["corners"]) for e in terr])
+
+        def strip(sg, w_=1.5):
+            return Polygon([a, b, (b[0] + nrm[0] * sg * w_,
+                                   b[1] + nrm[1] * sg * w_),
+                            (a[0] + nrm[0] * sg * w_,
+                             a[1] + nrm[1] * sg * w_)])
+        area_p = allsl.intersection(strip(1)).difference(foot).area
+        area_m = allsl.intersection(strip(-1)).difference(foot).area
+        if min(area_p, area_m) < 0.6 * max(area_p, area_m):
+            if area_m < area_p:
+                nrm = (-nrm[0], -nrm[1])
+        else:
+            dp = foot.distance(strip(1, 3.0))
+            dm = foot.distance(strip(-1, 3.0))
+            if abs(dp - dm) < 0.3:
+                continue                     # no telling: leave the slab
+            if dm > dp:
+                nrm = (-nrm[0], -nrm[1])
+        o_ = CURB_T / 2
+        R = 3.5                              # an overhang, not a terrace
+        cut = Polygon([(a[0] + nrm[0] * o_ - u[0] * 0.02,
+                        a[1] + nrm[1] * o_ - u[1] * 0.02),
+                       (b[0] + nrm[0] * o_ + u[0] * 0.02,
+                        b[1] + nrm[1] * o_ + u[1] * 0.02),
+                       (b[0] + nrm[0] * R + u[0] * 0.02,
+                        b[1] + nrm[1] * R + u[1] * 0.02),
+                       (a[0] + nrm[0] * R - u[0] * 0.02,
+                        a[1] + nrm[1] * R - u[1] * 0.02)]).difference(foot)
+        for e in terr:
+            sp = SE._poly(e["corners"])
+            if not sp.intersects(cut) or sp.intersection(cut).area < 0.05:
+                continue
+            rest = sp.difference(cut)
+            rest = rest.buffer(-0.3, join_style=2).buffer(0.3, join_style=2)\
+                .union(sp.difference(cut).intersection(foot.buffer(0.3)))
+            rest = SE._largest(rest, sp.representative_point())
+            if rest is not None and rest.area > 1.0:
+                e["corners"] = [[round(x, 4), round(y, 4)]
+                                for x, y in SE._ring_pts(rest)]
+                out["trimmed"] += 1
+    # a railing line left off the terrace (a second outline beyond the
+    # one the slab now stops at): none
+    left = unary_union([SE._poly(e["corners"]) for e in terr])
+    keep_ = []
+    edge_ = unary_union([g.exterior for g in getattr(left, "geoms", [left])
+                         if g.geom_type == "Polygon"]).buffer(0.15)
+    for a, b in lines:                   # each along the terrace's edge
+        g_ = LineString([a, b]).intersection(left.buffer(0.12,
+                                                         join_style=2))
+        g_ = g_.intersection(edge_)
+        parts_ = [q for q in getattr(g_, "geoms", [g_])
+                  if q.geom_type == "LineString" and q.length >= 0.5]
+        for q in parts_:
+            c_ = list(q.coords)
+            keep_.append((tuple(c_[0]), tuple(c_[-1])))
+    lines = keep_
+    recs = []
+    for a, b in lines:
+        recs.append({"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+                     "b": [round(b[0], 4), round(b[1], 4)], "t": 0.05,
+                     "align": "centre", "side": 1, "height": round(rh, 4),
+                     "base": 0.0, "level": lid, "rail": rk,
+                     "curb_h": CURB_H, "curb_t": CURB_T,
+                     "curb_d": round(max(float(e_.get("t", 0.15))
+                                         for e_ in terr), 4)})
+    out["lines"] = len(recs)
+    made = M.new_walls(arch["walls"], recs)
+    arch["walls"] += made
+    # every other free edge of the terraces: railed too
+    for e in terr:
+        for a, b in SE.free_edges(doc, e):
+            L = _m.dist(a, b)
+            if L < 0.3:
+                continue
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            nx, ny = -uy, ux                     # into the slab
+            mid = Point((a[0] + b[0]) / 2 + nx * 0.2,
+                        (a[1] + b[1]) / 2 + ny * 0.2)
+            if foot.contains(mid):
+                continue                         # inside the building
+            o_ = CURB_T / 2
+            rec = {"kind": "line",
+                   "a": [round(a[0] + nx * o_, 4), round(a[1] + ny * o_, 4)],
+                   "b": [round(b[0] + nx * o_, 4), round(b[1] + ny * o_, 4)],
+                   "t": 0.05, "align": "centre", "side": 1,
+                   "height": round(rh, 4), "base": 0.0, "level": lid,
+                   "rail": rk, "curb_h": CURB_H, "curb_t": CURB_T,
+                   "curb_d": round(float(e.get("t", 0.15)), 4)}
+            m2 = M.new_walls(arch["walls"], [rec])
+            arch["walls"] += m2
+            made += m2
+            out["edges"] += 1
+    n0 = 0
+    for w_ in made:
+        n0 += 1
+        w_["name"] = f"Terrace railing {n0}"
+        w_["rail"] = rk
     return out
 
 
@@ -1463,6 +1650,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.slab_zones")
+    if st.get("terrace_rails", True):    # railings round its terraces
+        try:
+            rep["terrace_railings"] = terrace_railings(doc, lid, pl, P)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.terrace_railings")
     return rep
 
 
@@ -2775,7 +2968,7 @@ def find_record(doc, kind, rid):
     return next((r for r in pool if r["id"] == rid), None)
 
 
-def delete_record(doc, kind, rid) -> None:
+def delete_record(doc, kind, rid, seg=None) -> None:
     arch = doc["arch"]
     if kind == "wall":
         arch["walls"] = [w for w in arch["walls"] if w["id"] != rid]
@@ -2793,7 +2986,12 @@ def delete_record(doc, kind, rid) -> None:
     elif kind == "stairrail":      # the stair stays, without its railing
         s = find_record(doc, "stair", rid)
         if s is not None:
-            s["rail"] = "none"
+            if seg is not None:    # one straight piece of it only
+                sk = set(int(k) for k in s.get("rail_skip") or [])
+                sk.add(int(seg))
+                s["rail_skip"] = sorted(sk)
+            else:
+                s["rail"] = "none"
     elif kind == "room":           # its own finish / level go: defaults
         arch["rooms"] = [r for r in arch["rooms"] if r["id"] != rid]
     elif kind == "ramp":
@@ -3312,7 +3510,10 @@ def _stair_groups(doc):
     for name, sid, lid, parts, layer, rails in ST.groups(
             doc, z_of, lambda lid: level_layer(names[lid])):
         z = z_of[lid]
-        for kind, ps in (("stair", parts), ("stairrail", rails)):
+        items = [("stair", parts, None)] + \
+            [("stairrail", [r_], k_) for k_, r_ in enumerate(rails or [])
+             if r_[0]]
+        for kind, ps, seg in items:
             if not ps:
                 continue
             faces = []
@@ -3337,9 +3538,9 @@ def _stair_groups(doc):
                 pass
             key = (kind, CP.shape_key(lf))
             count[key] = count.get(key, 0) + 1
-            prep.append((kind, name, sid, lid, layer, z, lf, key))
+            prep.append((kind, name, sid, lid, layer, z, lf, key, seg))
     protos, out = {}, []
-    for kind, name, sid, lid, layer, z, lf, key in prep:
+    for kind, name, sid, lid, layer, z, lf, key, seg in prep:
         if key not in protos:
             mesh = Mesh()
             for lp, hs, col in lf:
@@ -3379,7 +3580,10 @@ def _stair_groups(doc):
         g.ifc = {"class": "IfcStair" if kind == "stair" else "IfcRailing",
                  "name": nm}
         g.ext = {KEY: {"type": kind, "id": sid, "level": lid,
+                       **({"seg": seg} if seg is not None else {}),
                        **({"ctype": tk[1], "mark": t["mark"]} if t else {})}}
+        if seg is not None:
+            g.name = f"{nm} · piece {seg + 1} · {names[lid]}"
         out.append(g)
     return out
 
@@ -5089,6 +5293,7 @@ def commit(viewport, doc, opts=None) -> None:
     opts = opts or {}
     arch = doc["arch"]
     arch["levels"] = M.fix_levels(arch["levels"])
+    arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     apply_ground_ffl(doc)
     apply_slab_pos(doc)
     try:
@@ -5176,7 +5381,9 @@ def commit(viewport, doc, opts=None) -> None:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.group_by_level")
+    arch.pop("_plaster", None)
     data = copy.deepcopy(doc)
+    arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     want = [level_layer(lv["name"]) for lv in arch["levels"]] + \
         [ann_layer(lv["name"]) for lv in arch["levels"]] + \
         [text_layer(lv["name"]) for lv in arch["levels"]] + \

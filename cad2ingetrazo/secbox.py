@@ -179,6 +179,15 @@ def cut(groups, box) -> list:
             g.xform = None
             continue
         mesh = Mesh()
+        try:                             # the cut faces: solid, in colour
+            caps = cap_faces(fs, box, _main_color(g, fs))
+        except Exception:  # noqa: BLE001
+            caps = []
+        for lp, hs3, col in caps:
+            face = mesh.add_face([QVector3D(*q) for q in lp],
+                                 [[QVector3D(*q) for q in h] for h in hs3])
+            if face is not None:
+                face.attrs["color"] = tuple(col[:3])
         for lp, hs, at in fs:
             for L2, H2 in clip_face(lp, hs, box):
                 if len(L2) < 3:
@@ -195,6 +204,98 @@ def cut(groups, box) -> list:
         except Exception:  # noqa: BLE001
             pass
     return groups
+
+
+def _main_color(g, fs):
+    """The colour the cut shows: the group's commonest face colour (its
+    material), a shade darker — a cut reads as cut."""
+    from collections import Counter
+    cs = Counter(tuple(round(v, 3) for v in at["color"][:3])
+                 for _lp, _h, at in fs if at.get("color"))
+    if cs:
+        c = cs.most_common(1)[0][0]
+    else:
+        c = tuple((getattr(g, "material", None) or {}).get(
+            "color", (0.8, 0.8, 0.8)))[:3]
+    return tuple(max(0.0, v * 0.82) for v in c)
+
+
+def _plane_hits(lp, k, val):
+    """The points where the loop's edges cross the plane coord k = val."""
+    pts = []
+    n = len(lp)
+    for i in range(n):
+        a, b = lp[i], lp[(i + 1) % n]
+        da, db = a[k] - val, b[k] - val
+        if (da < 0 <= db) or (db < 0 <= da):
+            t = da / (da - db)
+            pts.append(tuple(a[j] + (b[j] - a[j]) * t for j in range(3)))
+    return pts
+
+
+def cap_faces(fs, box, col):
+    """[(loop, holes, colour)] — the solid's sections on the box's faces it
+    crosses, filled (inside the box face only)."""
+    from shapely.geometry import LineString, Polygon, box as sbox
+    from shapely.ops import polygonize, unary_union
+    out = []
+    for k in range(3):
+        o1, o2 = [j for j in range(3) if j != k]
+        for sd in (0, 1):
+            val = box[k + 3 * sd]
+            segs = []
+            for lp, hs, _at in fs:
+                n_ = _newell(lp)
+                if n_ is None or abs(n_[k]) > 0.999:
+                    continue                     # lying in the plane
+                hits = []
+                for loop in [lp] + list(hs or []):
+                    hits += _plane_hits(loop, k, val)
+                if len(hits) < 2:
+                    continue
+                # along the cut line in the face: pair them in order
+                d = [0.0, 0.0, 0.0]
+                d[o1], d[o2] = -n_[o2], n_[o1]
+                hits.sort(key=lambda q: q[o1] * d[o1] + q[o2] * d[o2])
+                for i in range(0, len(hits) - 1, 2):
+                    a, b = hits[i], hits[i + 1]
+                    if abs(a[o1] - b[o1]) + abs(a[o2] - b[o2]) > 1e-6:
+                        segs.append(LineString([(a[o1], a[o2]),
+                                                (b[o1], b[o2])]))
+            if len(segs) < 3:
+                continue
+            polys = list(polygonize(unary_union(segs)))
+            if not polys:
+                continue
+            rect = sbox(box[o1], box[o2], box[o1 + 3], box[o2 + 3])
+            shells = [Polygon(p.exterior) for p in polys]
+            for i, p in enumerate(polys):
+                rp = p.representative_point()
+                depth = sum(1 for j, q in enumerate(shells)
+                            if j != i and q.area > p.area and q.contains(rp))
+                if depth % 2:
+                    continue                     # a hole in the section
+                c = p.intersection(rect)
+                for g in getattr(c, "geoms", [c]):
+                    if g.geom_type != "Polygon" or g.area < 1e-6:
+                        continue
+                    ring = list(g.exterior.coords)[:-1]
+
+                    def P3(q, _k=k, _v=val, _a=o1, _b=o2):
+                        r = [0.0, 0.0, 0.0]
+                        r[_k], r[_a], r[_b] = _v, q[0], q[1]
+                        return tuple(r)
+                    lp3 = [P3(q) for q in ring]
+                    # facing out of the box through this face
+                    nn = _newell(lp3)
+                    want = 1.0 if sd else -1.0
+                    hs3 = [[P3(q) for q in list(r.coords)[:-1]]
+                           for r in g.interiors]
+                    if nn is not None and nn[k] * want < 0:
+                        lp3 = lp3[::-1]
+                        hs3 = [h[::-1] for h in hs3]
+                    out.append((lp3, hs3, col))
+    return out
 
 
 def model_bounds(groups):

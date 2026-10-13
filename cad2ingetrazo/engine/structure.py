@@ -47,6 +47,33 @@ LABEL = {"column": "Column", "beam": "Beam", "slab": "Slab",
 
 
 # ---- levels ------------------------------------------------------------------------
+def PLASTER(doc) -> float:
+    """The plaster on each face of the walls (m), 0 = none."""
+    try:                        # ½" both faces unless set (0 = none)
+        return max(float(doc.get("_plaster", 0.0127) or 0.0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _plastered(w, p):
+    """The wall as built with its plaster: a coat ``p`` thick on both
+    faces (its centre line kept) and, standing up to the slab over it, on
+    up to the slab's top — the slab's edge in the plaster, as built (no
+    slab line on the elevations)."""
+    if p <= 0 or w.get("rail") or w.get("type") == "curtain":
+        return w
+    out = dict(w, t=float(w["t"]) + 2 * p, _pl=True)
+    if w.get("kind", "line") == "line" and w.get("align", "centre") != \
+            "centre":
+        c = W.centre(w)
+        out.update(a=[c.p0[0], c.p0[1]], b=[c.p1[0], c.p1[1]],
+                   align="centre")
+    elif w.get("kind", "line") != "line" and w.get("align", "centre") != \
+            "centre":
+        out = dict(w, _pl=True)          # an off-centre arc: as drawn
+    return out
+
+
 def levels_info(doc: dict, elevations) -> dict:
     """Per level id: z0 (floor), height, the slab thickness ON it, and
     ``under`` = where things of this level stop (the next level's slab
@@ -1013,33 +1040,83 @@ def _opening_parts_head(o: dict, seg, z0: float) -> list:
     return faces + [face for pt in parts for face in pt]
 
 
-def _handle(p0, u, n, ua, ub, c_h, toward, z, kind="lever") -> list:
-    """Ironmongery on a leaf standing across the wall (its faces at ua and
-    ub along the wall): a lever handle on a rose, both faces, its lever
-    pointing ``toward`` (±1 across) — or a pull bar."""
-    out = []
-    H = HANDLE_COLOR
-    for side_u, (a, b) in ((1, (ub, ub + 0.06)), (-1, (ua - 0.06, ua))):
-        if kind == "pull":                       # a vertical pull bar
-            ba, bb = (b - 0.012, b) if side_u > 0 else (a, a + 0.012)
-            out.append(_box(p0, u, n, ba, bb, c_h - 0.012, c_h + 0.012,
-                            z - 0.30, z + 0.30, H))
-            for zz in (z - 0.26, z + 0.24):      # its standoffs
-                out.append(_box(p0, u, n, min(a, b), max(a, b),
-                                c_h - 0.008, c_h + 0.008, zz, zz + 0.02, H))
-            continue
-        ra, rb = (ub, ub + 0.012) if side_u > 0 else (ua - 0.012, ua)
-        out.append(_box(p0, u, n, ra, rb, c_h - 0.027, c_h + 0.027,
-                        z - 0.027, z + 0.027, H))           # the rose
-        la, lb = (b - 0.018, b) if side_u > 0 else (a, a + 0.018)
-        c_a, c_b = sorted((c_h + toward * 0.013, c_h + toward * 0.13))
-        out.append(_box(p0, u, n, la, lb, c_a, c_b, z - 0.011, z + 0.011,
-                        H))                                  # the lever
-        out.append(_box(p0, u, n, min(rb, la), max(rb, la) if side_u > 0
-                        else max(ra, lb), c_h - 0.009, c_h + 0.009,
-                        z - 0.009, z + 0.009, H))            # its neck
-    return out
+HANDLE_TYPES = [("auto", "As the door type"),
+                ("lever_rose", "Lever on a round rose"),
+                ("lever_plate", "Lever on a back plate (with lock)"),
+                ("knob", "Round knob"),
+                ("pull_bar", "Pull bar (long, vertical)"),
+                ("d_pull", "D pull handle"),
+                ("flush", "Flush pull (recessed)"),
+                ("none", "No handle")]
+KEY_COLOR = (0.12, 0.12, 0.13, 1.0)
 
+
+def _handle(p0, u, n, ua, ub, c_h, toward, z, kind="lever") -> list:
+    """Ironmongery on both faces of a leaf standing across the wall (its
+    faces at ua and ub along the wall), at ``c_h`` across, ``z`` high:
+    the lever / knob / pull of ``kind`` — its lever pointing ``toward``
+    (±1 across, to the hinge side)."""
+    kind = {"lever": "lever_rose", "pull": "pull_bar"}.get(kind, kind)
+    if kind == "none":
+        return []
+    H = HANDLE_COLOR
+    out = []
+
+    def B(s_a, s_b, c_a, c_b, z_a, z_b, col=H):
+        out.append(_box(p0, u, n, min(s_a, s_b), max(s_a, s_b),
+                        min(c_a, c_b), max(c_a, c_b), z_a, z_b, col))
+
+    def oct_disc(f, sg, r, th, cc, zc, col=H):
+        """A round rose / knob as an octagon prism standing off the face
+        ``f`` (outward ``sg``) — made of three boxes."""
+        k = r * 0.414
+        B(f, f + sg * th, cc - k, cc + k, zc - r, zc + r, col)
+        B(f, f + sg * th, cc - r, cc + r, zc - k, zc + k, col)
+        B(f, f + sg * th, cc - r * 0.71, cc + r * 0.71, zc - r * 0.71,
+          zc + r * 0.71, col)
+    for f, sg in ((ub, 1.0), (ua, -1.0)):           # each face of the leaf
+        if kind == "lever_rose":
+            oct_disc(f, sg, 0.026, 0.010, c_h, z)           # rose
+            B(f + sg * 0.010, f + sg * 0.050, c_h - 0.009, c_h + 0.009,
+              z - 0.009, z + 0.009)                         # spindle neck
+            B(f + sg * 0.040, f + sg * 0.060, c_h, c_h + toward * 0.13,
+              z - 0.010, z + 0.010)                         # the lever
+            B(f + sg * 0.040, f + sg * 0.060, c_h + toward * 0.115,
+              c_h + toward * 0.13, z - 0.010, z + 0.004)    # its turned end
+        elif kind == "lever_plate":
+            B(f, f + sg * 0.008, c_h - 0.023, c_h + 0.023, z - 0.13,
+              z + 0.05)                                     # back plate
+            B(f + sg * 0.008, f + sg * 0.050, c_h - 0.009, c_h + 0.009,
+              z - 0.009, z + 0.009)
+            B(f + sg * 0.040, f + sg * 0.060, c_h, c_h + toward * 0.13,
+              z - 0.010, z + 0.010)
+            B(f + sg * 0.008, f + sg * 0.010, c_h - 0.004, c_h + 0.004,
+              z - 0.095, z - 0.075, KEY_COLOR)              # keyhole
+        elif kind == "knob":
+            oct_disc(f, sg, 0.027, 0.008, c_h, z)
+            B(f + sg * 0.008, f + sg * 0.035, c_h - 0.010, c_h + 0.010,
+              z - 0.010, z + 0.010)
+            oct_disc(f + sg * 0.035, sg, 0.030, 0.030, c_h, z)
+        elif kind == "pull_bar":
+            L2 = 0.30
+            B(f + sg * 0.055, f + sg * 0.080, c_h - 0.0125, c_h + 0.0125,
+              z - L2, z + L2)                               # the bar
+            for zz in (z - L2 + 0.05, z + L2 - 0.05):       # standoffs
+                B(f, f + sg * 0.055, c_h - 0.008, c_h + 0.008, zz - 0.008,
+                  zz + 0.008)
+        elif kind == "d_pull":
+            L2 = 0.11
+            B(f + sg * 0.050, f + sg * 0.065, c_h - 0.008, c_h + 0.008,
+              z - L2, z + L2)
+            for zz in (z - L2, z + L2 - 0.014):
+                B(f, f + sg * 0.065, c_h - 0.008, c_h + 0.008, zz,
+                  zz + 0.014)
+        elif kind == "flush":
+            B(f - sg * 0.001, f + sg * 0.002, c_h - 0.022, c_h + 0.022,
+              z - 0.07, z + 0.07)
+            B(f + sg * 0.002, f + sg * 0.003, c_h - 0.015, c_h + 0.015,
+              z - 0.055, z + 0.055, KEY_COLOR)
+    return out
 
 def _opening_parts(o: dict, seg, z0: float) -> list:
     """The frame (and glass / leaf) of an opening, on the wall's centre
@@ -1255,6 +1332,13 @@ def leaf_face(pk, p0, u, n, ua, ub, ca, cb, z0, z1) -> list:
     return P
 
 
+def _hk(o, default):
+    """The door's handle type: as set (Edit ▸ Door handle), else its
+    type's."""
+    h = o.get("handle") or "auto"
+    return default if h == "auto" else h
+
+
 def door_parts(o, style, p0, u, n, s0, s1, zs, zt, hd, f) -> list:
     """A door's leaves (its frame is made already), by its type. Hinged
     leaves stand OPEN 90° into the room they open to, so the plans show
@@ -1278,10 +1362,11 @@ def door_parts(o, style, p0, u, n, s0, s1, zs, zt, hd, f) -> list:
                 parts.append(_box(p0, u, n, ua - 0.01, ub + 0.01, fa, fb,
                                   zz, zz + 0.05, STEEL_COLOR))
             parts.extend(_handle(p0, u, n, ua, ub, c_h - side * 0.03,
-                                 -side, zh, "pull"))
+                                 -side, zh, _hk(o, "pull_bar")))
             return
         parts.extend(_handle(p0, u, n, ua, ub, c_h, -side, zh,
-                             "pull" if kind == "main" else "lever"))
+                             _hk(o, "lever_plate" if kind == "main"
+                                 else "lever_rose")))
         if kind == "alu_glass":            # aluminium leaf, glazed
             st_ = 0.07
             for c_a, c_b in ((ca, ca + st_), (cb - st_, cb)):
@@ -1708,7 +1793,8 @@ def build(doc: dict, elevations) -> list[dict]:
     for lid, li in info.items():
         z0, under = li["z0"], li["under"]
         # walls — cut by their openings
-        mine = [w for w in walls if w["level"] == lid]
+        mine = [_plastered(w, PLASTER(doc)) for w in walls
+                if w["level"] == lid]
         ramps = _ramps(doc)
         # a wall a car ramp crosses: in pieces, each stopping under the
         # ramp's soffit (its doors / windows go with the piece they are in)
@@ -1766,7 +1852,8 @@ def build(doc: dict, elevations) -> list[dict]:
             if not pieces:
                 continue
             b = z0 + float(w.get("base", 0.0))
-            top = under if w.get("height", "level") == "level" \
+            top = (z0 + li["height"] - 0.002 if w.get("_pl") else under) \
+                if w.get("height", "level") == "level" \
                 else z0 + float(w["height"])
             if top - b < 0.01:
                 continue
@@ -1778,7 +1865,19 @@ def build(doc: dict, elevations) -> list[dict]:
                 seg = W.centre(w)
                 n_ = 1 if w.get("kind", "line") == "line" else 12
                 path = [(*seg.at(k / n_), b) for k in range(n_ + 1)]
-                faces = RL.faces(path, top - b, w["rail"], float(w["t"]))
+                ch = float(w.get("curb_h") or 0.0)
+                if ch > 0.01:                    # on its upstand (curb)
+                    pl_ = PLASTER(doc)
+                    ct = float(w.get("curb_t") or 0.0762) + 2 * pl_
+                    cd = float(w.get("curb_d") or 0.0) if pl_ > 0 else 0.0
+                    faces = []                   # down over the slab's edge
+                    for p_, q_ in zip(path, path[1:]):
+                        faces += RL._panel(p_, q_, -cd, ch, ct, RL.MASONRY)
+                    path = [(x, y, z + ch) for x, y, z in path]
+                    faces += RL.faces(path, max(top - b - ch, 0.3), w["rail"],
+                                      float(w["t"]))
+                else:
+                    faces = RL.faces(path, top - b, w["rail"], float(w["t"]))
             elif w.get("type") == "curtain":       # glass on a grid
                 seg = W.centre(w)
                 faces = curtain_wall(w, seg, ops, z0, b, top)
