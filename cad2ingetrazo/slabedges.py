@@ -495,7 +495,7 @@ def _mrr_sides(p):
     return (math.dist(q[0], q[1]), math.dist(q[1], q[2]))
 
 
-def threshold_faces(doc, lid, z0, t, level_at=None) -> list:
+def threshold_faces(doc, lid, z0, t, level_at=None, tops=None) -> list:
     """A granite threshold in every door opening of the level: the door's
     width by the wall's thickness, its top flush with the finished floor
     (the higher of the two rooms it joins when they differ), down to the
@@ -531,6 +531,8 @@ def threshold_faces(doc, lid, z0, t, level_at=None) -> list:
                 zb = max(f_ for _b, f_ in lv)
         if zb - za < 0.005:
             continue
+        if tops is not None:
+            tops[o["id"]] = zb
         out += S._box(seg.p0, seg.u, n, o["pos"] - o["w"] / 2,
                       o["pos"] + o["w"] / 2, -t2, t2, za, zb, GRANITE)
     return out

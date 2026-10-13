@@ -276,3 +276,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.14.5
 - **Corner windows are windows in a wall** (not a curtain wall): each leg is a wall like the one it continues (same type, thickness, height, finish) with a window in it — the import's window type, sill and height. The two windows meet at a small corner post. «Find corner windows (this level)» removes the old corner walls and their windows before adding the new ones.
+
+## 3.14.6
+- **Corner window = one aluminium window**: the glass turns the corner with no wall between — an aluminium frame (jambs at its two ends, sill and head running round the corner), a slim aluminium corner post (80 mm) where the legs meet, fixed glass panes with mullions at most 1.2 m apart. One element «Corner window n» in the model; its legs are walls «Corner window n · leg k» standing only under the sill and over the head (the window's sill and height: the import's window settings).
+- **Doors stand on the threshold**: a door's frame and leaf now start at the top of its granite threshold (the finished floor) — not at the slab, where the threshold covered their foot. The hole in the wall still goes down to the slab, under the threshold.

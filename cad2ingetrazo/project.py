@@ -23,6 +23,7 @@ import copy
 import fnmatch
 import math
 import re
+import uuid
 import os
 
 from . import cadread
@@ -294,7 +295,8 @@ def column_layers_for(pats, floor: int) -> list:
 
 def _corner_windows(doc, lid, pl, P, how, made) -> int:
     """Corner windows of the placed plan ``pl`` on level ``lid`` (its walls
-    ``made``): window walls «Corner window n» added; the number."""
+    ``made``): «Corner window n» added (its legs: walls carrying one
+    window round the corner); the number of windows."""
     from shapely.geometry import Polygon as _PgW
 
     from . import cornerwin as CW
@@ -316,9 +318,10 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
                    wall_recs=recs)
     if not legs:
         return 0
-    # each leg: a wall like the one it carries on (its type, height,
-    # base, finish…) with a window in it — the two windows meeting at the
-    # corner post, as the plan draws the glass turning the corner
+    # each leg: a wall like the one it carries on (its thickness, height,
+    # finish…) under the sill and over the head; between them ONE aluminium
+    # window turning the corner (frame, corner post, glass) — the legs of
+    # a chain share its id («cwin»)
     base_ws = [w for w in made if w.get("kind", "line") == "line"
                and W.why_not(w) is None
                and not str(w.get("name", "")).startswith("Corner window")]
@@ -345,40 +348,53 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
         return best
     keep = ("type", "height", "base", "h", "material", "finish", "layer",
             "rcc", "top_att", "bot_att", "plaster", "skirting")
-    crecs, wins = [], []
-    for a, b, t in legs:
-        if math.dist(a, b) < 0.25:
-            continue
+    # the legs in chains (sharing an end): one window each
+    legs = [l for l in legs if math.dist(l[0], l[1]) >= 0.25]
+    grp = list(range(len(legs)))
+
+    def _root(k):
+        while grp[k] != k:
+            k = grp[k]
+        return k
+    for i_ in range(len(legs)):
+        for j_ in range(i_ + 1, len(legs)):
+            if min(math.dist(p_, q_) for p_ in legs[i_][:2]
+                   for q_ in legs[j_][:2]) < 0.02:
+                grp[_root(j_)] = _root(i_)
+    have = {str(w.get("name", "")).split(" ·")[0] for w in arch["walls"]
+            if str(w.get("name", "")).startswith("Corner window")}
+    k_ = 1
+    names, cids = {}, {}
+    for i_ in range(len(legs)):
+        r_ = _root(i_)
+        if r_ not in names:
+            while f"Corner window {k_}" in have:
+                k_ += 1
+            names[r_] = f"Corner window {k_}"
+            have.add(names[r_])
+            cids[r_] = uuid.uuid4().hex[:8]
+    crecs, nm = [], []
+    sill = float(st.get("sill", 0.9))
+    win_h = float(st.get("win_h", 1.2))
+    for i_, (a, b, t) in enumerate(legs):
         like = _like(a, b, t) or {}
         rec = {"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
                "b": [round(b[0], 4), round(b[1], 4)], "t": round(t, 3),
                "align": "centre", "side": 1, "height": "level", "base": 0.0,
-               "level": lid, "type": "solid"}
-        for k_ in keep:
-            if k_ in like:
-                rec[k_] = copy.deepcopy(like[k_])
-        if rec.get("type") == "curtain":
-            rec["type"] = "solid"
-        rec["level"] = lid
+               "level": lid, "type": "solid", "cwin": cids[_root(i_)],
+               "cw_low": round(sill, 4), "cwin_h": round(win_h, 4)}
+        for k2 in keep:
+            if k2 in like and k2 != "type":
+                rec[k2] = copy.deepcopy(like[k2])
         crecs.append(rec)
+        nm.append(names[_root(i_)])
     made_c = M.new_walls(arch["walls"], crecs)
-    for k_, w_ in enumerate(made_c, 1):
-        w_["name"] = f"Corner window {k_}"
+    seen_ = {}
+    for w_, n_ in zip(made_c, nm):
+        seen_[n_] = seen_.get(n_, 0) + 1
+        w_["name"] = f"{n_} · leg {seen_[n_]}"
     arch["walls"] += made_c
-    gap = S.END_GAP + 0.005
-    orecs = []
-    for w_ in made_c:
-        L = W.drawn(w_).L
-        if L - 2 * gap < 0.3:
-            continue
-        o = {"kind": "window", "wall": w_["id"], "pos": round(L / 2, 4),
-             "w": round(L - 2 * gap, 3), "h": float(st.get("win_h", 1.2)),
-             "sill": float(st.get("sill", 0.9)), "swing": "left", "face": 1,
-             "style": st.get("win_style", "sliding")}
-        opening_types(o, st)
-        orecs.append(o)
-    arch["openings"] += M.new_openings(arch["openings"], orecs)
-    return len(made_c)
+    return len(set(nm))
 
 
 def cover_corner_windows(doc, lid) -> int:
@@ -2899,10 +2915,17 @@ def _groups(arch, doc=None):
         from .host import log_error
         log_error("project.ramp_solids")
         arch["_ramps"] = []
+    try:                    # doors stand on their thresholds
+        arch["_door_lift"] = door_lifts(doc) if doc is not None else {}
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.door_lifts")
+        arch["_door_lift"] = {}
     try:
         elems = S.build(arch, M.elevations)
     finally:
         arch.pop("_ramps", None)
+        arch.pop("_door_lift", None)
     # 1: each element in its own frame, and how many share its shape
     prep, count = [], {}
     for e in elems:
@@ -4504,6 +4527,51 @@ def _ceiling_groups(doc):
         g.ext = {KEY: {"type": "ceiling", "id": f"{lid}|{rname}",
                        "level": lid}}
         out.append(g)
+    return out
+
+
+def _level_at_fn(doc, i, lid):
+    """level_at(q) → (slab top, finished floor) on level ``lid`` (index
+    ``i``): the room's own finish over its own (sunk / raised) floor."""
+    from shapely.geometry import Point as _Pt
+    arch = doc["arch"]
+    elev = elevations(arch)
+    rooms_ = spaces.of_level(arch, lid)
+    ft_ = float(doc["settings"].get("finish_t", 0.0508))
+
+    def level_at(q):
+        base = elev[i] + floor_offset_at(doc, lid, q)
+        pt = _Pt(q)
+        r = next((r for r in rooms_ if r["poly"].contains(pt)), None)
+        f = room_finish(doc, r.get("rec")) if r else ft_
+        return base, base + f
+    return level_at
+
+
+def door_lifts(doc) -> dict:
+    """{door id: how far its threshold's top stands over its level's floor
+    line}: the door's frame and leaf stand on the threshold."""
+    from . import slabedges as SE
+    st = doc["settings"]
+    out = {}
+    if not (st.get("thresholds", True) and st.get("finish_on", True)):
+        return out
+    arch = doc["arch"]
+    elev = elevations(arch)
+    ft_ = float(st.get("finish_t", 0.0508))
+    for i, lv in enumerate(arch["levels"]):
+        lid = lv["id"]
+        tops = {}
+        try:
+            SE.threshold_faces(doc, lid, elev[i] + open_offset(doc, lid),
+                               ft_, _level_at_fn(doc, i, lid), tops)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project door_lifts")
+            continue
+        for k, zb in tops.items():
+            if zb - elev[i] > 0.002:
+                out[k] = round(zb - elev[i], 4)
     return out
 
 

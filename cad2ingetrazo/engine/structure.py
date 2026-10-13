@@ -877,6 +877,73 @@ def _sz_prism(p0, u, n, pts, c0, c1, color) -> list:
     return out
 
 
+def _lifted(o: dict, lifts: dict) -> dict:
+    """A door standing on its threshold: its frame and leaf start at the
+    threshold's top (the finished floor), the hole in the wall does not."""
+    d = lifts.get(o.get("id"))
+    if not d or o.get("kind") != "door" or float(o.get("sill", 0)) > 0.05:
+        return o
+    d = min(float(d), float(o["h"]) - 0.3)
+    if d <= 0.002:
+        return o
+    return dict(o, sill=float(o.get("sill", 0)) + d, h=float(o["h"]) - d)
+
+
+CW_POST = 0.08                 # m: the aluminium corner post (square)
+
+
+def corner_window_faces(legs) -> list:
+    """One aluminium window turning the corner(s) of its walls: [(wall,
+    sill z, head z)] → frame (jambs at its two free ends, sill and head
+    running round), the corner post where two legs meet, fixed glass
+    panes (mullions at most 1.2 m apart) — no wall between the panes."""
+    _lab, FC, f, dep = FRAMES["aluminium"]
+    hd = dep / 2
+    ph = CW_POST / 2
+    segs = []
+    for w, zs, zt in legs:
+        sg = W.centre(w)
+        segs.append((sg.p0, sg.p1, sg.u, zs, zt))
+    ends = [p for p0, p1, *_r in segs for p in (p0, p1)]
+
+    def shared(p):
+        return sum(1 for q in ends if math.dist(p, q) < 0.02) > 1
+    out = []
+    posts = []
+    for p0, p1, u, zs, zt in segs:
+        if zt - zs < 0.2:
+            continue
+        n = (-u[1], u[0])
+        L = math.dist(p0, p1)
+        ca, cb = shared(p0), shared(p1)
+        sa = ph if ca else 0.0
+        sb = L - ph if cb else L
+        parts = []
+        if not ca:                                   # jambs at free ends
+            parts.append(_box(p0, u, n, 0.0, f, -hd, hd, zs, zt, FC))
+            sa = f
+        if not cb:
+            parts.append(_box(p0, u, n, L - f, L, -hd, hd, zs, zt, FC))
+            sb = L - f
+        if sb - sa < 0.05:
+            continue
+        parts.append(_box(p0, u, n, sa, sb, -hd, hd, zs, zs + f, FC))
+        parts.append(_box(p0, u, n, sa, sb, -hd, hd, zt - f, zt, FC))
+        k = max(1, int(math.ceil((sb - sa) / 1.2 - 1e-6)))
+        for i in range(1, k):                        # mullions
+            sm = sa + (sb - sa) * i / k
+            parts.append(_box(p0, u, n, sm - f / 2, sm + f / 2, -hd, hd,
+                              zs + f, zt - f, FC))
+        parts.append(_box(p0, u, n, sa, sb, -0.005, 0.005, zs + f, zt - f,
+                          GLASS_COLOR))
+        for c, on in ((p0, ca), (p1, cb)):
+            if on and not any(math.dist(c, q) < 0.02 for q in posts):
+                posts.append(c)
+                parts.append(_box(c, u, n, -ph, ph, -ph, ph, zs, zt, FC))
+        out += [face for pt in parts for face in pt]
+    return out
+
+
 def opening_parts(o: dict, seg, z0: float) -> list:
     """The frame, glass (of its glass type), leaves and ironmongery of an
     opening — with its head."""
@@ -1586,6 +1653,8 @@ def build(doc: dict, elevations) -> list[dict]:
             mine = mine2
             openings = [o for o in openings] + ops_extra
         plans = W.plan(mine)
+        cwins: dict = {}
+        lifts = doc.get("_door_lift") or {}
         for w in mine:
             pieces = plans.get(w["id"])
             if not pieces:
@@ -1608,18 +1677,30 @@ def build(doc: dict, elevations) -> list[dict]:
                 seg = W.centre(w)
                 faces = curtain_wall(w, seg, ops, z0, b, top)
                 for o in ops:
-                    parts = opening_parts(o, seg, z0)
+                    parts = opening_parts(_lifted(o, lifts), seg, z0)
                     if parts:
                         out.append({"kind": "opening", "id": o["id"],
                                     "name": o["name"], "level": lid,
                                     "okind": o["kind"], "faces": parts})
+            elif w.get("cwin") and w.get("kind", "line") == "line":
+                # a leg of a corner window: the wall under its sill and
+                # over its head; the window (one, round the corner) below
+                zs = min(max(z0 + float(w.get("cw_low", 0.9)), b), top)
+                zt = min(max(zs + float(w.get("cwin_h", 1.2)), zs), top)
+                faces = []
+                for pc in pieces:
+                    if zs - b > 0.01:
+                        faces += W.solid(pc, b, zs)
+                    if top - zt > 0.01:
+                        faces += W.solid(pc, zt, top)
+                cwins.setdefault(w["cwin"], []).append((w, zs, zt))
             elif ops:
                 seg = W.centre(w)
                 faces = [f for pc in pieces
                          for f in wall_with_openings(pc, seg, ops, z0, b,
                                                      top)]
                 for o in ops:
-                    parts = opening_parts(o, seg, z0)
+                    parts = opening_parts(_lifted(o, lifts), seg, z0)
                     if parts:
                         out.append({"kind": "opening", "id": o["id"],
                                     "name": o["name"], "level": lid,
@@ -1628,6 +1709,17 @@ def build(doc: dict, elevations) -> list[dict]:
                 faces = [f for pc in pieces for f in W.solid(pc, b, top)]
             out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
                         "name": w["name"], "level": lid, "faces": faces})
+        for cid, legs in cwins.items():
+            try:
+                fs = corner_window_faces(legs)
+            except Exception:  # noqa: BLE001
+                fs = []
+            if fs:
+                nm = next((str(w.get("name", "")) for w, _a, _b in legs),
+                          "Corner window")
+                out.append({"kind": "opening", "id": "cw-" + cid,
+                            "name": nm.rsplit(" ·", 1)[0], "level": lid,
+                            "okind": "window", "faces": fs})
         els = [e for e in struct if e["level"] == lid and why_not(e) is None]
         # columns
         for c in (e for e in els if e["type"] == "column"):

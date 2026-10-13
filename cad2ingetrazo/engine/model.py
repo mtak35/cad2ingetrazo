@@ -293,6 +293,10 @@ def _walls(raw, level_ids: set) -> list[dict]:
                 rec["glass"] = w["glass"]
             if w.get("rcc"):                 # an RCC (retaining) wall
                 rec["rcc"] = True
+            if w.get("cwin"):                # a leg of a corner window
+                rec["cwin"] = str(w["cwin"])[:40]
+                rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
+                                        0.2), 10.0)
         except (TypeError, ValueError, KeyError, IndexError):
             continue
         rec["align"] = w.get("align") if w.get("align") in WALL_ALIGNS \
