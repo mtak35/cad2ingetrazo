@@ -489,7 +489,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.14.6</span>")
+                   "3.15.0</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -531,6 +531,10 @@ class Panel(QWidget):
                            "walls, doors, windows, structure, finishes, "
                            "stairs… (one level = one layer: "
                            "«C2I · <level>»)"))
+        row.addWidget(_btn("Section box", self.section_box,
+                           "3D: the model cut to a box (as Revit's section "
+                           "box) — set its six faces, fit it to the level or "
+                           "to what you selected, or turn it off"))
         self.lay.addLayout(row)
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -929,9 +933,14 @@ class Panel(QWidget):
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
         f.addRow(_btn("Find corner windows (this level)",
                       self._corner_windows,
-                      "Glazing drawn outside the walls turning a corner "
-                      "(square or chamfered) made window walls — from this "
-                      "level's CAD plan; the rest of the level stays"))
+                      "Glazing drawn double turning a corner where the "
+                      "walls stop made one aluminium corner window — from "
+                      "this level's CAD plan; the rest of the level stays"))
+        f.addRow(_btn("Openings with no door drawn → no door (this level)",
+                      self._empty_openings,
+                      "The sliding doors put in openings the CAD shows empty "
+                      "(no swing, no glazing, no door block) made plain "
+                      "openings, a doorway with no door"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -2028,6 +2037,125 @@ class Panel(QWidget):
         self.commit(doc, f"{r[lid]} corner window(s) on «{lv['name']}» "
                          "— aluminium, one piece round the corner")
 
+    def section_box(self):
+        """The section box dialog: six faces (X, Y, Z from / to), «Whole
+        model», «This level», «Selection», «Apply», «Off» — stays open
+        while you work."""
+        from PySide6.QtWidgets import QDialog, QGridLayout
+        from . import secbox as SB
+        dlg = getattr(self, "_sb_dlg", None)
+        if dlg is not None:
+            dlg.show()
+            dlg.raise_()
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("CAD2IngeTrazo · Section box")
+        dlg.setModal(False)
+        g = QGridLayout(dlg)
+        spins = []
+        for r_, ax in enumerate("XYZ"):
+            g.addWidget(QLabel(f"{ax} from"), r_, 0)
+            a = _spin(-1000.0, 1000.0, 0.0)
+            g.addWidget(a, r_, 1)
+            g.addWidget(QLabel("to"), r_, 2)
+            b = _spin(-1000.0, 1000.0, 0.0)
+            g.addWidget(b, r_, 3)
+            spins.append((a, b))
+
+        def put(bx):
+            if not bx:
+                return
+            for k_, (a, b) in enumerate(spins):
+                a.setValue(float(bx[k_]))
+                b.setValue(float(bx[k_ + 3]))
+
+        def model_box():
+            gs = [x for x in PJ.all_groups(self.vp.scene) if PJ.tag_of(x)]
+            # the true model: the box off, its bounds from the records
+            return SB.model_bounds(gs)
+
+        def whole():
+            st = self.doc()["settings"]
+            if st.get("section_box"):
+                d_ = self.doc()
+                d_["settings"]["section_box"] = None
+                self.commit(d_, "Section box off")
+            put(model_box())
+
+        def level_box():
+            lid, lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            d_ = self.doc()
+            arch = d_["arch"]
+            el = PJ.elevations(arch)
+            ids = [x["id"] for x in arch["levels"]]
+            i = ids.index(lid)
+            bx = model_box() or [0, 0, 0, 1, 1, 1]
+            z0 = el[i] - 0.05
+            z1 = el[i] + float(arch["levels"][i].get("height", 3.0)) + 0.05
+            put([bx[0] - 0.5, bx[1] - 0.5, z0, bx[3] + 0.5, bx[4] + 0.5, z1])
+
+        def sel_box():
+            sel = [x for x in self.vp.scene.selection
+                   if hasattr(x, "mesh")]
+            bb = SB.model_bounds(sel) if sel else None
+            if not bb:
+                self.flash("Select something in 3D first")
+                return
+            put([bb[0] - 0.3, bb[1] - 0.3, bb[2] - 0.3, bb[3] + 0.3,
+                 bb[4] + 0.3, bb[5] + 0.3])
+
+        def apply():
+            bx = [spins[k_][0].value() for k_ in range(3)] + \
+                [spins[k_][1].value() for k_ in range(3)]
+            for k_ in range(3):
+                if bx[k_ + 3] - bx[k_] < 0.05:
+                    self.flash("Each face «to» must be past its «from»")
+                    return
+            d_ = self.doc()
+            d_["settings"]["section_box"] = [round(v, 4) for v in bx]
+            self.commit(d_, "Section box")
+
+        def off():
+            d_ = self.doc()
+            d_["settings"]["section_box"] = None
+            self.commit(d_, "Section box off")
+        r_ = 3
+        for c_, (lab_, fn_) in enumerate((("Whole model", whole),
+                                          ("This level", level_box),
+                                          ("Selection", sel_box))):
+            g.addWidget(_btn(lab_, fn_), r_, c_)
+        g.addWidget(_btn("Apply", apply, primary=True), r_ + 1, 0, 1, 2)
+        g.addWidget(_btn("Off", off), r_ + 1, 2, 1, 2)
+        put(self.doc()["settings"].get("section_box") or model_box())
+        self._sb_dlg = dlg
+        dlg.show()
+
+    def _empty_openings(self):
+        lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        doc = self.doc()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            r = PJ.revise_empty_openings(doc, [lid])
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._empty_openings")
+            self.flash(f"Not read — {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if lid not in r:
+            self.flash("This level has no CAD plan imported")
+            return
+        if not r[lid]:
+            self.flash("Every door here has a door drawn in the CAD")
+            return
+        self.commit(doc, f"{r[lid]} opening(s) with no door on «{lv['name']}»")
+
     def _update_levels(self):
         """Every level's storey height = the floor height typed (basements
         too), the ground floor at the level typed, the CAD's level notes
@@ -3042,6 +3170,25 @@ class Panel(QWidget):
         self.r_fin_t = _spin(0.0, 0.3, 0.0508, 0.0127, 3)
         row.addWidget(self.r_fin_t)
         v.addLayout(row)
+        row = QHBoxLayout()
+        self.r_curt = QCheckBox("Curtains at windows")
+        self.r_curt.setToolTip("A rod over each window and two pleated "
+                               "curtains drawn open, on the room side (the "
+                               "windows between two rooms left bare)")
+        row.addWidget(self.r_curt)
+        from . import curtains as _CT
+        self.r_curt_col = QComboBox()
+        for k_, lab_, _c in _CT.COLORS:
+            self.r_curt_col.addItem(lab_, k_)
+        row.addWidget(self.r_curt_col)
+        self.r_curt_len = QComboBox()
+        self.r_curt_len.addItem("to the floor", "floor")
+        self.r_curt_len.addItem("under the sill", "sill")
+        row.addWidget(self.r_curt_len)
+        row.addWidget(_btn("Apply", self._curtains,
+                           "Curtains on / off, colour and length — every "
+                           "level"))
+        v.addLayout(row)
         self.rooms = QTableWidget(0, 4)
         self.rooms.setHorizontalHeaderLabels(["Name", "Area", "Finish",
                                               "Floor ±"])
@@ -3201,6 +3348,11 @@ class Panel(QWidget):
         self.r_fin_on.setChecked(bool(st.get("finish_on", True)))
         self.r_fin_on.blockSignals(False)
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
+        self.r_curt.setChecked(bool(st.get("curtains")))
+        k_ = self.r_curt_col.findData(st.get("curtain_color", "cream"))
+        self.r_curt_col.setCurrentIndex(max(k_, 0))
+        k_ = self.r_curt_len.findData(st.get("curtain_len", "floor"))
+        self.r_curt_len.setCurrentIndex(max(k_, 0))
         try:
             rooms = spaces.of_level(arch, lid)
         except Exception:  # noqa: BLE001
@@ -3222,6 +3374,15 @@ class Panel(QWidget):
         self.rooms_total.setText(
             f"Net {area_txt(net)}  ·  gross {area_txt(spaces.gross(walls))}"
             if rooms else "No rooms — walls enclose them")
+
+    def _curtains(self):
+        doc = self.doc()
+        st = doc["settings"]
+        st["curtains"] = self.r_curt.isChecked()
+        st["curtain_color"] = self.r_curt_col.currentData()
+        st["curtain_len"] = self.r_curt_len.currentData()
+        self.commit(doc, "Curtains at the windows" if st["curtains"]
+                    else "Curtains off")
 
     def _save_rooms(self):
         doc = self.doc()
@@ -3765,6 +3926,10 @@ class Panel(QWidget):
                           lambda: self._start_extend_pick(sel[1]))
             sub.addAction("Extend slab up to the beams",
                           lambda: self._slab_to_beams(sel[1]))
+            sub.addAction("Extend slab up to the columns",
+                          lambda: self._slab_to_columns(sel[1]))
+            sub.addAction("Tidy the slab's edges",
+                          lambda: self._slab_tidy(sel[1]))
             mine = [m for m in doc.get("man_shafts") or []
                     if any(h in (rec.get("man") or [])
                            for h in [m["pts"]]) or self._shaft_in(m, rec)]
@@ -3913,6 +4078,9 @@ class Panel(QWidget):
             row.addWidget(_btn("Extend slab up to the beams",
                                lambda: (dlg.reject(),
                                         self._slab_to_beams(sel[1]))))
+            row.addWidget(_btn("… up to the columns",
+                               lambda: (dlg.reject(),
+                                        self._slab_to_columns(sel[1]))))
             form.addRow(row)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel
                               | QDialogButtonBox.Apply)
@@ -4172,6 +4340,37 @@ class Panel(QWidget):
             self.flash("The slab already covers its beams")
             return
         self.commit(doc, f"Slab extended up to {n} beam(s)")
+
+    def _slab_to_columns(self, slab_id):
+        from . import slabedges as SE
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            return
+        from shapely.ops import unary_union
+        others = [SE._poly(e["corners"]) for e in doc["arch"]["structure"]
+                  if e["type"] == "slab" and e is not slab
+                  and e["level"] == slab["level"] and e.get("corners")]
+        n = SE.extend_to_columns(doc, slab, 4.0,
+                                 unary_union(others) if others else None)
+        if not n:
+            self.flash("No column or pier off this slab within 4 m")
+            return
+        SE.tidy_slab(slab)
+        self.commit(doc, f"Slab carried out over {n} column(s) / pier(s)")
+
+    def _slab_tidy(self, slab_id):
+        from . import slabedges as SE
+        doc = self.doc()
+        slab = PJ.find_record(doc, "slab", slab_id)
+        if slab is None:
+            return
+        n0 = len(slab.get("corners") or [])
+        if not SE.tidy_slab(slab):
+            self.flash("This slab's edges are already clean")
+            return
+        self.commit(doc, f"Slab edges tidied: {n0} → "
+                         f"{len(slab['corners'])} corners")
 
     def _align_beams(self, kind, eid, how):
         """The beams selected (or the one clicked, or a column's beams)

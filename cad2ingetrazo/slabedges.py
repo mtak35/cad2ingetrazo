@@ -43,15 +43,265 @@ def _largest(g, near=None):
     return max(ps, key=lambda p: p.area)
 
 
+def tidy_outline(pts, tol=0.06) -> list:
+    """An outline without its slivers: every edge shorter than ``tol`` (the
+    bits the walls' joints and the gap closing leave) taken out — its two
+    neighbours carried on to where they meet — and the points on a
+    straight run dropped. [(x, y)], same turn."""
+    P = [tuple(map(float, q[:2])) for q in pts]
+    if len(P) > 1 and math.dist(P[0], P[-1]) < 1e-9:
+        P = P[:-1]
+
+    def _x(a, b, c, d):
+        r = (b[0] - a[0], b[1] - a[1])
+        s_ = (d[0] - c[0], d[1] - c[1])
+        den = r[0] * s_[1] - r[1] * s_[0]
+        if abs(den) < 1e-9 * (math.hypot(*r) * math.hypot(*s_) + 1e-12):
+            return None
+        t = ((c[0] - a[0]) * s_[1] - (c[1] - a[1]) * s_[0]) / den
+        return (a[0] + r[0] * t, a[1] + r[1] * t)
+    for _guard in range(4 * len(P) + 10):
+        n = len(P)
+        if n <= 4:
+            break
+        L = [math.dist(P[i], P[(i + 1) % n]) for i in range(n)]
+        i = min(range(n), key=lambda k: L[k])
+        changed = False
+        if L[i] < tol:
+            a, b = P[(i - 1) % n], P[i]
+            c, d = P[(i + 1) % n], P[(i + 2) % n]
+            X = _x(a, b, c, d)
+            if X is None or math.dist(X, b) > 4 * tol:
+                X = ((b[0] + c[0]) / 2, (b[1] + c[1]) / 2)
+            j = (i + 1) % n
+            P[i] = X
+            del P[j]
+            changed = True
+        # points on a straight run (or doubled)
+        n = len(P)
+        keep = []
+        for k in range(n):
+            a, b, c = P[k - 1], P[k], P[(k + 1) % n]
+            ab, bc = math.dist(a, b), math.dist(b, c)
+            if ab < 1e-6:
+                changed = True
+                continue
+            cr = abs((b[0] - a[0]) * (c[1] - b[1]) -
+                     (b[1] - a[1]) * (c[0] - b[0]))
+            if ab > 0 and bc > 0 and cr / (ab * bc) < 0.02 and \
+                    ((b[0] - a[0]) * (c[0] - b[0]) +
+                     (b[1] - a[1]) * (c[1] - b[1])) > 0:
+                changed = True
+                continue
+            keep.append(b)
+        if len(keep) >= 3:
+            P = keep
+        if not changed:
+            break
+    return P
+
+
 def _ring_pts(p) -> list:
     if p.geom_type != "Polygon":
         p = max(getattr(p, "geoms", [p]), key=lambda q: q.area)
     pts = list(p.simplify(0.005).exterior.coords)[:-1]
+    t_ = tidy_outline(pts)
+    from shapely.geometry import Polygon
+    try:
+        q_ = Polygon(t_)
+        if q_.is_valid and abs(q_.area - p.area) < 0.02 * p.area + 0.5:
+            pts = t_
+    except Exception:  # noqa: BLE001
+        pass
     a = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1)
             in zip(pts, pts[1:] + pts[:1]))
     if a < 0:
         pts = pts[::-1]
     return [[round(x, 4), round(y, 4)] for x, y in pts]
+
+
+def tidy_slab(slab) -> bool:
+    """The slab's outline without its slivers (see ``tidy_outline``). True
+    when it changed."""
+    p = _poly(slab.get("corners") or [])
+    if p.is_empty:
+        return False
+    new = _ring_pts(p)
+    if len(new) >= len(slab["corners"]):
+        return False
+    slab["corners"] = new
+    return True
+
+
+def piers_of(doc, lid) -> list:
+    """The columns that stand on level ``lid`` as plan polygons: the
+    column records, and the short free-standing walls (piers: no side over
+    1.0 m, touching no other wall) — shapely polygons."""
+    from shapely.geometry import LineString, Polygon
+
+    from .engine import structure as S
+    from .engine import walls as W
+    arch = doc["arch"]
+    out = []
+    for e in arch["structure"]:
+        if e["type"] == "column" and e["level"] == lid:
+            try:
+                out.append(Polygon(S.column_outline(e, 0.0)))
+            except Exception:  # noqa: BLE001
+                pass
+    ws = [w for w in arch["walls"] if w["level"] == lid and
+          w.get("kind", "line") == "line" and W.why_not(w) is None and
+          not w.get("rail")]
+    polys = []
+    for w in ws:
+        c_ = W.centre(w)
+        polys.append(LineString([c_.p0, c_.p1]).buffer(
+            float(w["t"]) / 2, cap_style=2, join_style=2))
+    for i, (w, pg) in enumerate(zip(ws, polys)):
+        if W.drawn(w).L > 1.0 or float(w["t"]) > 1.0:
+            continue
+        near = pg.buffer(0.05)
+        if any(j != i and near.intersects(q) for j, q in enumerate(polys)):
+            continue                     # a wall's end, not a pier
+        out.append(pg)
+    return out
+
+
+def extend_slabs_to_columns(doc, slabs, reach=4.0) -> int:
+    """``slabs`` (one level's) carried out over their columns, the biggest
+    first: a column another slab already holds is left to it, and no slab
+    grows over another. The number of bridges made."""
+    from shapely.ops import unary_union
+    n = 0
+    for s_ in sorted(slabs, key=lambda e: -_poly(e["corners"]).area):
+        others = [_poly(o["corners"]) for o in slabs
+                  if o is not s_ and o.get("corners")]
+        n += extend_to_columns(doc, s_, reach,
+                               unary_union(others) if others else None)
+    return n
+
+
+def extend_to_columns(doc, slab, reach=4.0, taken=None) -> int:
+    """The slab carried out over the columns / piers round it (up to
+    ``reach`` off its edge, none on the plot's line): each one joined to
+    the slab by a strip straight across the gap, the strips side by side
+    closed into one. The number of columns it reached."""
+    from shapely.ops import unary_union
+    sp = _poly(slab["corners"])
+    if sp.is_empty:
+        return 0
+    lid = slab["level"]
+    from . import project as _PJ
+    if not (slab.get("top") or (_PJ.slab_on_top(doc) and not
+                                slab.get("zone") and not slab.get("user"))):
+        arch = doc["arch"]
+        el = _PJ.elevations(arch)
+        order = [arch["levels"][i]["id"] for i in
+                 sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+        k = order.index(lid) if lid in order else -1
+        lid = order[k - 1] if k > 0 else lid
+    plot = (doc["arch"].get("plot") or {}).get("corners") or []
+    pline = None
+    if len(plot) >= 3:
+        from shapely.geometry import Polygon
+        pline = Polygon([tuple(q[:2]) for q in plot]).exterior
+    from shapely.geometry import box as _box
+    # each column: cast to the slab along the plan's four directions — the
+    # box from the column to every face of the slab it meets (a column in
+    # a corner pocket: the pocket's rectangle)
+    hits = []                            # (column, rect, dirs)
+    for pg in piers_of(doc, lid):
+        if sp.buffer(0.02).contains(pg):
+            continue
+        if taken is not None and taken.buffer(0.05).intersection(pg).area \
+                > 0.3 * pg.area:
+            continue                     # another slab holds it
+        if sp.distance(pg) > reach:
+            continue
+        if pline is not None and pline.distance(pg) < 0.4 and \
+                sp.distance(pg) > 0.3:
+            continue                     # a gate / boundary pillar
+        x0, y0, x1, y1 = pg.bounds
+        rx0, ry0, rx1, ry1 = x0, y0, x1, y1
+        dirs = []
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if dx:
+                band = _box(x1, y0, x1 + reach, y1) if dx > 0 else \
+                    _box(x0 - reach, y0, x0, y1)
+            else:
+                band = _box(x0, y1, x1, y1 + reach) if dy > 0 else \
+                    _box(x0, y0 - reach, x1, y0)
+            cut = band.intersection(sp)
+            if cut.is_empty or cut.area < 1e-4:
+                continue
+            bx0, by0, bx1, by1 = cut.bounds
+            if dx > 0:
+                rx1, dirs = max(rx1, bx0 + 0.02), dirs + [("x", bx0)]
+            elif dx < 0:
+                rx0, dirs = min(rx0, bx1 - 0.02), dirs + [("x", bx1)]
+            elif dy > 0:
+                ry1, dirs = max(ry1, by0 + 0.02), dirs + [("y", by0)]
+            else:
+                ry0, dirs = min(ry0, by1 - 0.02), dirs + [("y", by1)]
+        if not dirs:
+            continue
+        hits.append([pg, (rx0, ry0, rx1, ry1), dirs])
+    # columns in a row off the same face: one roof over them all
+    bridges = []
+    used = [False] * len(hits)
+    for i, (pg, r, dirs) in enumerate(hits):
+        if used[i]:
+            continue
+        used[i] = True
+        grp = [r]
+        for j in range(i + 1, len(hits)):
+            if used[j]:
+                continue
+            if any(abs(a[1] - b[1]) < 0.05 and a[0] == b[0]
+                   for a in dirs for b in hits[j][2]):
+                rj = hits[j][1]
+                gap = max(rj[0] - r[2], r[0] - rj[2], rj[1] - r[3],
+                          r[1] - rj[3], 0.0)
+                if gap <= 9.0:
+                    used[j] = True
+                    grp.append(rj)
+        bx = [min(q[0] for q in grp), min(q[1] for q in grp),
+              max(q[2] for q in grp), max(q[3] for q in grp)]
+        if len(dirs) == 1:
+            # off one straight face only: that whole face carried out to
+            # the column line — not a tongue as wide as the column
+            ax_, c_ = dirs[0]
+            sx0, sy0, sx1, sy1 = sp.bounds
+            band = _box(sx0 - 1, c_ - 0.02, sx1 + 1, c_ + 0.02) if ax_ == "y" \
+                else _box(c_ - 0.02, sy0 - 1, c_ + 0.02, sy1 + 1)
+            face = sp.exterior.intersection(band)
+            parts = [g for g in getattr(face, "geoms", [face])
+                     if not g.is_empty and g.length > 0.3]
+            k_ = 0 if ax_ == "y" else 1
+            lo_, hi_ = bx[k_], bx[k_ + 2]
+            best_ = None
+            for g in parts:
+                b_ = g.bounds
+                g0, g1 = b_[k_], b_[k_ + 2]
+                gap_ = max(g0 - hi_, lo_ - g1, 0.0)
+                if gap_ < 1.0 and (best_ is None or gap_ < best_[0]):
+                    best_ = (gap_, g0, g1)
+            if best_ is not None:
+                bx[k_] = min(bx[k_], best_[1])
+                bx[k_ + 2] = max(bx[k_ + 2], best_[2])
+        bridges.append(_box(*bx))
+    if not bridges:
+        return 0
+    br = unary_union(bridges)
+    if taken is not None:
+        br = br.difference(taken)
+    grown = unary_union([sp, br])
+    p = _largest(grown.buffer(0.01, join_style=2).buffer(-0.01, join_style=2),
+                 sp.representative_point())
+    if p is None or p.area <= sp.area + 0.05:
+        return 0
+    slab["corners"] = _ring_pts(p)
+    return len(bridges)
 
 
 def wall_polys(walls) -> list:

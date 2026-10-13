@@ -80,7 +80,7 @@ DEFAULTS = {
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
-    "stair_well": "railing", "corner_windows": True,
+    "stair_well": "railing", "corner_windows": True, "slab_to_columns": True,
     "level_groups": False, "shoring_on": "plot",          # each level one group in 3D
     "found_type": "isolated_strip", "raft_t": 0.6096, "raft_off": 0.6096,
     "stair_type": "monolithic", "stair_waist": 0.1524,   # 6" waist slab
@@ -88,6 +88,8 @@ DEFAULTS = {
     "bike_model": "lib", "bike_lib": None,              # motorbikes: library
     "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
     "thresholds": True, "finish_to_edge": True,
+    "curtains": False, "curtain_color": "cream", "curtain_len": "floor",
+    "section_box": None,
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
     "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
     "shoring_embed": 3.048,                              # 10'-0" below
@@ -514,6 +516,94 @@ def redetect_corner_windows(doc, lids=None) -> dict:
     return out
 
 
+def tidy_all_slabs(doc, lids=None) -> dict:
+    """Every level's slabs (and roofs) carried out over their columns and
+    their edges tidied. {level id: (columns reached, corners before,
+    after)}."""
+    from . import slabedges as SE
+    arch = doc["arch"]
+    out = {}
+    for lv in arch["levels"]:
+        lid = lv["id"]
+        if lids is not None and lid not in lids:
+            continue
+        ss = [e for e in arch["structure"] if e["type"] == "slab"
+              and e["level"] == lid and not e.get("zone")
+              and e.get("corners")]
+        if not ss:
+            continue
+        n0 = sum(len(e["corners"]) for e in ss)
+        k = SE.extend_slabs_to_columns(doc, ss) \
+            if doc["settings"].get("slab_to_columns", True) else 0
+        for e in ss:
+            SE.tidy_slab(e)
+        for e in arch["structure"]:
+            if e["type"] == "roof" and e["level"] == lid and e.get("corners"):
+                SE.tidy_slab(e)
+        out[lid] = (k, n0, sum(len(e["corners"]) for e in ss))
+    return out
+
+
+def revise_empty_openings(doc, lids=None) -> dict:
+    """The glass sliding doors put in openings the CAD shows empty (no
+    swing, no glazing, no door block over them) made plain openings — no
+    door, a doorway to the door height. {level id: n changed}."""
+    from . import detect
+    arch = doc["arch"]
+    st = doc["settings"]
+    out = {}
+    walls = {w["id"]: w for w in arch["walls"]}
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file") or \
+                lid not in {lv["id"] for lv in arch["levels"]}:
+            continue
+        raw = cadread.read(how["file"], how.get("unit"))
+        drawing = cadread.crop(raw, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base,
+                           (how.get("ix", 0.0), how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _found = layer_patterns(drawing, how, st)
+        blocks = []
+        for ins in pl.get("inserts", ()):
+            k_ = detect.block_kind(ins["name"])
+            if k_ is None and (_match(ins["layer"], P["doors"]) or
+                               _match(ins["layer"], P["windows"])):
+                k_ = "door"
+            if k_ is not None and ins.get("corners"):
+                blocks.append(ins["corners"])
+        n = 0
+        for o in arch["openings"]:
+            w = walls.get(o["wall"])
+            if w is None or w["level"] != lid or o["kind"] != "door" or \
+                    o.get("style") != "sliding" or \
+                    w.get("kind", "line") != "line":
+                continue
+            seg = W.centre(w)
+            mid = (seg.p0[0] + seg.u[0] * o["pos"],
+                   seg.p0[1] + seg.u[1] * o["pos"])
+            if walldetect._gap_kind(mid, float(o["w"]), seg.u, float(w["t"]),
+                                    pl["segs"]) is not None:
+                continue
+            half = float(o["w"]) / 2 + 0.1
+            if any(min(abs((c[0] - mid[0]) * seg.u[0] +
+                           (c[1] - mid[1]) * seg.u[1]) for c in cs) < half
+                   and min(abs(-(c[0] - mid[0]) * seg.u[1] +
+                               (c[1] - mid[1]) * seg.u[0]) for c in cs) < 1.5
+                   for cs in blocks):
+                continue                     # a door block stands over it
+            o.update(kind="void", style="", sill=0.0,
+                     h=float(st.get("door_h", 2.1336)))
+            for k_ in ("leaves", "frame", "glass", "head"):
+                o.pop(k_, None)
+            n += 1
+        out[lid] = n
+    return out
+
+
 def redetect_columns(doc, lids=None) -> dict:
     """The columns of levels ``lids`` (all imported ones by default) read
     again from their CAD plans — nothing else on the level changes (walls,
@@ -805,7 +895,11 @@ def _outer_loops(pieces, gap=1.25, least=20.0):
     out = []
     for g in sorted(getattr(u, "geoms", [u]), key=lambda p: -p.area):
         if g.geom_type == "Polygon" and g.area >= least:
-            out.append(list(g.simplify(0.005).exterior.coords)[:-1])
+            try:                  # without the slivers of the joints
+                from . import slabedges as _SE
+                out.append([tuple(q) for q in _SE._ring_pts(g)])
+            except Exception:  # noqa: BLE001
+                out.append(list(g.simplify(0.005).exterior.coords)[:-1])
     return out
 
 
@@ -1025,8 +1119,15 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         hinge = op[4] if len(op) > 4 else -1
         face = op[5] if len(op) > 5 else 1
         style = ""
-        if kind == "sliding":                  # open to the floor, nothing
-            kind, style = "door", "sliding"    # drawn: a glass sliding door
+        if kind == "sliding":                  # (older: a glass sliding
+            kind, style = "door", "sliding"    # door when nothing drawn)
+        if kind == "void":                     # nothing drawn: an opening
+            orecs.append({"kind": "void", "wall": made[k]["id"],  # no door
+                          "pos": round(pos + shifted[k], 4),
+                          "w": round(width, 3), "h": float(st["door_h"]),
+                          "sill": 0.0, "swing": "left", "face": 1,
+                          "style": ""})
+            continue
         door = kind == "door"
         # the hinge and the side the leaf opens to, as the CAD's swing
         # shows them (the wall's line runs a → b; «left» = at a)
@@ -1206,6 +1307,18 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project cover_corner_windows")
+    # the slab: out over the columns / piers round it, its slivers gone
+    try:
+        mine_s = [e for e in arch["structure"]
+                  if e["type"] == "slab" and e["level"] == lid
+                  and not e.get("zone")]
+        if st.get("slab_to_columns", True):
+            rep["slab_columns"] = SE.extend_slabs_to_columns(doc, mine_s)
+        for s_ in mine_s:
+            SE.tidy_slab(s_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project slab columns / tidy")
     rep["columns"] = sum(1 for r in new if r["type"] == "column")
     rep["beams"] = sum(1 for r in new if r["type"] == "beam")
     rep["cores"] = sum(1 for r in new if r["type"] == "core")
@@ -4619,6 +4732,16 @@ def _edge_groups(doc):
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project thresholds")
+        if st.get("curtains"):
+            try:
+                from . import curtains as CT
+                fs = CT.faces(doc, lid, elev[i])
+                if fs:
+                    parts.append(("curtain", "Curtains", fs,
+                                  (0.88, 0.83, 0.72), "IfcFurnishingElement"))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project curtains")
         for kind, label, fs, col, cls in parts:
             nm = f"{label} · {lv['name']}"
             g = Group(_mesh_of(fs), name=nm)
@@ -5017,6 +5140,14 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._grid_groups")
     _apply_materials(new_groups, doc.get("materials") or {})
+    box = doc["settings"].get("section_box")
+    if box and len(box) == 6:            # the section box: cut to it
+        try:
+            from . import secbox as SB
+            SB.cut(new_groups, [float(v) for v in box])
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project section box")
     if doc["settings"].get("level_groups"):
         try:
             new_groups = group_by_level(new_groups, arch)

@@ -32,6 +32,7 @@ from pathlib import Path
 
 #: An opening this wide or narrower becomes a door, wider a window.
 DOOR_MAX = 1.20
+SINGLE_LEAF_MAX = 1.35   # m: wider, a door has two leaves (or slides)
 #: A gap in a run of wall read as an opening (m).
 OPEN_MIN, OPEN_MAX = 0.45, 4.0
 
@@ -352,6 +353,22 @@ def _extend(runs):
     return out
 
 
+def _leaf(H, R, n, context) -> bool:
+    """A door leaf drawn open: a line from the hinge ``H``, about ``R``
+    long, standing out square from the wall (along ``n`` either way)."""
+    for s in context:
+        a, b = (s[0], s[1]), (s[2], s[3])
+        for p, q in ((a, b), (b, a)):
+            if _len(_sub(p, H)) > 0.08:
+                continue
+            d = _sub(q, p)
+            L = _len(d)
+            if 0.75 * R <= L <= 1.25 * R and \
+                    abs(_dot(_unit_v(d), n)) > 0.9:
+                return True
+    return False
+
+
 def _gap_kind(mid, width, u, t, context):
     """«door» | «window» | None — what the drawing shows in an opening.
     A door: its swing, pieces lying on a circle of the opening's width
@@ -365,6 +382,8 @@ def _gap_kind(mid, width, u, t, context):
               for sa in (-1, 1) for sb in (-1, 0, 1)]
     swing = [0.0] * len(hinges)
     face = [0.0] * len(hinges)          # which side of the wall it sweeps
+    swing2 = [0.0] * len(hinges)        # two leaves: each half the width
+    face2 = [0.0] * len(hinges)
     glaze = 0.0
     for s in context:
         a, b = (s[0], s[1]), (s[2], s[3])
@@ -388,18 +407,31 @@ def _gap_kind(mid, width, u, t, context):
             continue
         for k, H in enumerate(hinges):          # a chord of that circle:
             ra, rb = _len(_sub(a, H)), _len(_sub(b, H))   # both ends on it,
-            if not (0.8 * width <= ra <= 1.2 * width):    # square to its
-                continue                                   # radius
-            if abs(ra - rb) > 0.03 * width + 0.005:
-                continue
             if abs(_dot(_unit_v(d), _unit_v(_sub(m, H)))) > 0.2:
-                continue
-            swing[k] += L
-            face[k] += L if across > 0 else -L
-    if max(swing) >= 0.6 * width:       # a swing first: a door's closed leaf
-        k = max(range(len(swing)), key=lambda i: swing[i])  # also lies along
-        hinge = -1 if k < 3 else 1                           # the wall
+                continue                                   # square to its
+            for R, sw, fc in ((width, swing, face),        # radius
+                              (width / 2, swing2, face2)):
+                if not (0.8 * R <= ra <= 1.2 * R):
+                    continue
+                if abs(ra - rb) > 0.03 * R + 0.005:
+                    continue
+                if (along > 0) != (k >= 3) and R < width:
+                    continue            # a half leaf sweeps its own half
+                sw[k] += L
+                fc[k] += L if across > 0 else -L
+    # a swing first (a door's closed leaf also lies along the wall): one
+    # leaf only up to a single door's width; wider, a leaf at each jamb
+    if width <= SINGLE_LEAF_MAX and max(swing) >= 0.6 * width:
+        k = max(range(len(swing)), key=lambda i: swing[i])
+        hinge = -1 if k < 3 else 1
         return ("door", hinge, 1 if face[k] >= 0 else -1)
+    if width <= 2 * SINGLE_LEAF_MAX:
+        kl = max(range(3), key=lambda i: swing2[i])
+        kr = max(range(3, 6), key=lambda i: swing2[i])
+        if min(swing2[kl], swing2[kr]) >= 0.5 * width / 2 and \
+                _leaf(hinges[kl], width / 2, n, context) and \
+                _leaf(hinges[kr], width / 2, n, context):
+            return ("door", -1, 1 if face2[kl] + face2[kr] >= 0 else -1)
     if glaze >= 0.8 * width:
         return ("window", 0, 0)
     return None
@@ -428,9 +460,9 @@ def walls_from(segs, tmin: float = 0.08, tmax: float = 0.40, context=None):
             if width / 2 + 0.05 <= pos <= L - width / 2 - 0.05:
                 g = _gap_kind(mid, width, u, w["t"], context)
                 if g is None:
-                    # nothing drawn in it: an opening down to the floor —
-                    # a glass sliding door (or, without context, by width)
-                    g = ("sliding", 0, 0) if context else (
+                    # nothing drawn in it: an opening down to the floor
+                    # with no door in it (or, without context, by width)
+                    g = ("void", 0, 0) if context else (
                         ("door", -1, 1) if width <= DOOR_MAX
                         else ("window", 0, 0))
                 ops.append((k, pos, width, g[0], g[1], g[2]))

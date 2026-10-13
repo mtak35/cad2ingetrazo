@@ -91,7 +91,8 @@ def _stations(p, q, step):
     return [_lerp(p, q, k / n) for k in range(n + 1)]
 
 
-def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0) -> list:
+def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
+          floor=None) -> list:
     """The railing along ``path`` ([(x, y, z)…]) — see the module doc.
     ``gap``: the balusters' (or the glass panels' / pipe posts') spacing,
     0 = the type's own."""
@@ -136,7 +137,15 @@ def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0) -> list:
                 posts.append(s)
     if kind != "glass":
         for s in posts:
-            out += _bar(s, _up(s, H - 0.02), post_w, post_w, rail_c)
+            b_ = s
+            if floor is not None:            # a stair: each post fixed down
+                try:                         # on the tread under it
+                    zf = floor(s[0], s[1])
+                    if zf is not None and zf < s[2] - 0.005:
+                        b_ = (s[0], s[1], zf)
+                except Exception:  # noqa: BLE001
+                    pass
+            out += _bar(b_, _up(s, H - 0.02), post_w, post_w, rail_c)
     # the handrail on top, the run of the whole path
     hw = {"wood": 0.07}.get(kind, 0.05)
     for p, q in segs:

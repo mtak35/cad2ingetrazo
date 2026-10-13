@@ -342,6 +342,14 @@ class PlanEdit:
     def draw(self, viewport, painter):
         from PySide6.QtCore import QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPen
+        try:                                 # the section box's edges
+            raw = self._raw() or {}
+            box = (raw.get("settings") or {}).get("section_box")
+            if box:
+                from . import secbox
+                secbox.draw(self.vp, painter, box)
+        except Exception:  # noqa: BLE001
+            pass
         rc = getattr(self, "rect", None)
         if rc is not None and rc.get("a") is not None and rc.get("cur"):
             (x0, y0), (x1, y1) = rc["a"], rc["cur"]

@@ -1121,7 +1121,30 @@ def _opening_parts(o: dict, seg, z0: float) -> list:
                                0.005, zb, zt2, G)]
     else:
         parts += door_parts(o, style, p0, u, n, s0, s1, zs, zt, hd, f)
+        if style not in NO_TRIM and o.get("_t"):
+            parts += door_trim(o, p0, u, n, s0, s1, zs, zt, FC)
     return [face for p in parts for face in p]
+
+
+NO_TRIM = ("sliding", "rolling", "garage", "pocket")
+LINING_T = 0.018           # m: the jamb lining board over the reveal
+ARCH_W, ARCH_T = 0.075, 0.018    # m: the architrave's face width, depth
+
+
+def door_trim(o, p0, u, n, s0, s1, zs, zt, col) -> list:
+    """A door's joinery round its frame: the jamb lining (boards over the
+    reveal, the wall's full thickness, both jambs and the head) and an
+    architrave on both faces of the wall (two legs and a head)."""
+    t2 = float(o["_t"]) / 2
+    L, A, D = LINING_T, ARCH_W, ARCH_T
+    out = [_box(p0, u, n, s0, s0 + L, -t2, t2, zs, zt, col),       # linings
+           _box(p0, u, n, s1 - L, s1, -t2, t2, zs, zt, col),
+           _box(p0, u, n, s0, s1, -t2, t2, zt - L, zt, col)]
+    for c0, c1 in ((t2, t2 + D), (-t2 - D, -t2)):                 # architraves
+        out += [_box(p0, u, n, s0 - A, s0 + L, c0, c1, zs, zt + A, col),
+                _box(p0, u, n, s1 - L, s1 + A, c0, c1, zs, zt + A, col),
+                _box(p0, u, n, s0 + L, s1 - L, c0, c1, zt - L, zt + A, col)]
+    return out
 
 
 STEEL_COLOR = (0.62, 0.64, 0.67, 1.0)      # a lift's landing door
@@ -1700,7 +1723,8 @@ def build(doc: dict, elevations) -> list[dict]:
                          for f in wall_with_openings(pc, seg, ops, z0, b,
                                                      top)]
                 for o in ops:
-                    parts = opening_parts(_lifted(o, lifts), seg, z0)
+                    parts = opening_parts(
+                        dict(_lifted(o, lifts), _t=float(w["t"])), seg, z0)
                     if parts:
                         out.append({"kind": "opening", "id": o["id"],
                                     "name": o["name"], "level": lid,

@@ -473,7 +473,8 @@ def groups(doc, z_of, layer_of):
                       float(stt.get("stair_nosing", 0.025)),
                       float(stt.get("stair_tread", 0.05)), None)
         rails = build_rail(st, z0, e["rail"], e["rail_h"], e["rail_sides"],
-                           e["rail_off"], e["rail_gap"], e["rail_ext"])
+                           e["rail_off"], e["rail_gap"], e["rail_ext"],
+                           _floor_of(parts))
         out.append((f"Stair {len(out) + 1}", st["id"], st["level"], parts,
                     layer_of(st["level"]), rails))
     return out
@@ -511,8 +512,37 @@ def _runs(st, z0, off=0.05):
     return runs
 
 
+def _floor_of(parts):
+    """floor(x, y) → the top of the tread / landing under a point (the
+    stair's level faces looking up), or None off the stair."""
+    from shapely.geometry import Point, Polygon
+    tops = []
+    for fs, _c in parts or []:
+        for f in fs:
+            lp = f["loop"] if isinstance(f, dict) else f
+            if len(lp) < 3:
+                continue
+            zs = [q[2] for q in lp]
+            if max(zs) - min(zs) > 1e-4:
+                continue
+            a = sum(p[0] * q[1] - q[0] * p[1]
+                    for p, q in zip(lp, lp[1:] + lp[:1]))
+            if a <= 0:                       # looking down: a soffit
+                continue
+            try:
+                tops.append((Polygon([(q[0], q[1]) for q in lp]), zs[0]))
+            except Exception:  # noqa: BLE001
+                continue
+
+    def floor(x, y):
+        pt = Point(x, y)
+        hit = [z for pg, z in tops if pg.buffer(0.01).contains(pt)]
+        return max(hit) if hit else None
+    return floor
+
+
 def build_rail(st, z0, rail, h=0.9, sides="inner", off=0.05, gap=0.0,
-               ext=0.0) -> list:
+               ext=0.0, floor=None) -> list:
     """[(faces, colour)] of the stair's railing alone: its type, height,
     sides (inner / outer / both / none), inset from the flight's edge,
     baluster spacing (0 = the type's) and run-on past the first and the
@@ -520,7 +550,8 @@ def build_rail(st, z0, rail, h=0.9, sides="inner", off=0.05, gap=0.0,
     if not rail or rail == "none" or sides == "none":
         return []
     runs = _runs(st, z0, off)
-    return railing(st, runs, rail, h, sides, gap, ext, off) if runs else []
+    return railing(st, runs, rail, h, sides, gap, ext, off, floor) \
+        if runs else []
 
 def _ccw(loop):
     a = 0.5 * sum(p[0] * q[1] - q[0] * p[1]
@@ -1233,7 +1264,7 @@ def _ext(path, ext, at_end):
 
 
 def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
-            inset=0.05) -> list:
+            inset=0.05, floor=None) -> list:
     """[(faces, colour)] of the stair's railing: on the inner side of its
     flights (the side by the well, joined across each landing), the outer
     (the wall side), or both. A single straight flight has no well: both
@@ -1256,8 +1287,9 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
         # both sides of a stair with landings: the well side joined across
         # each landing, and the wall side turning round the landings — the
         # landing's open edges railed too
-        return railing(st, runs, kind, h, "inner", gap, ext, inset) + \
-            railing(st, runs, kind, h, "outer", gap, ext, inset)
+        return railing(st, runs, kind, h, "inner", gap, ext, inset,
+                       floor) + \
+            railing(st, runs, kind, h, "outer", gap, ext, inset, floor)
     if both:
         for i in range(nfl):
             for r in (r for r in runs if r[0] == i):
@@ -1266,7 +1298,8 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
                     path = _ext(path, ext, False)
                 if i == nfl - 1:
                     path = _ext(path, ext, True)
-                out.append((RL.faces(path, h, kind, gap=gap), None))
+                out.append((RL.faces(path, h, kind, gap=gap, floor=floor),
+                            None))
         return out
     picked = []
     for i in range(nfl):
@@ -1275,8 +1308,18 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
             picked.append(next((r for r in two
                                 if r[1] == (sides != "outer")), two[0]))
             continue
-        picked.append(max(two, key=far) if sides == "outer"
-                      else min(two, key=far))
+        # the inner side: the one towards the flights before and after
+        # (the well of a dog-leg, the inside corner of an L) — not the one
+        # nearest the stair's middle, which an L's long flight gets wrong
+        nb = [_fmid(runs, j) for j in (i - 1, i + 1) if 0 <= j < nfl]
+        tx = sum(q[0] for q in nb) / len(nb)
+        ty = sum(q[1] for q in nb) / len(nb)
+
+        def near(r, _t=(tx, ty)):
+            mx, my = (r[2][0] + r[3][0]) / 2, (r[2][1] + r[3][1]) / 2
+            return math.hypot(mx - _t[0], my - _t[1])
+        picked.append(max(two, key=near) if sides == "outer"
+                      else min(two, key=near))
     lands = [lg for lg in (as_flights(st)[1] or []) if not lg.get("arrival")]
     # one railing from the bottom to the top, across the landings (the
     # outer one turns round the landing's far corners)
@@ -1315,8 +1358,56 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
     if paths:
         paths[0] = _ext(paths[0], ext, False)
         paths[-1] = _ext(paths[-1], ext, True)
-    return [(RL.faces(pth, h, kind, gap=gap), None) for pth in paths
-            if len(pth) >= 2]
+    paths = [_smooth(pth) for pth in paths]
+    return [(RL.faces(pth, h, kind, gap=gap, floor=floor), None)
+            for pth in paths if len(pth) >= 2]
+
+
+def _fmid(runs, i):
+    """The middle of flight ``i`` on plan (between its two side runs)."""
+    rs = [r for r in runs if r[0] == i]
+    xs = [p[0] for r in rs for p in (r[2], r[3])]
+    ys = [p[1] for r in rs for p in (r[2], r[3])]
+    return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+
+def _smooth(path):
+    """A railing path without its jumps: two points on the same spot (the
+    landing's level, then the next flight's first nosing) made one — the
+    rail runs on into the next flight instead of a step straight up;
+    two inner lines meeting at an L landing turned at their corner."""
+    out = []
+    for p in path:
+        if out and math.hypot(p[0] - out[-1][0], p[1] - out[-1][1]) < 0.01:
+            out[-1] = (out[-1][0], out[-1][1], max(out[-1][2], p[2]))
+            continue
+        out.append(tuple(p))
+    # an L: the two lines' corner, not a diagonal cut across it
+    res = out[:1]
+    for k in range(1, len(out)):
+        a, b = res[-1], out[k]
+        if k >= 2 and k + 1 < len(out):
+            pa, nb = res[-2], out[k + 1]
+            u = (a[0] - pa[0], a[1] - pa[1])
+            v = (nb[0] - b[0], nb[1] - b[1])
+            Lu, Lv = math.hypot(*u), math.hypot(*v)
+            if Lu > 0.05 and Lv > 0.05:
+                u = (u[0] / Lu, u[1] / Lu)
+                v = (v[0] / Lv, v[1] / Lv)
+                cr = u[0] * v[1] - u[1] * v[0]
+                if abs(cr) > 0.7:                # square turn
+                    t_ = ((b[0] - a[0]) * v[1] - (b[1] - a[1]) * v[0]) / cr
+                    c = (a[0] + u[0] * t_, a[1] + u[1] * t_)
+                    if 0 <= t_ <= 1.5 and math.hypot(c[0] - b[0],
+                                                    c[1] - b[1]) < 1.5:
+                        res.append((c[0], c[1], a[2]))
+        res.append(b)
+    fin = []
+    for p in res:
+        if fin and math.dist(p, fin[-1]) < 0.005:
+            continue
+        fin.append(p)
+    return fin
 
 
 def _at(o, d, r, s, t):
