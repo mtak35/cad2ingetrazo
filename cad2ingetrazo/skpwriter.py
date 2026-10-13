@@ -141,7 +141,10 @@ def save_skp(scene, path, progress=None) -> dict:
     for g, m, lay, mat in items:
         if m is not None:
             by_mesh.setdefault(id(g.mesh), []).append((g, m, lay, mat))
-    defs = {k: v for k, v in by_mesh.items()}
+    # (a floor group — «Floors as groups» — has no faces of its own: its
+    # elements are written in their own right)
+    defs = {k: v for k, v in by_mesh.items()
+            if any(True for _f in _faces(v[0][0].mesh))}
     classic = [(g, m, lay, mat) for g, m, lay, mat in items if m is None]
     loose = getattr(scene, "mesh", None)
 

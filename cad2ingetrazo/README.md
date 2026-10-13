@@ -320,3 +320,14 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Zoom in the sheet view**: the mouse wheel zooms round the cursor (Shift + wheel scrolls), and a bar at the top right: − / + / Fit / fit width / 100 %.
 - **Line weights of the sheets**: Sheets ▸ Line weights — cut, profile, edge, dimension (mm on paper); «Apply line weights to the sheets» changes the sheets already made; «Make sheets» uses them.
 - **Model edges on / off**: top of the panel ▸ «Model edges» (and «Profiles») — the 3D view's edge lines shown or hidden (the host's Style menu follows).
+
+## 3.15.5
+- **Clean wall junctions**: where walls meet — a T, a butt joint, a corner, the joint across their tops — the line between them is hidden, in the 3D view and on the sheets; only the real corners of the walls show. The joint between a wall and the plastered slab edge over or under it, flush, is hidden too: no slab line on the elevations.
+- **Terrace edges as a 3" wall** (default): the terraces' railings are built as a 3" thick plastered wall, the railing's height, corners mitred clean (section 7 ▸ «Terrace edge»: 3" wall, or railing on a 3" upstand).
+- **Sheet units**: Sheets ▸ «Sheet units» — Metric (m, m², the default) or Imperial (ft-in, ft²), whatever unit the model is drawn in: the room areas, the schedules and the dimensions follow it.
+- **Floors as groups** now sits beside «Model edges» / «Profiles» at the top of the panel.
+
+## 3.15.7
+- **Line weights in the sheet window**: the bar at the top right of the sheet window now carries Cut / Profile / Edge / Dim line weights (mm on paper), live on every CAD2IngeTrazo sheet; the panel's Sheets ▸ Line weights follow. (On screen a line never draws thinner than one pixel: zoom in, or print / PDF, to see thin weights.)
+- **Slab commands with «Floors as groups»**: a whole floor selected, the element under the mouse is the one CAD2IngeTrazo works on — right-click a slab ▸ Extend slab…, Open / close a shaft by a rectangle, Edit properties… work without opening the floor group.
+- **Terrace and roof-terrace edges**: the 3" parapet walls are solid plastered walls (they had come out as glass).

@@ -37,7 +37,16 @@ import datetime
 import math
 import uuid
 
-from .host import area_txt  # noqa: E402
+#: the units of the sheets («metric»: m, m² — whatever unit the model is
+#: drawn in; «imperial»: feet-inches, ft²)
+_SHEET_UNITS = ["metric"]
+
+
+def area_txt(a: float) -> str:
+    """A room / plot area as the sheets write it."""
+    if _SHEET_UNITS[0] == "imperial":
+        return f"{a / 0.09290304:,.1f} ft²"
+    return f"{a:,.2f} m²"
 PAPERS = ("A1", "A2", "A3", "A4")
 #: the scales «auto» picks from (the largest that holds the drawing)
 SCALES = (20, 25, 50, 75, 100, 125, 150, 200, 250, 500, 1000)
@@ -537,6 +546,8 @@ def make(doc: dict, elevations, opts: dict):
     from .engine import spaces
     from .engine import structure as S
 
+    _SHEET_UNITS[0] = "imperial" if (opts or {}).get("units") == \
+        "imperial" else "metric"
     elements = S.build(doc, elevations)
     if not any(e["kind"] == "wall" for e in elements):
         return [], [], []
@@ -826,6 +837,7 @@ def make(doc: dict, elevations, opts: dict):
     pens = pens_of(opts)
     for s in sheets:
         s["pens"] = dict(pens)
+        s["units"] = _SHEET_UNITS[0]
         s["block"] = [["PROJECT", project.get("name") or "CAD2IngeTrazo project"],
                       ["CLIENT", project.get("client") or ""],
                       ["DRAWING", s["title"]],
@@ -899,6 +911,8 @@ def _build_sheet(s: dict, views: dict):
     comp.border = True
     comp.border_mm = 0.5
     pens = dict(PENS, **(s.get("pens") or {}))
+    _SHEET_UNITS[0] = s.get("units") or "metric"
+    imp = _SHEET_UNITS[0] == "imperial"
     proj = []
     for f in s["frames"]:
         x, y, w, h = f["rect"]
@@ -999,7 +1013,8 @@ def _build_sheet(s: dict, views: dict):
             cot = CotaItem(
                 x_mm=pa[0], y_mm=pa[1], dx_mm=dx, dy_mm=dy,
                 scale_n=fr.scale_n, sep_mm=sep_c, offset_mm=0.5,
-                text_mm=2.0, decimals=2, units="m", ends="tick",
+                text_mm=2.0, decimals=0 if imp else 2,
+                units="ft-in" if imp else "m", ends="tick",
                 stroke_mm=float(pens["dim"]), text_pos="above",
                 text_along="middle", text_align="aligned")
             # NOT anchored: the composer re-snaps an anchored dimension's
@@ -1238,6 +1253,38 @@ def apply_pens(win, scene, pens) -> int:
     return n
 
 
+#: called (pens, sheets changed) when the sheet window's line weights change
+ON_PENS = []
+
+
+def current_pens(comp) -> dict:
+    """The line weights of the sheet shown (its first drawing / dimension)."""
+    out = dict(PENS)
+    try:
+        c = comp.comp
+        if c is not None and c.frames:
+            f = c.frames[0]
+            out.update(cut=float(f.pen_cut_mm),
+                       profile=float(f.pen_profile_mm),
+                       edge=float(f.pen_edge_mm))
+        if c is not None and getattr(c, "cotas", None):
+            out["dim"] = float(c.cotas[0].stroke_mm)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def sync_bar(win, pens) -> None:
+    """The sheet window's line-weight boxes show ``pens``."""
+    comp = getattr(win, "_composer", None)
+    spins = getattr(comp, "_c2i_pen_spins", None) or {}
+    for k, sp in spins.items():
+        if k in pens:
+            sp.blockSignals(True)
+            sp.setValue(float(pens[k]))
+            sp.blockSignals(False)
+
+
 # ---- zoom on the sheets: the wheel (no Ctrl needed) and buttons ------------
 def install_zoom(win) -> None:
     """The sheet window zooms like a CAD: the mouse wheel zooms in / out
@@ -1302,6 +1349,53 @@ def install_zoom(win) -> None:
                      "(Shift + wheel scrolls)")
         b.clicked.connect(lambda _=False, f=fn: f())
         lay.addWidget(b)
+    # the line weights, right here in the sheet window: live on every
+    # CAD2IngeTrazo sheet (the panel's Sheets ▸ Line weights follow)
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDoubleSpinBox, QLabel
+    sep = QFrame(bar)
+    sep.setFrameShape(QFrame.VLine)
+    lay.addWidget(sep)
+    lab = QLabel("Line weights (mm):", bar)
+    lay.addWidget(lab)
+    cur = current_pens(comp)
+    spins = {}
+    for k, text, tip in (("cut", "Cut", "What the section cuts (walls, "
+                          "columns in a plan)"),
+                         ("profile", "Profile", "Outlines and silhouettes"),
+                         ("edge", "Edge", "The plain edges seen beyond"),
+                         ("dim", "Dim", "Dimension lines")):
+        sp = QDoubleSpinBox(bar)
+        sp.setRange(0.05, 3.0)
+        sp.setSingleStep(0.05)
+        sp.setDecimals(2)
+        sp.setPrefix(text + " ")
+        sp.setValue(float(cur.get(k, PENS[k])))
+        sp.setToolTip(tip + " — line weight on paper, mm")
+        sp.setKeyboardTracking(False)
+        lay.addWidget(sp)
+        spins[k] = sp
+    timer = QTimer(bar)
+    timer.setSingleShot(True)
+    timer.setInterval(250)
+
+    def push():
+        pens = {k: round(sp.value(), 3) for k, sp in spins.items()}
+        try:
+            n = apply_pens(win, comp._scene(), pens)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("sheets.bar pens")
+            return
+        for cb in list(ON_PENS):
+            try:
+                cb(pens, n)
+            except Exception:  # noqa: BLE001
+                pass
+    timer.timeout.connect(push)
+    for sp in spins.values():
+        sp.valueChanged.connect(lambda _v: timer.start())
+    comp._c2i_pen_spins = spins
     bar.adjustSize()
 
     class _Place(QObject):

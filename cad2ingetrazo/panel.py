@@ -368,6 +368,27 @@ def remove_old_guards(app=None):
     return n
 
 
+def _walk_world(groups, parent=None):
+    """(group, its world matrix | None) through the groups inside groups."""
+    for g in groups or []:
+        xf = getattr(g, "xform", None)
+        m = parent
+        if xf is not None:
+            m = (parent * xf) if parent is not None else xf
+        yield g, m
+        yield from _walk_world(getattr(g, "children", None), m)
+
+
+def _xf_gap(a, b) -> float:
+    """How far apart two placements are (their origins), 0 when equal."""
+    def o(m):
+        if m is None:
+            return (0.0, 0.0, 0.0)
+        return (m(0, 3), m(1, 3), m(2, 3))
+    pa, pb = o(a), o(b)
+    return sum((x - y) ** 2 for x, y in zip(pa, pb))
+
+
 class Panel(QWidget):
     def __init__(self, app) -> None:
         super().__init__()
@@ -376,6 +397,7 @@ class Panel(QWidget):
         self.win = app.window
         try:                       # the sheet window: CAD-like zoom
             from . import sheets as _SH
+            _SH.ON_PENS[:] = [self._pens_from_bar]
             _SH.hook_composer(self.win)
         except Exception:  # noqa: BLE001
             log_error("panel.hook_composer")
@@ -552,7 +574,6 @@ class Panel(QWidget):
             "«Level · Ground Floor» (move, hide, copy, export it as one); "
             "double-click a floor group to reach its elements")
         self.c_lvgroups.toggled.connect(self._level_groups)
-        row.addWidget(self.c_lvgroups)
         row.addWidget(_btn("Select level", self.select_level,
                            "Select the whole level picked at the top — its "
                            "walls, doors, windows, structure, finishes, "
@@ -584,6 +605,7 @@ class Panel(QWidget):
                                                                 on))
         row.addWidget(self.c_edges)
         row.addWidget(self.c_prof)
+        row.addWidget(self.c_lvgroups)
         row.addStretch(1)
         self.lay.addLayout(row)
         self.status = QLabel("")
@@ -612,6 +634,18 @@ class Panel(QWidget):
             act.blockSignals(False)
         self.flash(("Model edges" if name == "edges" else "Profiles")
                    + (" on" if on else " off"))
+
+    def _terrace_rkind(self, *_a):
+        doc = self.doc()
+        k = self.t_rkind.currentData() or "wall3"
+        if doc["settings"].get("terrace_rail_kind", "wall3") == k:
+            return
+        doc["settings"]["terrace_rail_kind"] = k
+        PJ.store_only(self.vp, doc)
+        self.flash(("Terrace edges: a 3\" plastered wall" if k == "wall3"
+                    else "Terrace edges: railing on a 3\" upstand")
+                   + " — «Terrace railings from the CAD» (or a roof terrace) "
+                   "builds them", 8000)
 
     def _scene_named(self, name):
         return next((v for v in self.vp.scene.saved_views if v.name == name),
@@ -2967,6 +3001,15 @@ class Panel(QWidget):
                            "The terraces' floors (the open terraces and the "
                            "roof terraces) in this IngeTrazo material"))
         f.addRow("Terrace floor material", row)
+        self.t_rkind = QComboBox()
+        self.t_rkind.addItem("3\" wall (plastered)", "wall3")
+        self.t_rkind.addItem("Railing on a 3\" upstand", "railing")
+        self.t_rkind.setToolTip("What the terraces' edges get: a 3\" thick "
+                                "plastered wall, the railing's height "
+                                "(default), or the railing type above on a "
+                                "3\" × 6\" upstand")
+        self.t_rkind.currentIndexChanged.connect(self._terrace_rkind)
+        f.addRow("Terrace edge", self.t_rkind)
         f.addRow(_btn("Terrace railings from the CAD (this level)",
                       self._terrace_rails,
                       "Railings all round this level's terraces: along the "
@@ -3638,6 +3681,16 @@ class Panel(QWidget):
                 cb.blockSignals(True)
                 cb.setChecked(bool(getattr(st_, nm)))
                 cb.blockSignals(False)
+        if hasattr(self, "t_rkind"):
+            self.t_rkind.blockSignals(True)
+            self.t_rkind.setCurrentIndex(max(self.t_rkind.findData(
+                st.get("terrace_rail_kind", "wall3")), 0))
+            self.t_rkind.blockSignals(False)
+        if hasattr(self, "x_units"):
+            self.x_units.blockSignals(True)
+            self.x_units.setCurrentIndex(max(self.x_units.findData(
+                st.get("sheet_units", "metric")), 0))
+            self.x_units.blockSignals(False)
         for k, sp in getattr(self, "x_pens", {}).items():
             sp.blockSignals(True)
             sp.setValue(float(st.get("sheet_pen_" + k, sp.value())
@@ -3806,16 +3859,72 @@ class Panel(QWidget):
                    "for several), then right-click one ▸ CAD2IngeTrazo ▸ "
                    "«Extend the slab to the selected walls»", 15000)
 
-    def _selected(self):
-        """(kind, id) of the CAD2IngeTrazo element selected, or None."""
+    def _selected(self, fresh=False):
+        """(kind, id) of the CAD2IngeTrazo element selected, or None. A
+        whole floor selected («Floors as groups»): the element of that
+        floor under the mouse — so a slab, a wall… keeps its commands
+        (extend, shafts, edit) without opening the floor group first."""
+        floor = False
         for e in list(self.vp.scene.selection):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
+                if tag and tag["type"] == "levelgroup":
+                    floor = True
+                    continue
                 if tag and tag["type"] != "symbols":
                     self._sel_seg = tag.get("seg")
                     return tag["type"], tag["id"]
+        if floor:
+            # the element under the mouse when the floor was picked (a
+            # right-click: where it is now)
+            key_ = tuple(sorted(id(e) for e in self.vp.scene.selection))
+            memo = getattr(self, "_floor_memo", None)
+            if fresh or memo is None or memo[0] != key_:
+                hit = self._under_cursor()
+                if hit is None and memo is not None and memo[0] == key_:
+                    hit = memo[1]
+                self._floor_memo = (key_, hit)
+            hit = self._floor_memo[1]
+            if hit is not None:
+                self._sel_seg = hit[2]
+                return hit[0], hit[1]
         self._sel_seg = None
         return None
+
+    def _under_cursor(self):
+        """(kind, id, seg) of the CAD2IngeTrazo element under the mouse in
+        the 3D view (inside the floor groups too), or None."""
+        try:
+            from PySide6.QtGui import QCursor
+            vp = self.vp
+            pos = vp.mapFromGlobal(QCursor.pos())
+            if not vp.rect().contains(pos):
+                return None
+            pick = getattr(vp, "pick_face_placement", None)
+            if pick is None:
+                return None
+            face, pl = pick(float(pos.x()), float(pos.y()))
+            if face is None or pl is None:
+                return None
+            tag = PJ.tag_of(pl)
+            if tag and tag["type"] not in ("symbols", "levelgroup"):
+                return tag["type"], tag["id"], tag.get("seg")
+            mesh = getattr(pl, "mesh", None)
+            want = getattr(pl, "xform", None)
+            best = None
+            for g, xf in _walk_world(vp.scene.groups):
+                if getattr(g, "mesh", None) is not mesh:
+                    continue
+                t = PJ.tag_of(g)
+                if not t or t["type"] in ("symbols", "levelgroup"):
+                    continue
+                d = _xf_gap(xf, want)
+                if best is None or d < best[0]:
+                    best = (d, (t["type"], t["id"], t.get("seg")))
+            return best[1] if best else None
+        except Exception:  # noqa: BLE001
+            log_error("panel._under_cursor")
+            return None
 
     def _watch_selection(self):
         try:
@@ -4098,14 +4207,23 @@ class Panel(QWidget):
 
     # ---- right-click: edit the element where it is ------------------------------
     def _selected_all(self):
-        """Every CAD2IngeTrazo element selected: [(kind, id)]."""
+        """Every CAD2IngeTrazo element selected: [(kind, id)] (a whole
+        floor selected: the element of it under the mouse)."""
         out = []
+        floor = False
         for e in list(self.vp.scene.selection):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
+                if tag and tag["type"] == "levelgroup":
+                    floor = True
+                    continue
                 if tag and tag["type"] != "symbols" and \
                         (tag["type"], tag["id"]) not in out:
                     out.append((tag["type"], tag["id"]))
+        if floor and not out:
+            one = self._selected()
+            if one:
+                out.append(one)
         return out
 
     def context_menu(self, menu) -> None:
@@ -4123,13 +4241,19 @@ class Panel(QWidget):
                          lambda d_=drawn: self._shaft_drawn(d_, True))
             m_.addAction("Close the shaft / opening here",
                          lambda d_=drawn: self._shaft_close_drawn(d_))
-        sel = self._selected()
+        sel = self._selected(fresh=True)
         if not sel:
             return
         doc = self.doc()
         rec = PJ.find_record(doc, *sel)
         if rec is None:
             return
+        if sel != self._sel_key:
+            self._sel_key = sel
+            try:
+                self._fill_selected()
+            except Exception:  # noqa: BLE001
+                pass
         self._sel_key = sel
         name = rec.get("name") or {"stair": "Stair",
                                    "stairrail": "Stair railing"}.get(
@@ -5790,6 +5914,12 @@ class Panel(QWidget):
         f.addRow(self.x_elev)
         f.addRow(self.x_sect)
         f.addRow(self.x_dims)
+        self.x_units = QComboBox()
+        self.x_units.addItem("Metric (m, m²)", "metric")
+        self.x_units.addItem("Imperial (ft-in, ft²)", "imperial")
+        self.x_units.setToolTip("The dimensions and room areas on the "
+                                "sheets — whatever unit the model is drawn in")
+        f.addRow("Sheet units", self.x_units)
         # the line weights of the sheets (paper mm)
         self.x_pens = {}
         rowp = QHBoxLayout()
@@ -5876,8 +6006,24 @@ class Panel(QWidget):
                 "sect": "yes" if self.x_sect.isChecked() else "no",
                 "dims": "yes" if self.x_dims.isChecked() else "no",
                 "rooms": "yes", "prefix": "A-",
+                "units": (self.x_units.currentData()
+                          if hasattr(self, "x_units") else "metric"),
                 **{"pen_" + k: round(sp.value(), 3)
                    for k, sp in getattr(self, "x_pens", {}).items()}}
+
+    def _pens_from_bar(self, pens, n):
+        """The sheet window's line weights changed: kept, and shown here."""
+        for k, sp in getattr(self, "x_pens", {}).items():
+            if k in pens:
+                sp.blockSignals(True)
+                sp.setValue(float(pens[k]))
+                sp.blockSignals(False)
+        doc = self.doc()
+        if any(doc["settings"].get("sheet_pen_" + k) != v
+               for k, v in pens.items()):
+            for k, v in pens.items():
+                doc["settings"]["sheet_pen_" + k] = v
+            PJ.store_only(self.vp, doc)
 
     def _sheet_pens(self):
         from . import sheets
@@ -5888,6 +6034,7 @@ class Panel(QWidget):
         PJ.store_only(self.vp, doc)
         try:
             n = sheets.apply_pens(self.win, self.vp.scene, pens)
+            sheets.sync_bar(self.win, pens)
         except Exception as e:  # noqa: BLE001
             log_error("panel.sheet_pens")
             self.flash(f"Line weights not applied — {e}", 8000)
@@ -5900,6 +6047,11 @@ class Panel(QWidget):
     def make_sheets(self):
         from . import sheets
         doc = self.doc()
+        if hasattr(self, "x_units") and doc["settings"].get(
+                "sheet_units", "metric") != self.x_units.currentData():
+            doc["settings"]["sheet_units"] = self.x_units.currentData()
+            PJ.store_only(self.vp, doc)
+            doc = self.doc()
         doc["arch"]["_plaster"] = float(doc["settings"].get("plaster_t",
                                                             0.0127) or 0.0)
         QApplication.setOverrideCursor(Qt.WaitCursor)

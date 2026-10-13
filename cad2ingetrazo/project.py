@@ -90,6 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
+    "terrace_rail_kind": "wall3", "sheet_units": "metric",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -730,8 +731,65 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
         n0 += 1
         w_["name"] = f"Terrace railing {n0}"
         w_["rail"] = rk
-    out["corners"] = join_rail_corners(doc, lid)
+    if terrace_as_wall(st):
+        out["corners"] = as_parapet_walls(made, rh)
+    else:
+        out["corners"] = join_rail_corners(doc, lid)
     return out
+
+
+#: the terrace parapet as a wall (by default): 3" thick, plastered
+PARAPET_T = 0.0762
+
+
+def terrace_as_wall(st) -> bool:
+    """Terrace railings built as a 3" plastered wall (the default) rather
+    than a railing on an upstand."""
+    return (st or {}).get("terrace_rail_kind", "wall3") == "wall3"
+
+
+def as_parapet_walls(walls, h) -> int:
+    """Railing records made walls: 3" thick, ``h`` tall, standing on the
+    terrace floor — then their corners joined (each run to where the two
+    lines cross), so the walls meet and merge clean. The corners joined."""
+    for w in walls:
+        for k in ("rail", "curb_h", "curb_t", "curb_d", "np_a", "np_b",
+                  "cj_a", "cj_b"):
+            w.pop(k, None)
+        w["t"] = PARAPET_T
+        w["height"] = round(float(h), 4)
+        w["base"] = 0.0
+        w["type"] = "solid"          # (a railing record came as glass)
+    return join_wall_ends(walls)
+
+
+def join_wall_ends(walls, reach=0.35) -> int:
+    """Straight walls whose ends come within ``reach`` of each other: both
+    run to where their centre lines cross (a clean mitred corner)."""
+    def cross(a, b, c, d):
+        r = (b[0] - a[0], b[1] - a[1])
+        q = (d[0] - c[0], d[1] - c[1])
+        den = r[0] * q[1] - r[1] * q[0]
+        if abs(den) < 1e-9:
+            return None
+        t = ((c[0] - a[0]) * q[1] - (c[1] - a[1]) * q[0]) / den
+        return (a[0] + r[0] * t, a[1] + r[1] * t)
+    n = 0
+    ws = [w for w in walls if w.get("kind", "line") == "line"]
+    for i, w in enumerate(ws):
+        for v in ws[i + 1:]:
+            for ea in ("a", "b"):
+                for eb in ("a", "b"):
+                    if math.dist(w[ea], v[eb]) > reach:
+                        continue
+                    x = cross(w["a"], w["b"], v["a"], v["b"])
+                    if x is None or math.dist(x, w[ea]) > reach or \
+                            math.dist(x, v[eb]) > reach:
+                        continue
+                    w[ea] = [round(x[0], 4), round(x[1], 4)]
+                    v[eb] = [round(x[0], 4), round(x[1], 4)]
+                    n += 1
+    return n
 
 
 TERRACE_TILE = (0.72, 0.42, 0.30)          # terracotta tiles
@@ -818,7 +876,10 @@ def roof_terrace(doc, slab_id) -> dict:
         w_["name"] = f"Terrace railing {n0 + k_}"
         w_["rail"] = rk
     arch["walls"] += made
-    join_rail_corners(doc, lid)
+    if terrace_as_wall(st):
+        as_parapet_walls(made, rh)
+    else:
+        join_rail_corners(doc, lid)
     rt = set(doc.get("roof_terraces") or [])
     rt.add(s["id"])
     doc["roof_terraces"] = sorted(rt)
@@ -3536,9 +3597,31 @@ def _groups(arch, doc=None):
     finally:
         arch.pop("_ramps", None)
         arch.pop("_door_lift", None)
+    # 0: the lines where two walls meet — hidden (clean junctions)
+    seam = {}
+    try:
+        from . import seams as SM
+        by_lv, slabs_ = {}, []
+        for i_, e in enumerate(elems):
+            if e["kind"] == "wall" and not (recs.get(("wall", e["id"]))
+                                            or {}).get("rail"):
+                by_lv.setdefault(e["level"], []).append((i_, e["faces"]))
+            elif e["kind"] == "slab":
+                slabs_.append((i_, e["faces"]))
+        sol_ = SM.solids_of([x for v in by_lv.values() for x in v]
+                            + slabs_)
+        for lv_, ws_ in by_lv.items():
+            seam.update(SM.hidden_edges(ws_, solids=sol_))
+        if slabs_:
+            seam.update(SM.hidden_edges([], slabs_, solids=sol_))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.seams")
+        seam = {}
     # 1: each element in its own frame, and how many share its shape
     prep, count = [], {}
-    for e in elems:
+    id_of = {id(e): i_ for i_, e in enumerate(elems)}
+    for i_, e in enumerate(elems):
         z0 = info[e["level"]]["z0"] if e["level"] in info else 0.0
         fr = CP.frame_of_element(e, arch, walls_by, z0)
         lf = CP.local_faces(e["faces"], fr)
@@ -3546,12 +3629,14 @@ def _groups(arch, doc=None):
         mir = _type_mirror(e, recs, walls_by, cat)
         if mir:
             lf = CP.mirror_lf(lf, *mir)
-        key = (e["kind"], CP.shape_key(lf))
+        hid = SM.to_local(seam[i_], fr) if (i_ in seam and not mir) \
+            else frozenset()
+        key = (e["kind"], CP.shape_key(lf), hid)
         count[key] = count.get(key, 0) + 1
         prep.append((e, fr, lf, key, bool(mir)))
     protos: dict = {}
 
-    def mesh_of(lf):
+    def mesh_of(lf, hid=frozenset()):
         mesh = Mesh()
         for lp, hs, col in lf:
             face = mesh.add_face([QVector3D(*q) for q in lp],
@@ -3561,6 +3646,11 @@ def _groups(arch, doc=None):
                 if len(col) > 3 and col[3] < 1.0:
                     face.attrs["opacity"] = col[3]
         _soften(mesh)
+        if hid:
+            try:
+                SM.apply(mesh, hid)
+            except Exception:  # noqa: BLE001
+                pass
         return mesh
     out = []
     for e, fr, lf, key, mirrored in prep:
@@ -3595,13 +3685,17 @@ def _groups(arch, doc=None):
                 continue
         if count[key] > 1 or mirrored:        # a component: shared mesh
             if key not in protos:
-                protos[key] = mesh_of(lf)
+                protos[key] = mesh_of(lf, key[2])
             g = Group(protos[key], name=name)
             g.xform = CP.placement(fr)
             g.component = True
         else:                                 # one of a kind: a group
             g = Group(mesh_of(CP.local_faces(e["faces"],
-                                             (0.0, 0.0, 0.0, 0.0))),
+                                             (0.0, 0.0, 0.0, 0.0)),
+                              SM.to_local(seam[id_of[id(e)]],
+                                          (0.0, 0.0, 0.0, 0.0))
+                              if id_of.get(id(e)) in seam and not mirrored
+                              else frozenset()),
                       name=name)
             g.component = False
         g.material = {"color": COLOR[e["kind"]], "opacity": 1.0}

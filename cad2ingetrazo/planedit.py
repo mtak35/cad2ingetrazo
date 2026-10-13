@@ -488,7 +488,7 @@ class PlanEdit:
                                  f"{len_txt(abs(x1 - x0))} × "
                                  f"{len_txt(abs(y1 - y0))}")
                 painter.restore()
-        info = self._wall() if self.drag is None else self.drag["info"]
+        info = self._wall() if self.drag is None else self.drag.get("info")
         if info is None:
             return
         z = info["z"]
