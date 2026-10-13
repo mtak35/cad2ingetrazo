@@ -91,8 +91,25 @@ def _stations(p, q, step):
     return [_lerp(p, q, k / n) for k in range(n + 1)]
 
 
+def _run_on(pts, ea, eb):
+    """The path run on ``ea`` before its first point and ``eb`` past its
+    last (level): a corner's rails meeting full, not notched."""
+    pts = list(pts)
+    if len(pts) >= 2 and ea > 0:
+        p, q = pts[0], pts[1]
+        L = math.hypot(q[0] - p[0], q[1] - p[1]) or 1.0
+        pts[0] = (p[0] - (q[0] - p[0]) / L * ea,
+                  p[1] - (q[1] - p[1]) / L * ea, p[2])
+    if len(pts) >= 2 and eb > 0:
+        p, q = pts[-2], pts[-1]
+        L = math.hypot(q[0] - p[0], q[1] - p[1]) or 1.0
+        pts[-1] = (q[0] + (q[0] - p[0]) / L * eb,
+                   q[1] + (q[1] - p[1]) / L * eb, q[2])
+    return pts
+
+
 def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
-          floor=None) -> list:
+          floor=None, no_post=(False, False), run_on=(0.0, 0.0)) -> list:
     """The railing along ``path`` ([(x, y, z)…]) — see the module doc.
     ``gap``: the balusters' (or the glass panels' / pipe posts') spacing,
     0 = the type's own."""
@@ -135,6 +152,10 @@ def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
             if not posts or math.hypot(s[0] - posts[-1][0],
                                        s[1] - posts[-1][1]) > 0.05:
                 posts.append(s)
+    if posts and no_post[1]:                  # a corner's shared post:
+        posts = posts[:-1]                    # the other railing's
+    if posts and no_post[0]:
+        posts = posts[1:]
     if kind != "glass":
         for s in posts:
             b_ = s
@@ -148,7 +169,8 @@ def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
             out += _bar(b_, _up(s, H - 0.02), post_w, post_w, rail_c)
     # the handrail on top, the run of the whole path
     hw = {"wood": 0.07}.get(kind, 0.05)
-    for p, q in segs:
+    rp = _run_on(pts, run_on[0] and hw / 2, run_on[1] and hw / 2)
+    for p, q in zip(rp, rp[1:]):
         out += _bar(_up(p, H - 0.025), _up(q, H - 0.025), hw, 0.05, rail_c)
     for p, q in segs:
         if kind == "ss_bars":

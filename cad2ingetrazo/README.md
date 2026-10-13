@@ -304,3 +304,11 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Doors**: Edit properties shows the frame's real width and thickness (not 0). Door handle types: lever on a rose, lever on a back plate with lock, round knob, pull bar, D pull, flush pull, none — the handles' geometry redrawn (rose, neck, lever with turned end, plates, standoffs).
 - **Curtains**: on by default (they were off in your model); section 9 turns them off.
 - **Section box**: the cut walls, slabs, frames and railings show solid cut faces in their material's colour (a shade darker), not hollow shells.
+
+## 3.15.3
+- **Walls attached to the slab's underside** (by default): a wall stops under the slab over it; its ½" plaster carries on up over the slab's edge, and the slab's free edges (a porch, a cantilever, a terrace) are plastered too — no slab line on the elevations.
+- **Terrace railing corners**: railings meeting at a corner run to the same point, with ONE common post on the corner, and their handrails and upstands carried on to meet full — clean edges.
+- **Door ↔ window ↔ plain opening**: changing an opening's type (Edit properties ▸ Type, or right-click ▸ «Make it a…» door / window / plain opening, for every opening selected) gives it that type's own height, sill and kind (section 5's import values); its width and place stay. A plain opening (void) can be made a door or a window the same way.
+- **Stray elements** (top ▸ «Stray elements…»): elements the CAD draws on a floor they are not on (no floor slab under them) are found and can be kept out of the 3D model — or put back; right-click any element ▸ «Not on this floor — keep out of 3D». A kept-out wall's doors and windows go with it.
+- **Roof terrace** (section 7 ▸ «Selected slab → roof terrace floor», or right-click a slab): the slab becomes a roof terrace floor — a «Roof terrace» level over it when there is none, railings on 3" upstands along its open edges (one per straight run, corners joined), terrace tiles and rain-water outlets.
+- **Materials from IngeTrazo's library**: a room's Edit properties take a Floor material, a Walls material (its walls' faces looking into it) and a Ceiling material from IngeTrazo's own material library (the Materials tray's swatches) — for every room selected; section 7 ▸ «Terrace floor material» for the terraces' floors.

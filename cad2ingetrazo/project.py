@@ -89,7 +89,7 @@ DEFAULTS = {
     "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
-    "terrace_rails": True, "plaster_t": 0.0127,
+    "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
     "section_box": None,
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
     "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
@@ -123,6 +123,7 @@ def empty() -> dict:
             "site": SITE_.load_site(None), "grid": SITE_.load_grid(None),
             "stairs": [], "stair_cad": {}, "materials": {},
             "parking": {}, "ramps": [], "marks": {}, "landscape": {},
+            "off3d": [], "roof_terraces": [],
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}}
@@ -169,6 +170,11 @@ def load(raw) -> dict:
                     if k in ids and isinstance(v, list)}
     doc["landscape"] = {k: v for k, v in (raw.get("landscape") or {}).items()
                         if k in ids and isinstance(v, list)}
+    # elements kept out of the 3D model (drawn on a floor they are not on)
+    doc["off3d"] = sorted({str(k) for k in raw.get("off3d") or []
+                           if isinstance(k, str) and "|" in k})
+    doc["roof_terraces"] = [str(k) for k in raw.get("roof_terraces") or []
+                            if isinstance(k, str)]
     # the component types' marks and names (components.py)
     doc["comp_names"] = {}
     for k, v in (raw.get("comp_names") or {}).items():
@@ -722,7 +728,191 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
         n0 += 1
         w_["name"] = f"Terrace railing {n0}"
         w_["rail"] = rk
+    out["corners"] = join_rail_corners(doc, lid)
     return out
+
+
+TERRACE_TILE = (0.72, 0.42, 0.30)          # terracotta tiles
+DRAIN = (0.15, 0.15, 0.16)
+
+
+def roof_terrace(doc, slab_id) -> dict:
+    """The slab made a roof terrace floor: the level over it (a «Roof
+    terrace» level when there is none), a railing on a 3" upstand along
+    every free edge (corners joined, one post each), terrace tiles over
+    it and rain-water outlets at its corners. {"level", "railings"} or
+    {"error"}."""
+    from . import slabedges as SE
+    arch = doc["arch"]
+    s = find_record(doc, "slab", slab_id)
+    if s is None or not s.get("corners"):
+        return {"error": "Select a slab"}
+    lid = SE.floor_level_of(doc, s)
+    if lid == s["level"] and (s.get("top") or s.get("roof")):
+        ids_ = [lv["id"] for lv in arch["levels"]]
+        if ids_.index(lid) != len(ids_) - 1:
+            return {"error": "This slab has a floor over it already"}
+        before = set(ids_)
+        arch["levels"] = M.add_floor(arch["levels"], height=3.048)
+        new = next(x for x in arch["levels"] if x["id"] not in before)
+        new["name"] = "Roof terrace"
+        arch["levels"] = M.fix_levels(arch["levels"])
+        lid = new["id"]
+    st = doc["settings"]
+    rk = st.get("parapet_rail", "ss_bars")
+    rk = rk if rk and rk != "solid" else "ss_bars"
+    rh = float(st.get("rail_h", 1.0668))
+    # its edges no wall of the terrace floor stands on (the walls under
+    # the slab carry it — the edge over them is open up here)
+    from shapely.geometry import LineString as _LS
+    from shapely.ops import unary_union as _uu
+    ws_ = [w for w in arch["walls"] if w["level"] == lid]
+    cover = _uu([p_.buffer(0.2) for p_ in SE.wall_polys(
+        [w for w in ws_ if not w.get("rail")])] +
+        [_LS([tuple(w["a"]), tuple(w["b"])]).buffer(0.2) for w in ws_
+         if w.get("rail") and "a" in w]) if ws_ else None
+    ring = [tuple(p_) for p_ in SE._ring_pts(SE._poly(s["corners"]))]
+    edges = []
+    for a, b in zip(ring, ring[1:] + ring[:1]):
+        g_ = _LS([a, b])
+        g_ = g_.difference(cover) if cover is not None else g_
+        for q in getattr(g_, "geoms", [g_]):
+            if q.geom_type == "LineString" and q.length >= 0.3:
+                c_ = list(q.coords)
+                edges.append((c_[0], c_[-1]))
+    merged = []                          # one railing per straight run
+    for a, b in edges:
+        if merged:
+            pa, pb = merged[-1]
+            if math.dist(pb, a) < 0.02:
+                u1 = (pb[0] - pa[0], pb[1] - pa[1])
+                u2 = (b[0] - a[0], b[1] - a[1])
+                cr = u1[0] * u2[1] - u1[1] * u2[0]
+                if abs(cr) < 1e-3 * math.hypot(*u1) * math.hypot(*u2) and \
+                        u1[0] * u2[0] + u1[1] * u2[1] > 0:
+                    merged[-1] = (pa, b)
+                    continue
+        merged.append((a, b))
+    edges = merged
+    recs = []
+    for a, b in edges:
+        L = math.dist(a, b)
+        if L < 0.3:
+            continue
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        nx, ny = -uy, ux                         # into the slab
+        o_ = CURB_T / 2
+        recs.append({"kind": "line",
+                     "a": [round(a[0] + nx * o_, 4), round(a[1] + ny * o_, 4)],
+                     "b": [round(b[0] + nx * o_, 4), round(b[1] + ny * o_, 4)],
+                     "t": 0.05, "align": "centre", "side": 1,
+                     "height": round(rh, 4), "base": 0.0, "level": lid,
+                     "rail": rk, "curb_h": CURB_H, "curb_t": CURB_T,
+                     "curb_d": round(float(s.get("t", 0.15)), 4)})
+    made = M.new_walls(arch["walls"], recs)
+    n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
+             .startswith("Terrace railing"))
+    for k_, w_ in enumerate(made, 1):
+        w_["name"] = f"Terrace railing {n0 + k_}"
+        w_["rail"] = rk
+    arch["walls"] += made
+    join_rail_corners(doc, lid)
+    rt = set(doc.get("roof_terraces") or [])
+    rt.add(s["id"])
+    doc["roof_terraces"] = sorted(rt)
+    if not any(r["level"] == lid for r in arch["rooms"]):
+        pts = s["corners"]
+        arch["rooms"] = M._rooms(arch["rooms"] + [{
+            "id": "", "level": lid, "name": "Roof terrace",
+            "x": sum(p[0] for p in pts) / len(pts),
+            "y": sum(p[1] for p in pts) / len(pts)}],
+            {lv["id"] for lv in arch["levels"]})
+    return {"level": lid, "railings": len(made)}
+
+
+def roof_terrace_faces(doc, s, z_top) -> list:
+    """Terrace tiles over the slab (inside its upstands, round its holes)
+    and a rain-water outlet (a 6" grate) at each of its corners."""
+    from . import slabedges as SE
+    sp = SE._poly(s["corners"])
+    if sp.is_empty:
+        return []
+    for h in s.get("holes") or []:
+        sp = sp.difference(SE._poly(h))
+    inner = sp.buffer(-(CURB_T + 0.005), join_style=2)
+    out = []
+    t_ = 0.025
+    for g in getattr(inner, "geoms", [inner]):
+        if g.geom_type != "Polygon" or g.area < 0.1:
+            continue
+        piece = {"outer": S._ccw(list(g.exterior.coords)[:-1]),
+                 "holes": [list(reversed(S._ccw(list(r.coords)[:-1])))
+                           for r in g.interiors]}
+        for f in W.solid(piece, z_top, z_top + t_):
+            d_ = dict(f) if isinstance(f, dict) else {"loop": f,
+                                                      "holes": []}
+            d_["color"] = TERRACE_TILE
+            out.append(d_)
+        # an outlet in each corner (inside the upstands)
+        ring = list(g.exterior.coords)[:-1]
+        for c in ring[::max(1, len(ring) // 4)][:4]:
+            cx, cy = g.centroid.x, g.centroid.y
+            L = math.hypot(cx - c[0], cy - c[1]) or 1.0
+            px, py = c[0] + (cx - c[0]) / L * 0.15, c[1] + (cy - c[1]) / L * 0.15
+            sq = {"outer": [(px - 0.075, py - 0.075), (px + 0.075, py - 0.075),
+                            (px + 0.075, py + 0.075), (px - 0.075, py + 0.075)],
+                  "holes": []}
+            for f in W.solid(sq, z_top + t_, z_top + t_ + 0.004):
+                d_ = dict(f) if isinstance(f, dict) else {"loop": f,
+                                                          "holes": []}
+                d_["color"] = DRAIN
+                out.append(d_)
+    return out
+
+
+def join_rail_corners(doc, lid, reach=0.35) -> int:
+    """The railings of level ``lid`` meeting at corners joined there: both
+    run to where their lines cross, ONE post on the corner (the other
+    railing's left out), handrails and upstands carried on to meet full —
+    clean corners. The number of corners joined."""
+    rails = [w for w in doc["arch"]["walls"] if w["level"] == lid
+             and w.get("rail") and w.get("kind", "line") == "line"]
+    for w in rails:
+        for k_ in ("np_a", "np_b", "cj_a", "cj_b"):
+            w.pop(k_, None)
+
+    def cross(a, b, c, d):
+        r = (b[0] - a[0], b[1] - a[1])
+        s_ = (d[0] - c[0], d[1] - c[1])
+        den = r[0] * s_[1] - r[1] * s_[0]
+        if abs(den) < 1e-9 * (math.hypot(*r) * math.hypot(*s_) + 1e-12):
+            return None
+        t = ((c[0] - a[0]) * s_[1] - (c[1] - a[1]) * s_[0]) / den
+        return (a[0] + r[0] * t, a[1] + r[1] * t)
+    n = 0
+    for i, w in enumerate(rails):
+        for j in range(i + 1, len(rails)):
+            v = rails[j]
+            for ew in ("a", "b"):
+                for ev in ("a", "b"):
+                    p, q = tuple(w[ew]), tuple(v[ev])
+                    if math.dist(p, q) > reach:
+                        continue
+                    x = cross(tuple(w["a"]), tuple(w["b"]), tuple(v["a"]),
+                              tuple(v["b"]))
+                    if x is None or math.dist(x, p) > 2 * reach:
+                        x = ((p[0] + q[0]) / 2, (p[1] + q[1]) / 2)
+                        straight = True
+                    else:
+                        straight = False
+                    w[ew] = [round(x[0], 4), round(x[1], 4)]
+                    v[ev] = [round(x[0], 4), round(x[1], 4)]
+                    v["np_" + ev] = True         # one post: w's
+                    if not straight:
+                        w["cj_" + ew] = True
+                        v["cj_" + ev] = True
+                    n += 1
+    return n
 
 
 def tidy_all_slabs(doc, lids=None) -> dict:
@@ -751,6 +941,91 @@ def tidy_all_slabs(doc, lids=None) -> dict:
                 SE.tidy_slab(e)
         out[lid] = (k, n0, sum(len(e["corners"]) for e in ss))
     return out
+
+
+def stray_elements(doc, lid) -> list:
+    """Elements of level ``lid`` that look drawn on a floor they are not
+    on: on an upper floor, standing where the floor under it has no slab
+    to carry them (a porch's pillars, a lower roof, the plot's walls the
+    plan repeats) — [(kind, id, name, why)]."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    if lid not in ids:
+        return []
+    el = elevations(arch)
+    order = sorted(range(len(ids)), key=lambda i: el[i])
+    k = [ids[i] for i in order].index(lid)
+    out = []
+    if k == 0:
+        return out                       # the ground carries everything
+    floors = [SE._poly(s["corners"]) for s in _floor_slabs(doc, lid)
+              if s.get("corners")]
+    if not floors:
+        return out
+    support = unary_union(floors).buffer(0.3, join_style=2)
+    for w in arch["walls"]:
+        if w["level"] != lid or w.get("kind", "line") != "line":
+            continue
+        c_ = W.centre(w)
+        P = LineString([c_.p0, c_.p1]).buffer(float(w["t"]) / 2,
+                                               cap_style=2)
+        if P.area > 0 and P.difference(support).area > 0.5 * P.area:
+            out.append(("wall", w["id"], w.get("name", "wall"),
+                        "no floor slab under it"))
+    for e in arch["structure"]:
+        if e["level"] != lid or e["type"] not in ("column", "beam", "core"):
+            continue
+        try:
+            if e["type"] == "column":
+                P = Polygon(S.column_outline(e, 0.0))
+            elif e["type"] == "beam":
+                P = LineString([tuple(e["a"]), tuple(e["b"])]).buffer(
+                    float(e.get("w", 0.2)) / 2, cap_style=2)
+            else:
+                P = Polygon([tuple(q) for q in e["corners"]])
+        except Exception:  # noqa: BLE001
+            continue
+        if P.area > 0 and P.difference(support).area > 0.5 * P.area:
+            out.append((e["type"], e["id"], e.get("name", e["type"]),
+                        "no floor slab under it"))
+    for st in doc.get("stairs") or []:
+        if st["level"] != lid:
+            continue
+        P = Polygon([tuple(q[:2]) for q in st["corners"]])
+        if P.area > 0 and P.difference(support).area > 0.5 * P.area:
+            out.append(("stair", st["id"], "Stair", "no floor slab under it"))
+    return out
+
+
+def opening_as(o, kind, st) -> dict:
+    """The opening made a door / window / plain opening (void) with that
+    type's own defaults (the import's height, sill and type — section 5):
+    its width and place kept; a door as wide as a window two leaves or
+    sliding by its width (the door rule)."""
+    o = dict(o)
+    old = o.get("kind")
+    o["kind"] = kind
+    for k_ in ("frame_w", "frame_d", "panel", "handle", "leaves", "head",
+               "glass"):
+        if old != kind:
+            o.pop(k_, None)
+    if kind == "door":
+        o.update(h=float(st.get("door_h", 2.1336)), sill=0.0,
+                 style=st.get("door_style", "hinged"))
+        o.setdefault("swing", "left")
+        o.setdefault("face", 1)
+        door_rule(o)
+        opening_types(o, st)
+    elif kind == "window":
+        o.update(h=float(st.get("win_h", 1.2)), sill=float(st.get("sill", 0.9)),
+                 style=st.get("win_style", "sliding"))
+    else:                                   # a plain opening, door high
+        o.update(h=float(st.get("door_h", 2.1336)), sill=0.0, style="")
+    return o
 
 
 def revise_empty_openings(doc, lids=None) -> dict:
@@ -4225,6 +4500,19 @@ def group_by_level(groups, arch) -> list:
     return out + rest
 
 
+def _walk_groups(groups) -> list:
+    out = []
+
+    def walk(gs):
+        for g in gs:
+            out.append(g)
+            kids = getattr(g, "children", None)
+            if kids:
+                walk(kids)
+    walk(groups)
+    return out
+
+
 def all_groups(scene) -> list:
     """The scene's groups and the groups inside them (a level group's
     elements)."""
@@ -4958,6 +5246,21 @@ def _edge_groups(doc):
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project thresholds")
+        for s_ in arch["structure"]:     # roof terraces over this floor
+            if s_["type"] != "slab" or s_["id"] not in set(
+                    doc.get("roof_terraces") or []):
+                continue
+            try:
+                from . import slabedges as _SE
+                if _SE.floor_level_of(doc, s_) != lid:
+                    continue
+                fs = roof_terrace_faces(doc, s_, elev[i])
+                if fs:
+                    parts.append(("terrace_floor", "Roof terrace tiles", fs,
+                                  TERRACE_TILE, "IfcCovering"))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project roof terrace")
         if st.get("curtains"):
             try:
                 from . import curtains as CT
@@ -5366,7 +5669,26 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project._grid_groups")
+    off_ = set(doc.get("off3d") or [])
+    if off_:                         # (a wall's doors and windows go too)
+        offw = {k.split("|", 1)[1] for k in off_ if k.startswith("wall|")}
+        off_ |= {f"opening|{o['id']}" for o in arch["openings"]
+                 if o["wall"] in offw}
+    if off_:                         # drawn on a floor they are not on
+        def _keep(g):
+            t_ = tag_of(g) or {}
+            return f"{t_.get('type')}|{t_.get('id')}" not in off_ and \
+                f"{'stair' if t_.get('type') == 'stairrail' else ''}|" \
+                f"{t_.get('id')}" not in off_
+        new_groups = [g for g in new_groups if _keep(g)]
     _apply_materials(new_groups, doc.get("materials") or {})
+    try:                             # the rooms' / terraces' materials
+        from . import matlib as ML
+        ML.apply(new_groups, doc, tag_of,
+                 lambda gs: _walk_groups(gs))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project room materials")
     box = doc["settings"].get("section_box")
     if box and len(box) == 6:            # the section box: cut to it
         try:

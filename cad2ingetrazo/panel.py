@@ -140,6 +140,7 @@ def _form(parent):
 
 #: what the «Selected element» part shows, per kind:
 #: (key, label, kind, options / range)
+from . import matlib as _ML  # noqa: E402
 FIELDS = {
     "wall": [("type", "Wall type", "choice", ("solid", "curtain")),
              ("glass", "Curtain wall glass", "choice",
@@ -244,7 +245,13 @@ FIELDS = {
                "metal")),
              ("ceiling_h", "Ceiling height from floor", "len", (2.0, 8.0)),
              ("finish", "Floor finish thickness", "len", (0.0, 0.3)),
-             ("fz", "Floor sunk (−) / raised (+)", "len", (-3.0, 3.0))],
+             ("fz", "Floor sunk (−) / raised (+)", "len", (-3.0, 3.0)),
+             ("mat_floor", "Floor material (IngeTrazo library)", "choice",
+              _ML.keys_for("floor")),
+             ("mat_wall", "Walls material (inside this room)", "choice",
+              _ML.keys_for("wall")),
+             ("mat_ceil", "Ceiling material", "choice",
+              _ML.keys_for("ceiling"))],
     "roof": [("kind", "Type", "choice", ("flat", "gable", "hip")),
              ("slope", "Slope", "deg", (5.0, 75.0)),
              ("overhang", "Overhang", "len", (0.0, 3.0)),
@@ -279,6 +286,7 @@ def _choice_labels() -> dict:
 
 CHOICE_LABELS = _choice_labels()
 from .engine import structure as _S_PT  # noqa: E402
+CHOICE_LABELS.update(_ML.labels())
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
@@ -503,7 +511,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.15.2</span>")
+                   "3.15.3</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -545,6 +553,11 @@ class Panel(QWidget):
                            "walls, doors, windows, structure, finishes, "
                            "stairs… (one level = one layer: "
                            "«C2I · <level>»)"))
+        row.addWidget(_btn("Stray elements…", self.stray_dialog,
+                           "Elements the CAD draws on this floor that are "
+                           "not on it (an upper floor's plan repeating the "
+                           "porch pillars, the plot walls…): found, and kept "
+                           "out of the 3D model — or put back"))
         row.addWidget(_btn("Section box", self.section_box,
                            "3D: the model cut to a box (as Revit's section "
                            "box) — set its six faces, fit it to the level or "
@@ -2154,6 +2167,12 @@ class Panel(QWidget):
         self._sb_dlg = dlg
         dlg.show()
 
+    def _terrace_mat(self):
+        doc = self.doc()
+        k_ = self.t_mat.currentData() or ""
+        doc["settings"]["terrace_mat"] = "" if k_ == "none" else k_
+        self.commit(doc, "Terrace floors: " + self.t_mat.currentText())
+
     def _terrace_rails(self):
         lid, lv = self.level()
         if not lid:
@@ -2176,6 +2195,133 @@ class Panel(QWidget):
             return
         self.commit(doc, f"{n} terrace railing(s) on «{lv['name']}», "
                          f"each on a 3\" upstand")
+
+    def _roof_terrace(self, slab_id=None):
+        sel = self._sel_key
+        if slab_id is None:
+            if not sel or sel[0] != "slab":
+                self.flash("Select a slab in the model first")
+                return
+            slab_id = sel[1]
+        doc = self.doc()
+        r = PJ.roof_terrace(doc, slab_id)
+        if r.get("error"):
+            self.flash(r["error"])
+            return
+        lv = next((x for x in doc["arch"]["levels"] if x["id"] == r["level"]),
+                  {})
+        self.commit(doc, f"Roof terrace on «{lv.get('name', '')}»: "
+                         f"{r['railings']} railing(s), tiles, outlets")
+
+    def _off3d_selected(self):
+        sels = [x for x in self._selected_all() if x[0] != "symbols"] \
+            or ([self._sel_key] if self._sel_key else [])
+        if not sels:
+            return
+        doc = self.doc()
+        off = set(doc.get("off3d") or [])
+        for k_, i_ in sels:
+            off.add(f"{'stair' if k_ == 'stairrail' else k_}|{i_}")
+        doc["off3d"] = sorted(off)
+        self.commit(doc, f"{len(sels)} element(s) kept out of 3D — "
+                         "«Stray elements…» puts them back")
+
+    def stray_dialog(self):
+        """The level's stray elements (found) and those kept out of 3D:
+        keep the found ones out, or put the kept ones back."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QDialog, QListWidget, QListWidgetItem
+        lid, lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        doc = self.doc()
+        found = [f for f in PJ.stray_elements(doc, lid)
+                 if f"{f[0]}|{f[1]}" not in set(doc.get("off3d") or [])]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Stray elements — {lv['name']}")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"<b>Found on «{lv['name']}»</b> — drawn on this floor but with "
+            "no floor under them (tick the ones to keep out of 3D):"))
+        lst = QListWidget()
+        for k_, i_, nm, why in found:
+            it = QListWidgetItem(f"{nm}  ({k_}) — {why}")
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            it.setData(Qt.UserRole, f"{k_}|{i_}")
+            lst.addItem(it)
+        if not found:
+            lst.addItem("Nothing found — or select elements in 3D, "
+                        "right-click ▸ «Not on this floor — keep out of 3D»")
+        lay.addWidget(lst)
+        kept = list(doc.get("off3d") or [])
+        lay.addWidget(QLabel(f"<b>Kept out of 3D:</b> {len(kept)} element(s) "
+                             "(all levels)"))
+        lst2 = QListWidget()
+        for key in kept:
+            k_, i_ = key.split("|", 1)
+            rec = PJ.find_record(doc, k_, i_)
+            it = QListWidgetItem(f"{(rec or {}).get('name', i_)}  ({k_})")
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked)
+            it.setData(Qt.UserRole, key)
+            lst2.addItem(it)
+        lay.addWidget(lst2)
+        row = QHBoxLayout()
+
+        def keep_out():
+            d_ = self.doc()
+            off = set(d_.get("off3d") or [])
+            n = 0
+            for r in range(lst.count()):
+                it = lst.item(r)
+                key = it.data(Qt.UserRole)
+                if key and it.checkState() == Qt.Checked:
+                    off.add(key)
+                    n += 1
+            d_["off3d"] = sorted(off)
+            dlg.accept()
+            if n:
+                self.commit(d_, f"{n} stray element(s) kept out of 3D")
+
+        def put_back():
+            d_ = self.doc()
+            back = {lst2.item(r).data(Qt.UserRole) for r in range(lst2.count())
+                    if lst2.item(r).checkState() == Qt.Checked}
+            if not back:
+                back = set(d_.get("off3d") or [])     # none ticked: all
+            d_["off3d"] = sorted(set(d_.get("off3d") or []) - back)
+            dlg.accept()
+            self.commit(d_, f"{len(back)} element(s) back in 3D")
+        row.addWidget(_btn("Keep the ticked found ones out of 3D", keep_out,
+                           primary=True))
+        row.addWidget(_btn("Put back (ticked, or all)", put_back))
+        lay.addLayout(row)
+        _place_on_screen(dlg, QCursor.pos())
+        dlg.exec()
+
+    def _convert_opening(self, sel, kind):
+        doc = self.doc()
+        ids = [i for k, i in self._selected_all() if k == "opening"] \
+            or [sel[1]]
+        n = 0
+        for oid in ids:
+            rec = PJ.find_record(doc, "opening", oid)
+            if rec is None or rec.get("kind") == kind:
+                continue
+            new = PJ.opening_as(rec, kind, doc["settings"])
+            why = PJ.check_record(doc, "opening", dict(new, id=rec["id"]))
+            if why:
+                self.flash(f"{rec.get('name')} not changed — {why}")
+                continue
+            rec.clear()
+            rec.update(new)
+            n += 1
+        if n:
+            lab = {"door": "door(s)", "window": "window(s)",
+                   "void": "plain opening(s)"}[kind]
+            self.commit(doc, f"{n} made {lab}, with that type's sizes")
 
     def _empty_openings(self):
         lid, lv = self.level()
@@ -2766,12 +2912,29 @@ class Panel(QWidget):
         f.addRow(_btn("Apply to every parapet and balcony", self._parapet_rail,
                       "Terrace and roof parapets, balcony railings — on all "
                       "levels"))
+        row = QHBoxLayout()
+        self.t_mat = QComboBox()
+        _lab = _ML.labels()
+        for k_ in _ML.keys_for("terrace"):
+            self.t_mat.addItem(_lab.get(k_, k_), k_)
+        row.addWidget(self.t_mat, 1)
+        row.addWidget(_btn("Apply", self._terrace_mat,
+                           "The terraces' floors (the open terraces and the "
+                           "roof terraces) in this IngeTrazo material"))
+        f.addRow("Terrace floor material", row)
         f.addRow(_btn("Terrace railings from the CAD (this level)",
                       self._terrace_rails,
                       "Railings all round this level's terraces: along the "
                       "railing lines its CAD plan draws there (the terrace "
                       "slab stops at them — nothing beyond the railing) and "
                       "on every other open edge, each on a 3\" upstand"))
+        f.addRow(_btn("Selected slab → roof terrace floor",
+                      self._roof_terrace,
+                      "Select a slab in the model first: it becomes a roof "
+                      "terrace — a floor over it (a «Roof terrace» level "
+                      "when there is none), railings on 3\" upstands along "
+                      "its free edges with one post at each corner, "
+                      "terrace tiles and rain-water outlets"))
         f.addRow(_btn("Terraces over the floors below", self._terrace,
                       "The part of the floor below's roof this floor leaves "
                       "open: a parapet on its open edges, joined clean at "
@@ -3760,6 +3923,11 @@ class Panel(QWidget):
         if sel[0] == "wall":
             new = PJ.wall_attach(doc, rec, new.pop("top_att", None),
                                  new.pop("bot_att", None), new)
+        if sel[0] == "opening" and new["kind"] != rec.get("kind"):
+            # a door made a window (or back, or an opening one): that
+            # type's own height, sill and type
+            new = dict(PJ.opening_as(new, new["kind"], doc["settings"]),
+                       w=new["w"], pos=new["pos"])
         if sel[0] == "opening" and new["kind"] == "door":
             new["sill"] = 0.0
         if sel[0] == "stair":           # riser / tread / steps re-laid
@@ -3777,6 +3945,21 @@ class Panel(QWidget):
         to_cw = sel[0] == "wall" and new.get("type") == "curtain" and \
             rec.get("type") != "curtain"
         rec.update(new)
+        for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
+            if rec.get(k_) == "none":
+                rec.pop(k_, None)
+        if sel[0] == "room":      # the other rooms selected: same materials
+            for k2, i2 in self._selected_all():
+                if k2 != "room" or i2 == sel[1]:
+                    continue
+                r2 = PJ.room_record(doc, i2)
+                if r2 is None:
+                    continue
+                for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
+                    if rec.get(k_):
+                        r2[k_] = rec[k_]
+                    else:
+                        r2.pop(k_, None)
         if to_cw:                 # its windows go, its doors fitted
             PJ.to_curtain(doc, [rec["id"]])
         if sel[0] == "ramp":
@@ -3940,6 +4123,13 @@ class Panel(QWidget):
             log_error("panel.context_menu types")
         if sel[0] == "opening":
             from .engine import structure as S_
+            mc = sub.addMenu("Make it a…")
+            for k_, lab_ in (("door", "Door"), ("window", "Window"),
+                             ("void", "Plain opening (no door / window)")):
+                a_ = mc.addAction(lab_, lambda k_=k_: self._convert_opening(
+                    sel, k_))
+                a_.setCheckable(True)
+                a_.setChecked(rec.get("kind") == k_)
             if rec["kind"] == "door":
                 types = S_.DOOR_STYLES
             else:
@@ -4026,6 +4216,8 @@ class Panel(QWidget):
                           lambda: self._slab_to_beams(sel[1]))
             sub.addAction("Extend slab up to the columns",
                           lambda: self._slab_to_columns(sel[1]))
+            sub.addAction("Make it a roof terrace floor",
+                          lambda: self._roof_terrace(sel[1]))
             sub.addAction("Tidy the slab's edges",
                           lambda: self._slab_tidy(sel[1]))
             mine = [m for m in doc.get("man_shafts") or []
@@ -4083,6 +4275,8 @@ class Panel(QWidget):
         if sel[0] == "stairrail":
             sub.addAction("Put back the railing's deleted pieces",
                           lambda: self._rail_restore(sel[1]))
+        sub.addAction("Not on this floor — keep out of 3D",
+                      self._off3d_selected)
         sub.addSeparator()
         sub.addAction("Show in the panel", self._fill_selected)
         sub.addAction("Delete this railing piece" if sel[0] == "stairrail"

@@ -299,6 +299,10 @@ def _walls(raw, level_ids: set) -> list[dict]:
                                         0.03), 0.5)
                 rec["curb_d"] = min(max(float(w.get("curb_d") or 0.0),
                                         0.0), 1.0)
+            if w.get("rail"):                # a corner shared with another
+                for k_ in ("np_a", "np_b", "cj_a", "cj_b"):
+                    if w.get(k_):
+                        rec[k_] = True
             if w.get("cwin"):                # a leg of a corner window
                 rec["cwin"] = str(w["cwin"])[:40]
                 rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
@@ -376,6 +380,11 @@ def _rooms(raw, level_ids: set) -> list[dict]:
         if r.get("ceiling") in ("none", "gypsum", "tiles", "pop", "wood",
                                 "pvc", "metal"):
             rec["ceiling"] = r["ceiling"]
+        # its materials (IngeTrazo's library: «category/file»)
+        for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
+            v_ = r.get(k_)
+            if isinstance(v_, str) and v_ and v_ != "none" and "/" in v_:
+                rec[k_] = v_[:120]
         out.append(rec)
     return out
 

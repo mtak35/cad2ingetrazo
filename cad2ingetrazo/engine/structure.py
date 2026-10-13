@@ -74,6 +74,71 @@ def _plastered(w, p):
     return out
 
 
+def _plaster_skin(w, pieces, p, z_a, z_b) -> list:
+    """The plaster coats of a (plastered) wall carried on from its top
+    ``z_a`` up to ``z_b`` (over the slab's edge): a ``p`` thick skin on
+    each face, flush with the wall's plastered faces."""
+    seg = W.centre(w)
+    p0, u = seg.p0, seg.u
+    n = (-u[1], u[0])
+    T2 = float(w["t"]) / 2
+    out = []
+    for sg in (1.0, -1.0):
+        # this face's own ends (a mitred corner makes the two faces differ)
+        # — the skin's edges on the wall face's, the seam drawn smooth
+        ss = []
+        for pc in pieces or []:
+            for q in pc["outer"]:
+                c = (q[0] - p0[0]) * n[0] + (q[1] - p0[1]) * n[1]
+                if abs(c - sg * T2) < 1e-4:
+                    ss.append((q[0] - p0[0]) * u[0] + (q[1] - p0[1]) * u[1])
+        if len(ss) < 2:
+            ss = [0.0, seg.L]
+        s0, s1 = min(ss), max(ss)
+        if s1 - s0 < 0.01:
+            continue
+        ca, cb = (T2 - p, T2) if sg > 0 else (-T2, -T2 + p)
+        out += _box(p0, u, n, s0, s1, ca, cb, z_a, z_b, None)
+    return out
+
+
+def _slab_edge_plaster(s, walls, plans, p, bot, top) -> list:
+    """A ``p`` thick plaster band round the slab's edge where no wall's
+    plaster runs up over it (its free edges: a porch, a cantilever)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    sp = Polygon([tuple(q) for q in s["corners"]])
+    if not sp.is_valid:
+        sp = sp.buffer(0)
+    ring = sp.buffer(p, join_style=2).difference(sp)
+    wp = []
+    for w in walls:
+        if w.get("rail"):
+            continue
+        for pc in plans.get(w["id"]) or []:
+            try:
+                wp.append(Polygon(pc["outer"]).buffer(0.003))
+            except Exception:  # noqa: BLE001
+                pass
+    if wp:
+        ring = ring.difference(unary_union(wp))
+    out = []
+    for g in getattr(ring, "geoms", [ring]):
+        if g.geom_type != "Polygon" or g.area < 1e-5:
+            continue
+        piece = {"outer": _ccw(list(g.exterior.coords)[:-1]),
+                 "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
+                           for r in g.interiors]}
+        for f in W.solid(piece, bot, top):
+            lp = f["loop"] if isinstance(f, dict) else f
+            hs = f.get("holes", []) if isinstance(f, dict) else []
+            out.append({"loop": lp, "holes": hs, "color": PLASTER_COLOR})
+    return out
+
+
+PLASTER_COLOR = (0.88, 0.86, 0.82, 1.0)     # plastered and painted
+
+
 def levels_info(doc: dict, elevations) -> dict:
     """Per level id: z0 (floor), height, the slab thickness ON it, and
     ``under`` = where things of this level stop (the next level's slab
@@ -1852,8 +1917,7 @@ def build(doc: dict, elevations) -> list[dict]:
             if not pieces:
                 continue
             b = z0 + float(w.get("base", 0.0))
-            top = (z0 + li["height"] - 0.002 if w.get("_pl") else under) \
-                if w.get("height", "level") == "level" \
+            top = under if w.get("height", "level") == "level" \
                 else z0 + float(w["height"])
             if top - b < 0.01:
                 continue
@@ -1871,13 +1935,23 @@ def build(doc: dict, elevations) -> list[dict]:
                     ct = float(w.get("curb_t") or 0.0762) + 2 * pl_
                     cd = float(w.get("curb_d") or 0.0) if pl_ > 0 else 0.0
                     faces = []                   # down over the slab's edge
-                    for p_, q_ in zip(path, path[1:]):
+                    ra = bool(w.get("cj_a"))     # a corner: run on to meet
+                    rb = bool(w.get("cj_b"))     # the other upstand full
+                    cp = RL._run_on(path, ra and ct / 2, rb and ct / 2)
+                    for p_, q_ in zip(cp, cp[1:]):
                         faces += RL._panel(p_, q_, -cd, ch, ct, RL.MASONRY)
                     path = [(x, y, z + ch) for x, y, z in path]
                     faces += RL.faces(path, max(top - b - ch, 0.3), w["rail"],
-                                      float(w["t"]))
+                                      float(w["t"]),
+                                      no_post=(bool(w.get("np_a")),
+                                               bool(w.get("np_b"))),
+                                      run_on=(ra, rb))
                 else:
-                    faces = RL.faces(path, top - b, w["rail"], float(w["t"]))
+                    faces = RL.faces(path, top - b, w["rail"], float(w["t"]),
+                                     no_post=(bool(w.get("np_a")),
+                                              bool(w.get("np_b"))),
+                                     run_on=(bool(w.get("cj_a")),
+                                             bool(w.get("cj_b"))))
             elif w.get("type") == "curtain":       # glass on a grid
                 seg = W.centre(w)
                 faces = curtain_wall(w, seg, ops, z0, b, top)
@@ -1913,6 +1987,13 @@ def build(doc: dict, elevations) -> list[dict]:
                                     "okind": o["kind"], "faces": parts})
             else:
                 faces = [f for pc in pieces for f in W.solid(pc, b, top)]
+            # the plaster carried on up over the slab's edge (the wall
+            # itself stops under the slab, attached to it)
+            if w.get("_pl") and w.get("height", "level") == "level" and \
+                    w.get("kind", "line") == "line" and \
+                    z0 + li["height"] - top > 0.01:
+                faces = faces + _plaster_skin(w, pieces, PLASTER(doc), top,
+                                              z0 + li["height"] - 0.001)
             out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
                         "name": w["name"], "level": lid, "faces": faces})
         for cid, legs in cwins.items():
@@ -2023,6 +2104,12 @@ def build(doc: dict, elevations) -> list[dict]:
             faces_ = []
             for piece in parts_:
                 faces_ += W.solid(piece, bot, top)
+            if s.get("top") and PLASTER(doc) > 0:
+                try:                     # plaster on its free edges too
+                    faces_ += _slab_edge_plaster(s, mine, plans,
+                                                 PLASTER(doc), bot, top)
+                except Exception:  # noqa: BLE001
+                    pass
             out.append(_el(s, lid, faces_))
         # footings: under the slab of their level
         ftop = z0 - li["slab"]
