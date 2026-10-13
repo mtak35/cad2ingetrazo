@@ -374,6 +374,11 @@ class Panel(QWidget):
         self.app = app
         self.vp = app.viewport
         self.win = app.window
+        try:                       # the sheet window: CAD-like zoom
+            from . import sheets as _SH
+            _SH.hook_composer(self.win)
+        except Exception:  # noqa: BLE001
+            log_error("panel.hook_composer")
         self._sel_key = None
         self._building = False
         outer = QVBoxLayout(self)
@@ -563,10 +568,50 @@ class Panel(QWidget):
                            "box) — set its six faces, fit it to the level or "
                            "to what you selected, or turn it off"))
         self.lay.addLayout(row)
+        # the model's edges in the 3D view: on / off (and the profiles)
+        row = QHBoxLayout()
+        st_ = getattr(self.vp.scene, "display_style", None)
+        self.c_edges = QCheckBox("Model edges")
+        self.c_edges.setToolTip("Draw the lines along the edges of the "
+                                "model in the 3D view — off: faces only")
+        self.c_edges.setChecked(bool(getattr(st_, "edges", True)))
+        self.c_edges.toggled.connect(lambda on: self._edge_style("edges",
+                                                                 on))
+        self.c_prof = QCheckBox("Profiles")
+        self.c_prof.setToolTip("The outline of each shape drawn thicker")
+        self.c_prof.setChecked(bool(getattr(st_, "profiles", False)))
+        self.c_prof.toggled.connect(lambda on: self._edge_style("profiles",
+                                                                on))
+        row.addWidget(self.c_edges)
+        row.addWidget(self.c_prof)
+        row.addStretch(1)
+        self.lay.addLayout(row)
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color: #8a94a3;")
         self.lay.addWidget(self.status)
+
+    def _edge_style(self, name, on):
+        """The 3D view's style: its edges / profiles on or off (the host's
+        Style menu follows)."""
+        st = getattr(self.vp.scene, "display_style", None)
+        if st is None or not hasattr(st, name):
+            self.flash("This IngeTrazo has no edge setting in its style")
+            return
+        setter = getattr(self.win, "_set_style_field", None)
+        if setter is not None:
+            setter(name, bool(on))
+        else:
+            setattr(st, name, bool(on))
+            self.vp.update()
+        act = getattr(self.win, "_act_style_edges" if name == "edges"
+                      else "_act_style_profiles", None)
+        if act is not None and act.isChecked() != bool(on):
+            act.blockSignals(True)
+            act.setChecked(bool(on))
+            act.blockSignals(False)
+        self.flash(("Model edges" if name == "edges" else "Profiles")
+                   + (" on" if on else " off"))
 
     def _scene_named(self, name):
         return next((v for v in self.vp.scene.saved_views if v.name == name),
@@ -3586,6 +3631,18 @@ class Panel(QWidget):
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
         self.r_curt.setChecked(bool(st.get("curtains")))
         self.r_plaster.setValue(float(st.get("plaster_t", 0.0127) or 0.0))
+        st_ = getattr(self.vp.scene, "display_style", None)
+        for cb, nm in ((getattr(self, "c_edges", None), "edges"),
+                       (getattr(self, "c_prof", None), "profiles")):
+            if cb is not None and st_ is not None and hasattr(st_, nm):
+                cb.blockSignals(True)
+                cb.setChecked(bool(getattr(st_, nm)))
+                cb.blockSignals(False)
+        for k, sp in getattr(self, "x_pens", {}).items():
+            sp.blockSignals(True)
+            sp.setValue(float(st.get("sheet_pen_" + k, sp.value())
+                              or sp.value()))
+            sp.blockSignals(False)
         k_ = self.r_curt_col.findData(st.get("curtain_color", "cream"))
         self.r_curt_col.setCurrentIndex(max(k_, 0))
         k_ = self.r_curt_len.findData(st.get("curtain_len", "floor"))
@@ -5733,6 +5790,25 @@ class Panel(QWidget):
         f.addRow(self.x_elev)
         f.addRow(self.x_sect)
         f.addRow(self.x_dims)
+        # the line weights of the sheets (paper mm)
+        self.x_pens = {}
+        rowp = QHBoxLayout()
+        for k, lab, tip in (("cut", "Cut", "What the section plane cuts: "
+                             "walls, columns in the plan"),
+                            ("profile", "Profile", "Outlines and "
+                             "silhouettes"),
+                            ("edge", "Edge", "The plain edges seen beyond"),
+                            ("dim", "Dim", "The dimension lines")):
+            sp = _spin(0.05, 2.0, {"cut": 0.5, "profile": 0.35, "edge": 0.18,
+                                   "dim": 0.18}[k], 0.05, 2, " mm")
+            sp.setToolTip(f"{tip} — line weight on paper (mm)")
+            rowp.addWidget(QLabel(lab))
+            rowp.addWidget(sp)
+            self.x_pens[k] = sp
+        f.addRow("Line weights", rowp)
+        f.addRow(_btn("Apply line weights to the sheets", self._sheet_pens,
+                      "The sheets already made take the new line weights "
+                      "(and «Make sheets» uses them from now on)"))
         f.addRow(_btn("Make sheets", self.make_sheets, "A plan per level, "
                       "elevations, sections, rooms, title blocks — made "
                       "again, it replaces only its own sheets", primary=True))
@@ -5799,7 +5875,27 @@ class Panel(QWidget):
                 "elev": "yes" if self.x_elev.isChecked() else "no",
                 "sect": "yes" if self.x_sect.isChecked() else "no",
                 "dims": "yes" if self.x_dims.isChecked() else "no",
-                "rooms": "yes", "prefix": "A-"}
+                "rooms": "yes", "prefix": "A-",
+                **{"pen_" + k: round(sp.value(), 3)
+                   for k, sp in getattr(self, "x_pens", {}).items()}}
+
+    def _sheet_pens(self):
+        from . import sheets
+        doc = self.doc()
+        pens = sheets.pens_of(self._sheet_opts())
+        for k, v in pens.items():
+            doc["settings"]["sheet_pen_" + k] = v
+        PJ.store_only(self.vp, doc)
+        try:
+            n = sheets.apply_pens(self.win, self.vp.scene, pens)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel.sheet_pens")
+            self.flash(f"Line weights not applied — {e}", 8000)
+            return
+        self.flash(f"Line weights on {n} sheet(s): cut {pens['cut']} · "
+                   f"profile {pens['profile']} · edge {pens['edge']} · "
+                   f"dimensions {pens['dim']} mm" if n else
+                   "Line weights kept — «Make sheets» will use them", 7000)
 
     def make_sheets(self):
         from . import sheets

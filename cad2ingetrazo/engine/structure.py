@@ -62,7 +62,9 @@ def _plastered(w, p):
     slab line on the elevations)."""
     if p <= 0 or w.get("rail") or w.get("type") == "curtain":
         return w
-    out = dict(w, t=float(w["t"]) + 2 * p, _pl=True)
+    # the plaster is IN the wall's total thickness (as drawn): the wall
+    # keeps its width; the coats are its outer ``p`` on each face
+    out = dict(w, _pl=True)
     if w.get("kind", "line") == "line" and w.get("align", "centre") != \
             "centre":
         c = W.centre(w)
@@ -102,38 +104,44 @@ def _plaster_skin(w, pieces, p, z_a, z_b) -> list:
     return out
 
 
-def _slab_edge_plaster(s, walls, plans, p, bot, top) -> list:
-    """A ``p`` thick plaster band round the slab's edge where no wall's
-    plaster runs up over it (its free edges: a porch, a cantilever)."""
+def _shp_pieces(g) -> list:
+    """Shapely (multi)polygon -> solid pieces (outer ccw, holes cw)."""
+    out = []
+    for q in getattr(g, "geoms", [g]):
+        if q.geom_type != "Polygon" or q.is_empty or q.area < 1e-6:
+            continue
+        out.append({"outer": _ccw(list(q.exterior.coords)[:-1]),
+                    "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
+                              for r in q.interiors]})
+    return out
+
+
+def _slab_plaster(s, parts, p):
+    """The slab with its edges plastered all round — its outline AND its
+    openings (stair wells, shafts): the concrete core inset ``p`` and a
+    ``p`` plaster band in its place, flush with the wall faces under it,
+    so no slab line shows on any elevation.  -> (core pieces, band
+    pieces)."""
     from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-    sp = Polygon([tuple(q) for q in s["corners"]])
+    sp = Polygon([tuple(q) for q in s["corners"]],
+                 [[tuple(q) for q in h] for h in s.get("holes") or []
+                  if len(h) >= 3])
     if not sp.is_valid:
         sp = sp.buffer(0)
-    ring = sp.buffer(p, join_style=2).difference(sp)
-    wp = []
-    for w in walls:
-        if w.get("rail"):
-            continue
-        for pc in plans.get(w["id"]) or []:
-            try:
-                wp.append(Polygon(pc["outer"]).buffer(0.003))
-            except Exception:  # noqa: BLE001
-                pass
-    if wp:
-        ring = ring.difference(unary_union(wp))
-    out = []
-    for g in getattr(ring, "geoms", [ring]):
-        if g.geom_type != "Polygon" or g.area < 1e-5:
-            continue
-        piece = {"outer": _ccw(list(g.exterior.coords)[:-1]),
-                 "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
-                           for r in g.interiors]}
-        for f in W.solid(piece, bot, top):
-            lp = f["loop"] if isinstance(f, dict) else f
-            hs = f.get("holes", []) if isinstance(f, dict) else []
-            out.append({"loop": lp, "holes": hs, "color": PLASTER_COLOR})
-    return out
+    core = sp.buffer(-p, join_style=2)
+    if core.is_empty:
+        return parts, []
+    band = sp.difference(core)
+    new = []
+    for pc in parts:
+        try:
+            P = Polygon(pc["outer"], pc.get("holes") or [])
+            if not P.is_valid:
+                P = P.buffer(0)
+            new += _shp_pieces(P.intersection(core))
+        except Exception:  # noqa: BLE001
+            new.append(pc)
+    return new or parts, _shp_pieces(band)
 
 
 PLASTER_COLOR = (0.88, 0.86, 0.82, 1.0)     # plastered and painted
@@ -1989,9 +1997,7 @@ def build(doc: dict, elevations) -> list[dict]:
                 faces = [f for pc in pieces for f in W.solid(pc, b, top)]
             # the plaster carried on up over the slab's edge (the wall
             # itself stops under the slab, attached to it)
-            if w.get("_pl") and w.get("height", "level") == "level" and \
-                    w.get("kind", "line") == "line" and \
-                    z0 + li["height"] - top > 0.01:
+            if False and w.get("_pl"):          # (the slab's band does it)
                 faces = faces + _plaster_skin(w, pieces, PLASTER(doc), top,
                                               z0 + li["height"] - 0.001)
             out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
@@ -2101,15 +2107,21 @@ def build(doc: dict, elevations) -> list[dict]:
                                  for h in s.get("holes") or []]}]
             if cut:
                 parts_ = _minus(s, cut) or parts_
+            band_ = []
+            if PLASTER(doc) > 0:
+                try:                     # plaster on all its edges
+                    parts_, band_ = _slab_plaster(s, parts_, PLASTER(doc))
+                except Exception:  # noqa: BLE001
+                    band_ = []
             faces_ = []
             for piece in parts_:
                 faces_ += W.solid(piece, bot, top)
-            if s.get("top") and PLASTER(doc) > 0:
-                try:                     # plaster on its free edges too
-                    faces_ += _slab_edge_plaster(s, mine, plans,
-                                                 PLASTER(doc), bot, top)
-                except Exception:  # noqa: BLE001
-                    pass
+            for piece in band_:
+                for f in W.solid(piece, bot, top):
+                    lp = f["loop"] if isinstance(f, dict) else f
+                    hs = f.get("holes", []) if isinstance(f, dict) else []
+                    faces_.append({"loop": lp, "holes": hs,
+                                   "color": PLASTER_COLOR})
             out.append(_el(s, lid, faces_))
         # footings: under the slab of their level
         ftop = z0 - li["slab"]

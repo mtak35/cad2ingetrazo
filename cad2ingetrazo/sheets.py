@@ -52,7 +52,11 @@ TB_W, TB_H = 180.0, 33.0   # the title block
 TITLE_H = 12.0         # mm under a frame for its title
 DIM_ROOM = 20.0        # mm round a plan for its dimension chains
 PAD_M = 0.6            # m of model round a drawing inside its frame
-DIM_SEP = (7.0, 13.0)  # mm off the wall face: the chain, the overall size
+MIN_DIM_MM = 1.2       # mm on paper: the shortest dimension in a chain
+EXT_M = 0.6            # m: the longest extension line inside the building
+DIM_SEP = (7.0, 13.0)  # mm outside the building: the chain, the overall size
+#: the pens (paper mm) unless set: cut, profile, edge, dimension
+PENS = {"cut": 0.5, "profile": 0.35, "edge": 0.18, "dim": 0.18}
 
 
 # =====================================================================================
@@ -406,10 +410,13 @@ def _outline(walls):
 
 
 def chains(doc, level_id, z):
-    """The plan's dimension chains: along every long side of the
-    outline, from corner to corner through the jambs of the openings in
-    that face, and the overall size of the level on each of its four
-    sides. [(points [(x, y, z)…], outward (nx, ny), sep_mm)]."""
+    """The plan's dimension chains, as drawn by hand: on each of the four
+    sides ONE straight chain — every corner and every opening jamb seen
+    from that side, all on one line, parallel to the side, a fixed
+    distance outside the building — and outside it the overall size.
+    [(points [(x, y, z)…], outward (nx, ny), sep_mm, overall, edge
+    point)] — ``edge``: the point of the level's outline furthest out on
+    that side (the chain's line is ``sep_mm`` beyond it)."""
     from .engine import walls as W
     walls = [w for w in doc.get("walls") or [] if w["level"] == level_id]
     ids = {w["id"] for w in walls}
@@ -423,8 +430,14 @@ def chains(doc, level_id, z):
         for s in (o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2):
             jambs.append(((seg.p0[0] + seg.u[0] * s,
                            seg.p0[1] + seg.u[1] * s), w["t"]))
-    out = []
     rings = _outline(walls)
+    if not rings:
+        return []
+    xs = [v for r in rings for v in (r.bounds[0], r.bounds[2])]
+    ys = [v for r in rings for v in (r.bounds[1], r.bounds[3])]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    sides = {(0.0, -1.0): [], (0.0, 1.0): [], (-1.0, 0.0): [],
+             (1.0, 0.0): []}
     for poly in rings:
         ring = list(poly.exterior.coords)[:-1]
         n = len(ring)
@@ -435,39 +448,87 @@ def chains(doc, level_id, z):
             a, b = ring[i], ring[(i + 1) % n]
             dx, dy = b[0] - a[0], b[1] - a[1]
             L = math.hypot(dx, dy)
-            if L < 0.6:
+            if L < 0.05:
                 continue
             ux, uy = dx / L, dy / L
             # outward: right of a → b on a counter-clockwise ring
             nx, ny = (uy, -ux) if ccw else (-uy, ux)
-            ts = [0.0, L]
+            pts = [a, b]
             for (p, t) in jambs:
-                # a jamb on this face: its centre-line point, half a wall
-                # thickness inside the face
                 rx, ry = p[0] - a[0], p[1] - a[1]
-                s = rx * ux + ry * uy
+                s_ = rx * ux + ry * uy
                 off = rx * nx + ry * ny
-                if 0.05 < s < L - 0.05 and abs(off + t / 2) < 0.03:
-                    ts.append(s)
-            ts = sorted(set(round(t, 4) for t in ts))
-            pts = [(a[0] + ux * t, a[1] + uy * t, z) for t in ts]
-            out.append((pts, (nx, ny), DIM_SEP[0]))
-    if not rings:
-        return out
-    # the overall size of the level, outside on each of its four sides
-    xs = [v for r in rings for v in (r.bounds[0], r.bounds[2])]
-    ys = [v for r in rings for v in (r.bounds[1], r.bounds[3])]
-    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
-    for pts, nrm in ((((x0, y0, z), (x1, y0, z)), (0.0, -1.0)),
-                     (((x0, y1, z), (x1, y1, z)), (0.0, 1.0)),
-                     (((x0, y0, z), (x0, y1, z)), (-1.0, 0.0)),
-                     (((x1, y0, z), (x1, y1, z)), (1.0, 0.0))):
-        out.append((list(pts), nrm, DIM_SEP[1], True))
-    # a face with no opening, as long as its side: the overall says it
-    sides = {round(x1 - x0, 3), round(y1 - y0, 3)}
-    out = [c for c in out if len(c) > 3 or len(c[0]) > 2
-           or round(math.dist(c[0][0][:2], c[0][-1][:2]), 3) not in sides]
+                if 0.05 < s_ < L - 0.05 and abs(off + t / 2) < 0.03:
+                    pts.append((a[0] + ux * s_, a[1] + uy * s_))
+            for sn, bag in sides.items():
+                if nx * sn[0] + ny * sn[1] > 0.3:     # this face looks there
+                    bag += pts
+    # only what is SEEN from the side: a point with the building in front
+    # of it (a recess, a court) would string its extension line right
+    # across the plan
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    body = unary_union(rings).buffer(-0.02, join_style=2)
+    far = 2.0 + max(x1 - x0, y1 - y0)
+
+    def seen(q, sn):
+        a = (q[0] + sn[0] * 0.03, q[1] + sn[1] * 0.03)
+        b = (q[0] + sn[0] * far, q[1] + sn[1] * far)
+        try:
+            return not LineString([a, b]).intersects(body)
+        except Exception:  # noqa: BLE001
+            return True
+    out = []
+    for sn, bag in sides.items():
+        bag = [q for q in bag if seen(q, sn)]
+        horiz = sn[0] == 0.0             # a chain along x (south / north)
+        key = (lambda q: q[0]) if horiz else (lambda q: q[1])
+        out_of = (lambda q: q[1] * sn[1]) if horiz else \
+            (lambda q: q[0] * sn[0])
+        bag = sorted(bag, key=key)
+        pick = []
+        for q in bag:                  # one point per station, the outer
+            if pick and abs(key(q) - key(pick[-1])) < 0.05:
+                if out_of(q) > out_of(pick[-1]):
+                    pick[-1] = q
+                continue
+            pick.append(q)
+        edge = {(0.0, -1.0): (x0, y0), (0.0, 1.0): (x0, y1),
+                (-1.0, 0.0): (x0, y0), (1.0, 0.0): (x1, y0)}[sn]
+        # short extension lines (fixed length, as drawn by hand): a point
+        # set back from the side is measured from just inside the side
+        lim = (edge[1] * sn[1] if horiz else edge[0] * sn[0]) - EXT_M
+        pick = [((q[0], sn[1] * lim) if horiz else (sn[0] * lim, q[1]))
+                if out_of(q) < lim else q for q in pick]
+        e3 = (edge[0], edge[1], z)
+        if len(pick) > 2:
+            out.append(([(q[0], q[1], z) for q in pick], sn, DIM_SEP[0],
+                        False, e3))
+        if len(pick) >= 2:
+            out.append(([(pick[0][0], pick[0][1], z),
+                         (pick[-1][0], pick[-1][1], z)], sn, DIM_SEP[1],
+                        True, e3))
     return out
+
+
+def pens_of(opts) -> dict:
+    """The sheets' line weights (paper mm) from ``opts`` (``pen_cut``,
+    ``pen_profile``, ``pen_edge``, ``pen_dim``), the defaults else."""
+    out = {}
+    for k, v in PENS.items():
+        try:
+            out[k] = min(max(float((opts or {}).get("pen_" + k, v) or v),
+                             0.05), 3.0)
+        except (TypeError, ValueError):
+            out[k] = v
+    return out
+
+
+def _set_pens(fr, pens) -> None:
+    for k, attr in (("cut", "pen_cut_mm"), ("profile", "pen_profile_mm"),
+                    ("edge", "pen_edge_mm")):
+        if hasattr(fr, attr):
+            setattr(fr, attr, float(pens[k]))
 
 
 def make(doc: dict, elevations, opts: dict):
@@ -524,7 +585,10 @@ def make(doc: dict, elevations, opts: dict):
                       "plane": pname, "hide": below,
                       "show": [_BW] if lv["kind"] == "ground" else []})
         kz = 1000.0 / n_plan
-        fw, fh = (W_ + 2 * PAD_M) * kz, (D_ + 2 * PAD_M) * kz
+        # the frame holds the dimension chains round the plan too (so its
+        # title sits under them, never on them)
+        fw = (W_ + 2 * PAD_M) * kz + 2 * room
+        fh = (D_ + 2 * PAD_M) * kz + 2 * room
         fx = zx0 + (zw - fw) / 2
         fy = zy0 + (zh - TITLE_H - fh) / 2
         frame = {"view": vname, "scale": n_plan, "rect": (fx, fy, fw, fh),
@@ -551,7 +615,7 @@ def make(doc: dict, elevations, opts: dict):
                                  f"{area_txt(spaces.gross(mine))}")
         if dims_on:
             for ch in chains(doc, lv["id"], z):
-                sheet["cotas"].append((0,) + tuple(ch))
+                sheet["cotas"].append((0,) + tuple(ch[:3]) + (ch[3], ch[4]))
         sheets.append(sheet)
 
     # ---- the foundation plan: cut just under the lowest slab --------------------
@@ -757,9 +821,11 @@ def make(doc: dict, elevations, opts: dict):
                                                 name, ground))
             sheets.append(sheet)
 
-    # every sheet: what the title block reads
+    # every sheet: what the title block reads, its pens
     date = project.get("date") or datetime.date.today().isoformat()
+    pens = pens_of(opts)
     for s in sheets:
+        s["pens"] = dict(pens)
         s["block"] = [["PROJECT", project.get("name") or "CAD2IngeTrazo project"],
                       ["CLIENT", project.get("client") or ""],
                       ["DRAWING", s["title"]],
@@ -832,6 +898,7 @@ def _build_sheet(s: dict, views: dict):
                        margin_mm=MARGIN)
     comp.border = True
     comp.border_mm = 0.5
+    pens = dict(PENS, **(s.get("pens") or {}))
     proj = []
     for f in s["frames"]:
         x, y, w, h = f["rect"]
@@ -844,6 +911,7 @@ def _build_sheet(s: dict, views: dict):
                         uid=uuid.uuid4().hex,
                         section_marks=f["kind"] == "plan",
                         cut_fill="solid", cut_fill_color="#3c4048")
+        _set_pens(fr, pens)
         comp.frames.append(fr)
         proj.append((fr, _projector(views[f["view"]], fr)))
     # rooms: name over area, at the room's label point
@@ -855,30 +923,95 @@ def _build_sheet(s: dict, views: dict):
                                     size_pt=7.0, align="center",
                                     frame_uid=fr.uid, follow=True,
                                     list_name=f"Room {name}"))
-    # dimension chains, anchored to the frame's model
+    # dimension chains, anchored to the frame's model: each chain on ONE
+    # straight line (the host's horizontal / vertical dimension: the
+    # extension lines reach each real point), its short dimensions'
+    # figures staggered so none sits on another
+    has_axis = hasattr(CotaItem(), "axis")
     for c in s["cotas"]:
         fi, pts, nrm, sep = c[0], c[1], c[2], c[3]
         overall = len(c) > 4 and c[4]
+        edge = c[5] if len(c) > 5 else None
         fr, to_page = proj[fi]
+        if not overall and len(pts) > 2:
+            # stations closer than MIN_DIM_MM on paper: one (the chain
+            # still adds up — only a crowded figure goes)
+            ax_ = 0 if abs(nrm[0]) < 0.5 else 1      # along the chain
+            mm = 1000.0 / float(fr.scale_n)
+
+            def gap(p_, q_):
+                return abs(p_[ax_] - q_[ax_]) * mm
+            kept = [pts[0]]
+            for q in pts[1:-1]:
+                if gap(q, kept[-1]) >= MIN_DIM_MM:
+                    kept.append(q)
+            if len(kept) > 1 and gap(pts[-1], kept[-1]) < MIN_DIM_MM:
+                kept.pop()
+            pts = kept + [pts[-1]]
         segs = [(pts[0], pts[-1])] if overall else list(zip(pts, pts[1:]))
+        axis, base = "", None
+        if edge is not None and has_axis:
+            pe = to_page(edge)
+            q = to_page((edge[0] + nrm[0], edge[1] + nrm[1], edge[2]))
+            ox, oy = q[0] - pe[0], q[1] - pe[1]
+            Lo = math.hypot(ox, oy) or 1.0
+            ox, oy = ox / Lo, oy / Lo
+            if abs(ox) < abs(oy):
+                axis, base = "h", pe[1] + oy * sep
+            else:
+                axis, base = "v", pe[0] + ox * sep
+        short = 0
         for a, b in segs:
             pa, pb = to_page(a), to_page(b)
             dx, dy = pb[0] - pa[0], pb[1] - pa[1]
-            L = math.hypot(dx, dy)
-            if L < 1.0:
+            if axis == "h":
+                L = abs(dx)
+            elif axis == "v":
+                L = abs(dy)
+            else:
+                L = math.hypot(dx, dy)
+            if L < 0.4:
                 continue
-            # the outward side on the page (the plan's y runs down)
-            q = to_page((a[0] + nrm[0], a[1] + nrm[1], a[2]))
-            ox, oy = q[0] - pa[0], q[1] - pa[1]
-            nx, ny = -dy / L, dx / L
-            sign = 1.0 if nx * ox + ny * oy > 0 else -1.0
-            comp.cotas.append(CotaItem(
+            kw = {}
+            if axis:
+                kw["axis"] = axis
+                sep_c = base - (pa[1] if axis == "h" else pa[0])
+                out_dir = (oy if axis == "h" else ox)
+            else:
+                Lh = math.hypot(dx, dy)
+                q = to_page((a[0] + nrm[0], a[1] + nrm[1], a[2]))
+                ox_, oy_ = q[0] - pa[0], q[1] - pa[1]
+                nx, ny = -dy / Lh, dx / Lh
+                sep_c = sep if nx * ox_ + ny * oy_ > 0 else -sep
+                out_dir = 1.0
+            # a figure longer than its dimension: lifted clear of the
+            # neighbour's, every other one
+            label_w = 6 * 2.0 * 0.62 + 2.0
+            if L < label_w:
+                short += 1
+                if short % 2 == 0:
+                    if axis == "h":
+                        kw["text_dy_mm"] = out_dir * 3.0
+                    elif axis == "v":
+                        kw["text_dx_mm"] = out_dir * 3.0
+            else:
+                short = 0
+            cot = CotaItem(
                 x_mm=pa[0], y_mm=pa[1], dx_mm=dx, dy_mm=dy,
-                scale_n=fr.scale_n, sep_mm=sign * sep, offset_mm=0.5,
+                scale_n=fr.scale_n, sep_mm=sep_c, offset_mm=0.5,
                 text_mm=2.0, decimals=2, units="m", ends="tick",
-                stroke_mm=0.18, text_pos="above", text_along="middle",
-                text_align="aligned", anchor_uid=fr.uid,
-                a_world=list(a), b_world=list(b)))
+                stroke_mm=float(pens["dim"]), text_pos="above",
+                text_along="middle", text_align="aligned")
+            # NOT anchored: the composer re-snaps an anchored dimension's
+            # ends to the nearest drawn point (up to half a metre away at
+            # 1:200), which pulled the chains out of line — «Make sheets»
+            # draws them again from the model
+            for k_, v_ in kw.items():
+                try:
+                    setattr(cot, k_, v_)
+                except Exception:  # noqa: BLE001
+                    pass
+            comp.cotas.append(cot)
     # level marks, right of the drawing
     for fi, p, name, datum in s["levels"]:
         fr, to_page = proj[fi]
@@ -1087,14 +1220,138 @@ def refresh_sheets(window) -> None:
         sync()
 
 
+def apply_pens(win, scene, pens) -> int:
+    """New line weights on the sheets already made (CAD2IngeTrazo's): the
+    drawings' cut / profile / edge pens and the dimensions' line. Returns
+    how many sheets changed."""
+    n = 0
+    for comp in scene.compositions:
+        if not is_ours(comp):
+            continue
+        for fr in comp.frames:
+            _set_pens(fr, pens)
+        for c in getattr(comp, "cotas", []) or []:
+            c.stroke_mm = float(pens["dim"])
+        n += 1
+    scene.version += 1
+    refresh_sheets(win)
+    return n
+
+
+# ---- zoom on the sheets: the wheel (no Ctrl needed) and buttons ------------
+def install_zoom(win) -> None:
+    """The sheet window zooms like a CAD: the mouse wheel zooms in / out
+    round the cursor (Shift + wheel scrolls), and a small bar in its top
+    right corner: − / + / fit the page / fit the width / 100 %."""
+    comp = getattr(win, "_composer", None)
+    view = getattr(comp, "_view", None)
+    if comp is None or view is None or getattr(comp, "_c2i_zoom", None):
+        return
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton
+    from PySide6.QtWidgets import QGraphicsView
+
+    def zoom(f, at=None):
+        try:
+            if at is not None:
+                old = view.transformationAnchor()
+                view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+                view.scale(f, f)
+                view.setTransformationAnchor(old)
+                comp.update_zoom_label()
+            else:
+                comp.set_zoom(comp.zoom_percent() * f)
+        except Exception:  # noqa: BLE001
+            pass
+
+    class _Wheel(QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() != QEvent.Wheel:
+                return False
+            mods = ev.modifiers()
+            if mods & (Qt.ControlModifier | Qt.ShiftModifier |
+                       Qt.AltModifier):
+                return False           # Ctrl: the host's; Shift: scroll
+            if getattr(comp, "view_edit_item", None) is not None:
+                return False           # zooming INSIDE a drawing
+            dy = ev.angleDelta().y()
+            if not dy:
+                return False
+            zoom(1.2 ** (dy / 120.0), at=True)
+            return True
+
+    filt = _Wheel(comp)
+    view.viewport().installEventFilter(filt)
+    bar = QFrame(view)
+    bar.setObjectName("c2iZoomBar")
+    bar.setStyleSheet("#c2iZoomBar{background:rgba(255,255,255,225);"
+                      "border:1px solid #9aa3ad;border-radius:4px}"
+                      "QToolButton{min-width:26px;padding:2px 4px}")
+    lay = QHBoxLayout(bar)
+    lay.setContentsMargins(3, 2, 3, 2)
+    lay.setSpacing(2)
+    for text, tip, fn in (("−", "Zoom out", lambda: zoom(1 / 1.25)),
+                          ("+", "Zoom in", lambda: zoom(1.25)),
+                          ("Fit", "The whole sheet", comp.zoom_fit_page),
+                          ("↔", "Fit the width", comp.zoom_fit_width),
+                          ("100%", "True paper size",
+                           lambda: comp.set_zoom(100.0))):
+        b = QToolButton(bar)
+        b.setText(text)
+        b.setToolTip(tip + "  ·  the mouse wheel zooms round the cursor "
+                     "(Shift + wheel scrolls)")
+        b.clicked.connect(lambda _=False, f=fn: f())
+        lay.addWidget(b)
+    bar.adjustSize()
+
+    class _Place(QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() in (QEvent.Resize, QEvent.Show):
+                try:
+                    sb = view.verticalScrollBar()
+                    w = sb.width() if sb.isVisible() else 0
+                    bar.move(max(view.width() - bar.width() - w - 10, 4), 8)
+                    bar.raise_()
+                except Exception:  # noqa: BLE001
+                    pass
+            return False
+    plc = _Place(comp)
+    view.installEventFilter(plc)
+    bar.show()
+    bar.move(max(view.width() - bar.width() - 30, 4), 8)
+    comp._c2i_zoom = (filt, plc, bar)
+
+
+def hook_composer(win) -> None:
+    """Every time the host makes / opens its sheet window: the zoom tools
+    on it."""
+    if getattr(win, "_c2i_comp_hook", False):
+        install_zoom(win)
+        return
+    orig = getattr(win, "_ensure_composer", None)
+    if orig is not None:
+        def ensure(*a, **k):
+            c = orig(*a, **k)
+            try:
+                install_zoom(win)
+            except Exception:  # noqa: BLE001
+                pass
+            return c
+        win._ensure_composer = ensure
+    win._c2i_comp_hook = True
+    install_zoom(win)
+
+
 def open_sheets(win, first: int = 0) -> None:
     """The composer on sheet ``first``."""
     show = getattr(win, "_show_sheet", None)
     if show is not None:
         show(first)
+        install_zoom(win)
         return
     win._on_open_composer()
     win._composer.show_sheet(first)
+    install_zoom(win)
 
 
 def export_pdf(win, path: str) -> list:

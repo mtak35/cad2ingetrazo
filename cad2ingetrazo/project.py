@@ -90,6 +90,8 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
+    "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
+    "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
     "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
