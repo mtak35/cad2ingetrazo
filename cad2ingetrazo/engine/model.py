@@ -548,6 +548,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
 
 
 _OP_LABEL = {"door": "Door", "window": "Window", "void": "Opening"}
+#: a wooden door leaf's face (Edit ▸ Door panel)
+PANEL_KEYS = ("auto", "flush", "panel2", "panel4", "panel6", "glazed_half",
+              "glazed_full", "louvred", "ledged")
 
 
 def _openings(raw, wall_ids: set) -> list[dict]:
@@ -585,6 +588,15 @@ def _openings(raw, wall_ids: set) -> list[dict]:
         rec["id"] = oid
         if o.get("glass") in GLASS_KEYS and o.get("glass") != "clear":
             rec["glass"] = o["glass"]
+        for k_, lo_, hi_ in (("frame_w", 0.02, 0.30), ("frame_d", 0.03, 0.50)):
+            try:                     # the frame's own size (0 = its type's)
+                v_ = float(o.get(k_) or 0.0)
+            except (TypeError, ValueError):
+                v_ = 0.0
+            if v_ > 0:
+                rec[k_] = min(max(v_, lo_), hi_)
+        if o.get("panel") in PANEL_KEYS and o.get("panel") != "auto":
+            rec["panel"] = o["panel"]
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

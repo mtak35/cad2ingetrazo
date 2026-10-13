@@ -474,7 +474,7 @@ def groups(doc, z_of, layer_of):
                       float(stt.get("stair_tread", 0.05)), None)
         rails = build_rail(st, z0, e["rail"], e["rail_h"], e["rail_sides"],
                            e["rail_off"], e["rail_gap"], e["rail_ext"],
-                           _floor_of(parts))
+                           _floor_of(parts), _walls_of(doc, st["level"]))
         out.append((f"Stair {len(out) + 1}", st["id"], st["level"], parts,
                     layer_of(st["level"]), rails))
     return out
@@ -541,8 +541,23 @@ def _floor_of(parts):
     return floor
 
 
+def _walls_of(doc, lid):
+    """The level's walls on plan (shapely, one union) — a flight's side
+    along one needs no railing."""
+    try:
+        from shapely.ops import unary_union
+
+        from . import slabedges as SE
+        ws = [w for w in doc["arch"]["walls"] if w["level"] == lid
+              and not w.get("rail")]
+        ps = SE.wall_polys(ws)
+        return unary_union(ps) if ps else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_rail(st, z0, rail, h=0.9, sides="inner", off=0.05, gap=0.0,
-               ext=0.0, floor=None) -> list:
+               ext=0.0, floor=None, walls=None) -> list:
     """[(faces, colour)] of the stair's railing alone: its type, height,
     sides (inner / outer / both / none), inset from the flight's edge,
     baluster spacing (0 = the type's) and run-on past the first and the
@@ -550,7 +565,7 @@ def build_rail(st, z0, rail, h=0.9, sides="inner", off=0.05, gap=0.0,
     if not rail or rail == "none" or sides == "none":
         return []
     runs = _runs(st, z0, off)
-    return railing(st, runs, rail, h, sides, gap, ext, off, floor) \
+    return railing(st, runs, rail, h, sides, gap, ext, off, floor, walls) \
         if runs else []
 
 def _ccw(loop):
@@ -1264,7 +1279,7 @@ def _ext(path, ext, at_end):
 
 
 def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
-            inset=0.05, floor=None) -> list:
+            inset=0.05, floor=None, walls=None) -> list:
     """[(faces, colour)] of the stair's railing: on the inner side of its
     flights (the side by the well, joined across each landing), the outer
     (the wall side), or both. A single straight flight has no well: both
@@ -1288,8 +1303,9 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
         # each landing, and the wall side turning round the landings — the
         # landing's open edges railed too
         return railing(st, runs, kind, h, "inner", gap, ext, inset,
-                       floor) + \
-            railing(st, runs, kind, h, "outer", gap, ext, inset, floor)
+                       floor, walls) + \
+            railing(st, runs, kind, h, "outer", gap, ext, inset, floor,
+                    walls)
     if both:
         for i in range(nfl):
             for r in (r for r in runs if r[0] == i):
@@ -1318,6 +1334,16 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
         def near(r, _t=(tx, ty)):
             mx, my = (r[2][0] + r[3][0]) / 2, (r[2][1] + r[3][1]) / 2
             return math.hypot(mx - _t[0], my - _t[1])
+        # a side running along a wall needs no railing: the open side
+        if walls is not None and len(two) == 2:
+            from shapely.geometry import LineString
+            walled = [walls.distance(LineString([r[2][:2], r[3][:2]]))
+                      < inset + 0.15 for r in two]
+            if walled[0] != walled[1]:
+                op_ = two[1] if walled[0] else two[0]
+                wl_ = two[0] if walled[0] else two[1]
+                picked.append(wl_ if sides == "outer" else op_)
+                continue
         picked.append(max(two, key=near) if sides == "outer"
                       else min(two, key=near))
     lands = [lg for lg in (as_flights(st)[1] or []) if not lg.get("arrival")]

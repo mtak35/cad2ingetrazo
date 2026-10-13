@@ -157,8 +157,8 @@ def _line_x(p, u, q, v):
     return (p[0] + u[0] * s, p[1] + u[1] * s)
 
 
-def find(window_segs, wall_polys, min_len=0.9, max_len=9.0,
-         wall_lines=None, wall_recs=None):
+def find(window_segs, wall_polys, min_len=0.9, max_len=12.0,
+         wall_lines=None, wall_recs=None, rails_out=None):
     """The corner / bay window legs: [((x, y), (x, y), thickness)].
 
     A corner window closes the building's outline where a corner has no
@@ -202,6 +202,7 @@ def find(window_segs, wall_polys, min_len=0.9, max_len=9.0,
     out = []
     for comp in _chains(cl, tol=0.3):
         legs = [list(cl[k][:3]) for k in comp]
+        counts = [cl[k][3] for k in comp]
         tot = sum(math.dist(l[0], l[1]) for l in legs)
         if tot < min_len:
             continue
@@ -289,7 +290,17 @@ def find(window_segs, wall_polys, min_len=0.9, max_len=9.0,
                                  (m[1] + legs[j][kj][1]) / 2)
                         newl[i][ki] = x
                         newl[j][kj] = x
+        # a terrace's railing drawn on the window layer: its outline only
+        # (two lines, closer than the walls it joins are thick) — no glass
+        wall_t = min(ts) if ts else 0.2
+        spread = max(l[2] for l in legs)
+        railing = all(c <= 2 for c, k in zip(counts, kinds)
+                      if k in ("x", "y")) and spread < wall_t - 0.04
         for A, B, t in newl:
             if math.dist(A, B) >= 0.2:
-                out.append((A, B, t))
+                if railing:
+                    if rails_out is not None:
+                        rails_out.append((A, B, 0.05))
+                else:
+                    out.append((A, B, t))
     return out

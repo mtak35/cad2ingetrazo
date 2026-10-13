@@ -176,6 +176,13 @@ FIELDS = {
                 ("head", "Head", "choice", ("flat", "transom", "arch")),
                 ("frame", "Frame", "choice",
                  ("auto", "wood", "aluminium", "steel", "upvc")),
+                ("frame_w", "Frame width (face, 0 = the frame's)", "len",
+                 (0.0, 0.30)),
+                ("frame_d", "Frame thickness (depth, 0 = the frame's)",
+                 "len", (0.0, 0.50)),
+                ("panel", "Door panel", "choice",
+                 ("auto", "flush", "panel2", "panel4", "panel6",
+                  "glazed_half", "glazed_full", "louvred", "ledged")),
                 ("glass", "Glass type", "choice",
                  ("clear", "double", "lowe", "grey", "bronze", "green",
                   "blue_ref", "silver_ref", "frosted"))],
@@ -269,6 +276,9 @@ def _choice_labels() -> dict:
 
 
 CHOICE_LABELS = _choice_labels()
+from .engine import structure as _S_PT  # noqa: E402
+CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
+                      if k != "auto"})
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
 
@@ -489,7 +499,7 @@ class Panel(QWidget):
     def _head(self):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.15.0</span>")
+                   "3.15.1</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
@@ -931,16 +941,6 @@ class Panel(QWidget):
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
-        f.addRow(_btn("Find corner windows (this level)",
-                      self._corner_windows,
-                      "Glazing drawn double turning a corner where the "
-                      "walls stop made one aluminium corner window — from "
-                      "this level's CAD plan; the rest of the level stays"))
-        f.addRow(_btn("Openings with no door drawn → no door (this level)",
-                      self._empty_openings,
-                      "The sliding doors put in openings the CAD shows empty "
-                      "(no swing, no glazing, no door block) made plain "
-                      "openings, a doorway with no door"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -2045,9 +2045,11 @@ class Panel(QWidget):
         from . import secbox as SB
         dlg = getattr(self, "_sb_dlg", None)
         if dlg is not None:
-            dlg.show()
-            dlg.raise_()
-            return
+            try:
+                dlg.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
+            self._sb_dlg = None
         dlg = QDialog(self)
         dlg.setWindowTitle("CAD2IngeTrazo · Section box")
         dlg.setModal(False)
@@ -2129,7 +2131,22 @@ class Panel(QWidget):
             g.addWidget(_btn(lab_, fn_), r_, c_)
         g.addWidget(_btn("Apply", apply, primary=True), r_ + 1, 0, 1, 2)
         g.addWidget(_btn("Off", off), r_ + 1, 2, 1, 2)
-        put(self.doc()["settings"].get("section_box") or model_box())
+        hint = QLabel("In 3D, drag the orange grips on the box's six faces "
+                      "to move them (the dot, along its arrow) — or type "
+                      "the faces here and Apply.")
+        hint.setWordWrap(True)
+        g.addWidget(hint, r_ + 2, 0, 1, 4)
+        cur_ = self.doc()["settings"].get("section_box")
+        if not cur_:                     # on at once round the whole model,
+            mb = model_box()             # its grips ready to drag
+            if mb:
+                cur_ = [mb[0] - 0.3, mb[1] - 0.3, mb[2] - 0.1,
+                        mb[3] + 0.3, mb[4] + 0.3, mb[5] + 0.1]
+                d_ = self.doc()
+                d_["settings"]["section_box"] = [round(v, 4) for v in cur_]
+                self.commit(d_, "Section box on")
+        put(cur_)
+        dlg._put = put
         self._sb_dlg = dlg
         dlg.show()
 
@@ -2251,6 +2268,18 @@ class Panel(QWidget):
     def _openings_part(self):
         box, body = _fold("5  Openings", "openings", False)
         f = _form(body)
+        # read again from the level's CAD plan (the level picked at the top)
+        f.addRow(_btn("Find corner windows (this level)",
+                      self._corner_windows,
+                      "Glazing drawn double turning a corner where the "
+                      "walls stop made one aluminium corner window — from "
+                      "this level's CAD plan; the rest of the level stays "
+                      "(glazing round a terrace becomes its railing)"))
+        f.addRow(_btn("Openings with no door drawn → no door (this level)",
+                      self._empty_openings,
+                      "The sliding doors put in openings the CAD shows empty "
+                      "(no swing, no glazing, no door block) made plain "
+                      "openings, a doorway with no door"))
         self.o_door_h = _spin(0.5, 6, 2.10)
         self.o_win_h = _spin(0.2, 6, 1.20)
         self.o_sill = _spin(0, 6, 0.90)

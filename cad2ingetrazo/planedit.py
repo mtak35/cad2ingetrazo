@@ -197,6 +197,8 @@ class PlanEdit:
             return True
         if not self._select_tool():
             return False
+        if self._box_press(ev):
+            return True
         info = self._wall()
         if info is None:
             return False
@@ -217,9 +219,93 @@ class PlanEdit:
                      "na": tuple(w["a"]), "nb": tuple(w["b"])}
         return True
 
+    # ---- section box handles -------------------------------------------------
+    def _secbox(self):
+        raw = self._raw() or {}
+        b = (raw.get("settings") or {}).get("section_box")
+        return [float(v) for v in b] if b and len(b) == 6 else None
+
+    def _box_handles(self, box):
+        """[(axis 0/1/2, side 0 = min / 1 = max, centre (x, y, z))]."""
+        c = [(box[k] + box[k + 3]) / 2 for k in range(3)]
+        out = []
+        for k in range(3):
+            for sd in (0, 1):
+                p = list(c)
+                p[k] = box[k + 3 * sd]
+                out.append((k, sd, tuple(p)))
+        return out
+
+    def _box_press(self, ev) -> bool:
+        box = self._secbox()
+        if box is None:
+            return False
+        pos = ev.position()
+        best = None
+        for k, sd, c in self._box_handles(box):
+            p = self._px(*c)
+            if p is None:
+                continue
+            dd = math.hypot(p[0] - pos.x(), p[1] - pos.y())
+            if dd <= GRAB_PX + 6 and (best is None or dd < best[0]):
+                best = (dd, k, sd, c, p)
+        if best is None:
+            return False
+        _dd, k, sd, c, p = best
+        q = list(c)
+        q[k] += 1.0                              # 1 m along the axis
+        p1 = self._px(*q)
+        if p1 is None:
+            return False
+        dvec = (p1[0] - p[0], p1[1] - p[1])
+        if math.hypot(*dvec) < 1e-3:
+            self.panel.flash("Look at that face of the box from the side "
+                             "to drag it")
+            return True
+        self.drag = {"box": True, "k": k, "sd": sd, "box0": box,
+                     "cur": list(box), "p0": (pos.x(), pos.y()),
+                     "dvec": dvec}
+        return True
+
+    def _box_move(self, ev):
+        d = self.drag
+        pos = ev.position()
+        dx, dy = pos.x() - d["p0"][0], pos.y() - d["p0"][1]
+        v = d["dvec"]
+        m = (dx * v[0] + dy * v[1]) / (v[0] * v[0] + v[1] * v[1])
+        i = d["k"] + 3 * d["sd"]
+        val = round((d["box0"][i] + m) / 0.05) * 0.05
+        cur = list(d["box0"])
+        if d["sd"] == 0:
+            val = min(val, cur[d["k"] + 3] - 0.1)
+        else:
+            val = max(val, cur[d["k"]] + 0.1)
+        cur[i] = round(val, 4)
+        d["cur"] = cur
+        self.vp.update()
+
+    def _box_release(self):
+        d, self.drag = self.drag, None
+        if d["cur"] == d["box0"]:
+            self.vp.update()
+            return
+        from . import project as PJ
+        doc = PJ.load(self._raw())
+        doc["settings"]["section_box"] = [round(v, 4) for v in d["cur"]]
+        self.panel.commit(doc, "Section box: face moved")
+        try:
+            dlg = getattr(self.panel, "_sb_dlg", None)
+            if dlg is not None and hasattr(dlg, "_put"):
+                dlg._put(d["cur"])
+        except Exception:  # noqa: BLE001
+            pass
+
     def _move(self, ev):
         from PySide6.QtCore import Qt
         d = self.drag
+        if d.get("box"):
+            self._box_move(ev)
+            return
         info = d["info"]
         p = self._world(ev.position(), info["z"])
         if p is None:
@@ -272,6 +358,9 @@ class PlanEdit:
             return q
 
     def _release(self, ev):
+        if self.drag is not None and self.drag.get("box"):
+            self._box_release()
+            return
         d, self.drag = self.drag, None
         if d is None or (d["na"] == d["a"] and d["nb"] == d["b"]):
             self.vp.update()
@@ -339,15 +428,46 @@ class PlanEdit:
         return True
 
     # ---- drawing ----------------------------------------------------------------
+    def _draw_box_handles(self, painter, box):
+        """A grip on each face of the section box: a dot and an arrow
+        pointing out — drag it to move that face."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QBrush, QColor, QPen
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        dr = self.drag if (self.drag or {}).get("box") else None
+        for k, sd, c in self._box_handles(box):
+            p = self._px(*c)
+            if p is None:
+                continue
+            q = list(c)
+            q[k] += (1.0 if sd else -1.0)
+            p1 = self._px(*q)
+            on = dr is not None and dr["k"] == k and dr["sd"] == sd
+            col = QColor(20, 110, 230) if on else QColor(230, 120, 20)
+            painter.setPen(QPen(col, 2.0))
+            if p1 is not None:
+                L = math.hypot(p1[0] - p[0], p1[1] - p[1])
+                if L > 1e-3:
+                    e = (p[0] + (p1[0] - p[0]) / L * 26,
+                         p[1] + (p1[1] - p[1]) / L * 26)
+                    _arrow(painter, p, e)
+            painter.setBrush(QBrush(col))
+            painter.drawEllipse(QPointF(p[0], p[1]), 6.0, 6.0)
+        painter.restore()
+
     def draw(self, viewport, painter):
         from PySide6.QtCore import QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPen
-        try:                                 # the section box's edges
-            raw = self._raw() or {}
-            box = (raw.get("settings") or {}).get("section_box")
+        try:                                 # the section box and handles
+            box = self._secbox()
+            dr = self.drag
+            if dr is not None and dr.get("box"):
+                box = dr["cur"]
             if box:
                 from . import secbox
                 secbox.draw(self.vp, painter, box)
+                self._draw_box_handles(painter, box)
         except Exception:  # noqa: BLE001
             pass
         rc = getattr(self, "rect", None)
@@ -406,6 +526,16 @@ class PlanEdit:
 
 
 # ---- the model's side ---------------------------------------------------------------
+def _arrow(painter, a, b):
+    from PySide6.QtCore import QPointF
+    painter.drawLine(QPointF(*a), QPointF(*b))
+    L = math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0
+    u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+    for s in (1, -1):
+        q = (b[0] - u[0] * 7 + s * -u[1] * 4, b[1] - u[1] * 7 + s * u[0] * 4)
+        painter.drawLine(QPointF(*b), QPointF(*q))
+
+
 def on_slab(doc, lid, p) -> bool:
     """Whether ``p`` stands on the floor slab of ``lid`` (not in a hole)."""
     from shapely.geometry import Point, Polygon

@@ -697,6 +697,21 @@ def leaves_of(o: dict) -> int:
     return 2 if str(o.get("leaves", 1)) == "2" else 1
 
 
+def frame_size(o: dict):
+    """(label, colour, face width, depth) of the opening's frame: its
+    material's, with the width / depth set on the opening (Edit ▸ Frame
+    width, Frame depth) over them."""
+    lab, col, f, dep = FRAMES[frame_of(o)]
+    try:
+        if float(o.get("frame_w") or 0) > 0:
+            f = float(o["frame_w"])
+        if float(o.get("frame_d") or 0) > 0:
+            dep = float(o["frame_d"])
+    except (TypeError, ValueError):
+        pass
+    return lab, col, f, dep
+
+
 def frame_of(o: dict) -> str:
     """The opening's frame material: as set, else wood for hinged-type
     doors, steel for shutters, aluminium for sliding doors and windows."""
@@ -972,7 +987,7 @@ def _opening_parts_head(o: dict, seg, z0: float) -> list:
     s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
     zsp = z0 + float(o.get("sill", 0.0)) + float(low["h"])
     zt = z0 + float(o.get("sill", 0.0)) + float(o["h"])
-    _lab, FRAME_COLOR, f, dep = FRAMES[frame_of(o)]
+    _lab, FRAME_COLOR, f, dep = frame_size(o)
     hd = dep / 2
     parts = []
     if (o.get("head") or "flat") == "transom":
@@ -1036,7 +1051,7 @@ def _opening_parts(o: dict, seg, z0: float) -> list:
     s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
     zs = z0 + float(o.get("sill", 0.0))
     zt = zs + float(o["h"])
-    _lab, FC, f, dep = FRAMES[frame_of(o)]
+    _lab, FC, f, dep = frame_size(o)
     hd = dep / 2
     parts = [_box(p0, u, n, s0, s0 + f, -hd, hd, zs, zt, FC),
              _box(p0, u, n, s1 - f, s1, -hd, hd, zs, zt, FC),
@@ -1168,6 +1183,78 @@ PANEL_COLOR = (0.50, 0.36, 0.24, 1.0)      # a panelled leaf's mouldings
 SHUTTER_COLOR = (0.70, 0.72, 0.74, 1.0)    # rolling shutter / garage door
 
 
+PANEL_TYPES = [("auto", "As the door type"), ("flush", "Flush"),
+               ("panel2", "2 panels"), ("panel4", "4 panels"),
+               ("panel6", "6 panels"), ("glazed_half", "Half glazed"),
+               ("glazed_full", "Fully glazed"), ("louvred", "Louvred"),
+               ("ledged", "Ledged (vertical boards)")]
+
+
+def leaf_face(pk, p0, u, n, ua, ub, ca, cb, z0, z1) -> list:
+    """A wooden leaf standing open (thickness ua..ub along the wall, width
+    ca..cb across, z0..z1 high) with its face: flush, panelled (2 / 4 / 6
+    raised panels, both faces), half / fully glazed, louvred or ledged."""
+    P = []
+    W = cb - ca
+    if pk in ("glazed_half", "glazed_full", "louvred"):
+        st_, top_ = 0.10, 0.12
+        mid = z0 + (z1 - z0) * 0.45
+        P += [_box(p0, u, n, ua, ub, ca, ca + st_, z0, z1, LEAF_COLOR),
+              _box(p0, u, n, ua, ub, cb - st_, cb, z0, z1, LEAF_COLOR),
+              _box(p0, u, n, ua, ub, ca + st_, cb - st_, z1 - top_, z1,
+                   LEAF_COLOR),
+              _box(p0, u, n, ua, ub, ca + st_, cb - st_, z0, z0 + 0.20,
+                   LEAF_COLOR)]
+        lo = z0 + 0.20
+        if pk == "glazed_half":                 # solid below the mid rail
+            P.append(_box(p0, u, n, ua, ub, ca + st_, cb - st_, lo, mid,
+                          LEAF_COLOR))
+            P.append(_box(p0, u, n, ua, ub, ca + st_, cb - st_, mid,
+                          mid + 0.10, LEAF_COLOR))
+            for z_a, z_b in ((lo + 0.08, mid - 0.08),):
+                P.append(_box(p0, u, n, ua - 0.008, ub + 0.008,
+                              ca + st_ + 0.06, cb - st_ - 0.06, z_a, z_b,
+                              PANEL_COLOR))
+            lo = mid + 0.10
+        if pk == "louvred":
+            k = max(int((z1 - top_ - lo) / 0.06), 1)
+            for j in range(k):
+                zz = lo + (z1 - top_ - lo) * (j + 0.15) / k
+                slat = [(ua, zz), (ub, zz + 0.035), (ub, zz + 0.045),
+                        (ua, zz + 0.010)]
+                P.append(_sz_prism(p0, u, n, slat, ca + st_, cb - st_,
+                                   LEAF_COLOR))
+        else:
+            P.append(_box(p0, u, n, ua + 0.012, ub - 0.012, ca + st_,
+                          cb - st_, lo, z1 - top_, GLASS_COLOR))
+        return P
+    P.append(_box(p0, u, n, ua, ub, ca, cb, z0, z1, LEAF_COLOR))
+    if pk == "ledged":                          # board joints, both faces
+        k = max(int(W / 0.10), 2)
+        for j in range(1, k):
+            c_ = ca + W * j / k
+            for a_, b_ in ((ua - 0.004, ua), (ub, ub + 0.004)):
+                P.append(_box(p0, u, n, a_, b_, c_ - 0.004, c_ + 0.004,
+                              z0 + 0.02, z1 - 0.02, PANEL_COLOR))
+        return P
+    grid = {"panel2": (1, 2), "panel4": (2, 2), "panel6": (2, 3)}.get(pk)
+    if not grid:
+        return P                                # flush
+    cols, rows = grid
+    m, g = 0.11, 0.10                           # margin, gap between
+    pw = (W - 2 * m - (cols - 1) * g) / cols
+    ph = (z1 - z0 - 2 * 0.14 - (rows - 1) * g) / rows
+    if pw < 0.05 or ph < 0.05:
+        return P
+    for i in range(cols):
+        c_a = ca + m + i * (pw + g)
+        for j in range(rows):
+            z_a = z0 + 0.14 + j * (ph + g)
+            P.append(_box(p0, u, n, ua - 0.008, ub + 0.008, c_a, c_a + pw,
+                          z_a, z_a + ph, PANEL_COLOR))
+    return P
+
+
 def door_parts(o, style, p0, u, n, s0, s1, zs, zt, hd, f) -> list:
     """A door's leaves (its frame is made already), by its type. Hinged
     leaves stand OPEN 90° into the room they open to, so the plans show
@@ -1235,16 +1322,12 @@ def door_parts(o, style, p0, u, n, s0, s1, zs, zt, hd, f) -> list:
             parts.append(_box(p0, u, n, ua + 0.01, ub - 0.01, ca + st_,
                               cb - st_, z0 + 0.20, z1 - 0.10, GLASS_COLOR))
             return
+        if kind in ("hinged", "main"):         # a wooden leaf: its face
+            pk = o.get("panel") or ("panel4" if kind == "main" else "flush")
+            parts.extend(leaf_face(pk, p0, u, n, ua, ub, ca, cb, z0, z1))
+            return
         if kind not in ("louvre", "alu_glass"):
             parts.append(_box(p0, u, n, ua, ub, ca, cb, z0, z1, LEAF_COLOR))
-        if kind == "main":                      # raised panels, both faces
-            pw = (cb - ca - 0.36) / 2
-            for k in range(2):
-                c_a = ca + 0.12 + k * (pw + 0.12)
-                for z_a, z_b in ((z0 + 0.15, (z0 + z1) / 2 - 0.08),
-                                 ((z0 + z1) / 2 + 0.08, z1 - 0.15)):
-                    parts.append(_box(p0, u, n, ua - 0.008, ub + 0.008, c_a,
-                                      c_a + pw, z_a, z_b, PANEL_COLOR))
 
     style = {"double": "hinged", "french": "glazed"}.get(style, style)
     two = leaves_of(o) == 2

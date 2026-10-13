@@ -316,9 +316,10 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
             continue
         c_ = W.centre(w)
         recs.append((tuple(c_.p0), tuple(c_.p1), float(w["t"])))
+    rails_ = []
     legs = CW.find(wsegs, wpolys, wall_lines=[(a, b) for a, b, _t in recs],
-                   wall_recs=recs)
-    if not legs:
+                   wall_recs=recs, rails_out=rails_)
+    if not legs and not rails_:
         return 0
     # each leg: a wall like the one it carries on (its thickness, height,
     # finish…) under the sill and over the head; between them ONE aluminium
@@ -363,6 +364,26 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
             if min(math.dist(p_, q_) for p_ in legs[i_][:2]
                    for q_ in legs[j_][:2]) < 0.02:
                 grp[_root(j_)] = _root(i_)
+    # glazing round a terrace (two lines only, thinner than the walls it
+    # joins: the railing's outline) is the terrace's railing, not a window
+    if rails_:
+        rk = st.get("parapet_rail", "ss_bars")
+        rk = rk if rk and rk != "solid" else "ss_bars"
+        rrecs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+                  "b": [round(b[0], 4), round(b[1], 4)], "t": 0.05,
+                  "align": "centre", "side": 1,
+                  "height": round(float(st.get("rail_h", 1.0668)), 4),
+                  "base": 0.0, "level": lid, "rail": rk}
+                 for a, b, _t in rails_ if math.dist(a, b) >= 0.25]
+        made_r = M.new_walls(arch["walls"], rrecs)
+        n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
+                 .startswith("Terrace railing"))
+        for k_, w_ in enumerate(made_r, 1):
+            w_["name"] = f"Terrace railing {n0 + k_}"
+            w_["rail"] = rk
+        arch["walls"] += made_r
+    if not legs:
+        return 0
     have = {str(w.get("name", "")).split(" ·")[0] for w in arch["walls"]
             if str(w.get("name", "")).startswith("Corner window")}
     k_ = 1
@@ -501,7 +522,8 @@ def redetect_corner_windows(doc, lids=None) -> dict:
                            how.get("rot", 0.0))
         P, _found = layer_patterns(drawing, how, st)
         gone = {w["id"] for w in arch["walls"] if w["level"] == lid and
-                str(w.get("name", "")).startswith("Corner window")}
+                (str(w.get("name", "")).startswith("Corner window") or
+                 str(w.get("name", "")).startswith("Terrace railing"))}
         arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
         arch["openings"] = [o for o in arch["openings"]
                             if o["wall"] not in gone]
