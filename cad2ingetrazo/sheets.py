@@ -37,8 +37,8 @@ import datetime
 import math
 import uuid
 
-#: the units of the sheets («metric»: m, m² — whatever unit the model is
-#: drawn in; «imperial»: feet-inches, ft²)
+#: the units of the sheets («metric»: m, m²; «imperial»: feet-inches, ft²
+#: — by default those of the drawing)
 _SHEET_UNITS = ["metric"]
 
 
@@ -546,8 +546,11 @@ def make(doc: dict, elevations, opts: dict):
     from .engine import spaces
     from .engine import structure as S
 
-    _SHEET_UNITS[0] = "imperial" if (opts or {}).get("units") == \
-        "imperial" else "metric"
+    u_ = (opts or {}).get("units") or "drawing"
+    if u_ not in ("metric", "imperial"):      # as the drawing: its units
+        from .host import imperial as _imp
+        u_ = "imperial" if _imp() else "metric"
+    _SHEET_UNITS[0] = u_
     elements = S.build(doc, elevations)
     if not any(e["kind"] == "wall" for e in elements):
         return [], [], []
@@ -1253,6 +1256,7 @@ def apply_pens(win, scene, pens) -> int:
     return n
 
 
+BAR_V = 2          # the sheet window's bar: 2 = zoom + line weights
 #: called (pens, sheets changed) when the sheet window's line weights change
 ON_PENS = []
 
@@ -1292,8 +1296,20 @@ def install_zoom(win) -> None:
     right corner: − / + / fit the page / fit the width / 100 %."""
     comp = getattr(win, "_composer", None)
     view = getattr(comp, "_view", None)
-    if comp is None or view is None or getattr(comp, "_c2i_zoom", None):
+    if comp is None or view is None:
         return
+    old = getattr(comp, "_c2i_zoom", None)
+    if old:
+        if getattr(comp, "_c2i_bar_v", 0) >= BAR_V:
+            return
+        try:                   # an older bar (no line weights): replaced
+            view.viewport().removeEventFilter(old[0])
+            view.removeEventFilter(old[1])
+            old[2].hide()
+            old[2].deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
+        comp._c2i_zoom = None
     from PySide6.QtCore import QEvent, QObject, Qt
     from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton
     from PySide6.QtWidgets import QGraphicsView
@@ -1414,6 +1430,7 @@ def install_zoom(win) -> None:
     bar.show()
     bar.move(max(view.width() - bar.width() - 30, 4), 8)
     comp._c2i_zoom = (filt, plc, bar)
+    comp._c2i_bar_v = BAR_V
 
 
 def hook_composer(win) -> None:

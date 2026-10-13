@@ -331,3 +331,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Line weights in the sheet window**: the bar at the top right of the sheet window now carries Cut / Profile / Edge / Dim line weights (mm on paper), live on every CAD2IngeTrazo sheet; the panel's Sheets ▸ Line weights follow. (On screen a line never draws thinner than one pixel: zoom in, or print / PDF, to see thin weights.)
 - **Slab commands with «Floors as groups»**: a whole floor selected, the element under the mouse is the one CAD2IngeTrazo works on — right-click a slab ▸ Extend slab…, Open / close a shaft by a rectangle, Edit properties… work without opening the floor group.
 - **Terrace and roof-terrace edges**: the 3" parapet walls are solid plastered walls (they had come out as glass).
+
+## 3.15.8
+- **Handles on slabs** (and walls) to stretch them: select a slab — square handles on its corners (drag one to move the corner; Shift keeps it square) and on the middle of each edge (drag to push / pull that edge, square to itself; Ctrl: free). The corners and edges snap to the wall faces, columns and other slabs near them. Walls keep their end / middle handles. One Ctrl+Z each.
+- **Inside «Floors as groups»**: a click on a floor picks the slab / wall under the mouse for CAD2IngeTrazo (our own ray cast through the floor), so its handles, its right-click commands (extend, shafts by rectangle, edit) and Edit properties work without opening the floor group.
+- **Sheet units as the drawing** (default): the sheets write the drawing's own units — feet-inches and ft² for a drawing in inches / feet, m and m² for a metric one; Sheets ▸ «Sheet units» can still force Metric or Imperial.
+- **Line weights in the sheet window**: the bar at the top right of the sheet window (zoom − / + / Fit / ↔ / 100 %, then Cut / Profile / Edge / Dim line weights) — an older bar left by 3.15.4 is replaced.

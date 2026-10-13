@@ -96,6 +96,52 @@ class PlanEdit:
         self._cache = (key, info)
         return info
 
+    def _slab(self):
+        """{"rec", "z", "level"} of the CAD2IngeTrazo slab selected, or
+        None — its handles sit on its top face."""
+        sel = getattr(self.panel, "_sel_key", None)
+        if not sel or sel[0] != "slab":
+            return None
+        raw = self._raw()
+        key = (sel, id(raw), "slab")
+        if getattr(self, "_scache", (None,))[0] == key:
+            return self._scache[1]
+        info = None
+        try:
+            from . import project as PJ
+            doc = PJ.load(raw)
+            s_ = PJ.find_record(doc, "slab", sel[1])
+            if s_ is not None and len(s_.get("corners") or []) >= 3:
+                z = None
+                try:
+                    z = self.panel._group_top_z("slab", sel[1])
+                except Exception:  # noqa: BLE001
+                    z = None
+                if z is None:
+                    el = PJ.elevations(doc["arch"])
+                    i = next(k for k, lv in enumerate(doc["arch"]["levels"])
+                             if lv["id"] == s_["level"])
+                    z = el[i]
+                info = {"rec": s_, "z": z + 0.01, "level": s_["level"],
+                        "kind": "slab"}
+        except Exception:  # noqa: BLE001
+            info = None
+        self._scache = (key, info)
+        return info
+
+    @staticmethod
+    def _slab_handles(pts):
+        """Corners «v<i>» (move the corner), edge middles «e<i>» (push /
+        pull that edge square to itself)."""
+        out = {}
+        n = len(pts)
+        for i, q in enumerate(pts):
+            out[f"v{i}"] = (q[0], q[1])
+            r = pts[(i + 1) % n]
+            if math.dist(q, r) > 0.3:
+                out[f"e{i}"] = ((q[0] + r[0]) / 2, (q[1] + r[1]) / 2)
+        return out
+
     def _handles(self, info):
         a, b = info["rec"]["a"], info["rec"]["b"]
         return {"a": tuple(a), "b": tuple(b),
@@ -199,6 +245,8 @@ class PlanEdit:
             return False
         if self._box_press(ev):
             return True
+        if self._slab_press(ev):
+            return True
         info = self._wall()
         if info is None:
             return False
@@ -300,11 +348,176 @@ class PlanEdit:
         except Exception:  # noqa: BLE001
             pass
 
+    # ---- slab handles ---------------------------------------------------------
+    def _slab_press(self, ev) -> bool:
+        info = self._slab()
+        if info is None:
+            return False
+        pts = [tuple(q) for q in info["rec"]["corners"]]
+        pos = ev.position()
+        best = None
+        for k, (x, y) in self._slab_handles(pts).items():
+            p = self._px(x, y, info["z"])
+            if p is None:
+                continue
+            dd = math.hypot(p[0] - pos.x(), p[1] - pos.y())
+            if dd <= GRAB_PX and (best is None or dd < best[0]
+                                  or (dd == best[0] and k[0] == "v")):
+                best = (dd, k)
+        if best is None:
+            return False
+        p0 = self._world(pos, info["z"])
+        self.drag = {"slab": True, "which": best[1], "info": info,
+                     "pts": pts, "new": list(pts), "p0": p0}
+        return True
+
+    def _slab_move(self, ev):
+        from PySide6.QtCore import Qt
+        d = self.drag
+        info = d["info"]
+        p = self._world(ev.position(), info["z"])
+        if p is None or d["p0"] is None:
+            return
+        pts = d["pts"]
+        n = len(pts)
+        k = d["which"]
+        i = int(k[1:])
+        new = list(pts)
+        mods = ev.modifiers()
+        if k[0] == "v":
+            q = (round(p[0], 2), round(p[1], 2))
+            if mods & Qt.ShiftModifier:       # square: along x or y only
+                o = pts[i]
+                q = (q[0], o[1]) if abs(q[0] - o[0]) >= abs(q[1] - o[1]) \
+                    else (o[0], q[1])
+            q = self._snap_slab(q, info)
+            new[i] = q
+        else:
+            a, b = pts[i], pts[(i + 1) % n]
+            L = math.dist(a, b) or 1e-9
+            u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            nn = (-u[1], u[0])
+            dx, dy = p[0] - d["p0"][0], p[1] - d["p0"][1]
+            if mods & Qt.ControlModifier:     # the edge moved freely
+                dx, dy = round(dx, 2), round(dy, 2)
+            else:                              # square to the edge
+                t = round(dx * nn[0] + dy * nn[1], 2)
+                t = self._snap_push(a, b, nn, t, info)
+                dx, dy = nn[0] * t, nn[1] * t
+            new[i] = (a[0] + dx, a[1] + dy)
+            new[(i + 1) % n] = (b[0] + dx, b[1] + dy)
+        d["new"] = new
+        self.vp.update()
+
+    def _snap_slab(self, q, info):
+        """A corner lands on a wall's face corner / end, a column's corner
+        or another slab's corner close by."""
+        try:
+            best = None
+            for c in self._snap_points(info):
+                dd = math.dist(q, c)
+                if dd <= SNAP and (best is None or dd < best[0]):
+                    best = (dd, c)
+            return best[1] if best else q
+        except Exception:  # noqa: BLE001
+            return q
+
+    def _snap_points(self, info):
+        cache = getattr(self, "_snapc", None)
+        key = (id(self._raw()), info["rec"]["id"])
+        if cache and cache[0] == key:
+            return cache[1]
+        from . import project as PJ
+        from .engine import walls as W
+        doc = PJ.load(self._raw())
+        arch = doc["arch"]
+        out = []
+        lids = {info["level"]}
+        try:                      # the floor under a slab over a level too
+            ids = [lv["id"] for lv in arch["levels"]]
+            j = ids.index(info["level"])
+            if j + 1 < len(ids):
+                lids.add(ids[j + 1])
+        except Exception:  # noqa: BLE001
+            pass
+        ws = [w for w in arch["walls"] if w["level"] in lids]
+        for pcs in W.plan(ws).values():
+            for pc in pcs:
+                out += [tuple(q[:2]) for q in pc["outer"]]
+        for e in arch.get("structure") or []:
+            if e is info["rec"] or e.get("id") == info["rec"].get("id"):
+                continue
+            if e.get("level") in lids and e.get("corners"):
+                out += [tuple(q[:2]) for q in e["corners"]]
+        self._snapc = (key, out)
+        return out
+
+    def _snap_push(self, a, b, nn, t, info):
+        """An edge pushed / pulled stops on a wall face or column face
+        line close by (its new line through a snap point)."""
+        try:
+            best = None
+            for c in self._snap_points(info):
+                tc = (c[0] - a[0]) * nn[0] + (c[1] - a[1]) * nn[1]
+                dd = abs(tc - t)
+                if dd <= SNAP * 0.6 and (best is None or dd < best[0]):
+                    best = (dd, tc)
+            return round(best[1], 4) if best else t
+        except Exception:  # noqa: BLE001
+            return t
+
+    def _slab_release(self):
+        d, self.drag = self.drag, None
+        if d is None or d["new"] == d["pts"]:
+            self.vp.update()
+            return
+        from . import project as PJ
+        doc = PJ.load(self._raw())
+        s_ = PJ.find_record(doc, "slab", d["info"]["rec"]["id"])
+        if s_ is None:
+            return
+        new = [[round(q[0], 4), round(q[1], 4)] for q in d["new"]]
+        # (corners that fall on one another merged)
+        clean = []
+        for q in new:
+            if not clean or math.dist(q, clean[-1]) > 0.005:
+                clean.append(q)
+        if len(clean) > 2 and math.dist(clean[0], clean[-1]) <= 0.005:
+            clean.pop()
+        if len(clean) < 3:
+            self.panel.flash("A slab needs three corners at least")
+            self.vp.update()
+            return
+        try:
+            from shapely.geometry import Polygon
+            if not Polygon(clean).is_valid:
+                self.panel.flash("That would make the slab cross itself — "
+                                 "not done")
+                self.vp.update()
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        a0 = _area(d["pts"])
+        s_["corners"] = clean
+        s_["user_edges"] = True
+        a1 = _area(clean)
+        msg = ("Slab stretched" if d["which"][0] == "e" else
+               "Slab corner moved") + f" ({a0:.2f} → {a1:.2f} m²)"
+        self.panel.commit(doc, msg)
+        try:
+            self.panel._reselect(("slab", s_["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- section box handles -------------------------------------------------
     def _move(self, ev):
         from PySide6.QtCore import Qt
         d = self.drag
         if d.get("box"):
             self._box_move(ev)
+            return
+        if d.get("slab"):
+            self._slab_move(ev)
             return
         info = d["info"]
         p = self._world(ev.position(), info["z"])
@@ -360,6 +573,9 @@ class PlanEdit:
     def _release(self, ev):
         if self.drag is not None and self.drag.get("box"):
             self._box_release()
+            return
+        if self.drag is not None and self.drag.get("slab"):
+            self._slab_release()
             return
         d, self.drag = self.drag, None
         if d is None or (d["na"] == d["a"] and d["nb"] == d["b"]):
@@ -456,6 +672,54 @@ class PlanEdit:
             painter.drawEllipse(QPointF(p[0], p[1]), 6.0, 6.0)
         painter.restore()
 
+    def _draw_slab(self, painter):
+        from PySide6.QtCore import QPointF, QRectF, Qt
+        from PySide6.QtGui import QColor, QPen
+        dr = self.drag
+        if dr is not None and dr.get("slab"):
+            info, pts = dr["info"], dr["new"]
+        else:
+            info = self._slab()
+            if info is None:
+                return
+            pts = [tuple(q) for q in info["rec"]["corners"]]
+        z = info["z"]
+        pp = [self._px(q[0], q[1], z) for q in pts]
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        if dr is not None and dr.get("slab") and all(pp):
+            painter.setPen(QPen(QColor(230, 90, 20), 2.0, Qt.DashLine))
+            for i in range(len(pp)):
+                a, b = pp[i], pp[(i + 1) % len(pp)]
+                painter.drawLine(QPointF(a[0], a[1]), QPointF(b[0], b[1]))
+            from .host import len_txt
+            k = dr["which"]
+            i = int(k[1:])
+            n = len(pts)
+            painter.setPen(QColor(230, 90, 20))
+            for j in ((i - 1) % n, i) if k[0] == "v" else \
+                    ((i - 1) % n, (i + 1) % n):
+                a, b = pts[j], pts[(j + 1) % n]
+                pa, pb = pp[j], pp[(j + 1) % n]
+                painter.drawText(QPointF((pa[0] + pb[0]) / 2 + 6,
+                                         (pa[1] + pb[1]) / 2 - 6),
+                                 len_txt(math.dist(a, b)))
+            painter.drawText(QPointF(pp[i][0] + 10, pp[i][1] + 18),
+                             f"{_area(pts):.2f} m²")
+        for k, (x, y) in self._slab_handles(pts).items():
+            p = self._px(x, y, z)
+            if p is None:
+                continue
+            r = HANDLE_PX - (1 if k[0] == "e" else 0)
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(QColor(20, 150, 90) if k[0] == "v"
+                             else QColor(230, 140, 20))
+            if k[0] == "e":
+                painter.drawEllipse(QPointF(p[0], p[1]), r, r)
+            else:
+                painter.drawRect(QRectF(p[0] - r, p[1] - r, 2 * r, 2 * r))
+        painter.restore()
+
     def draw(self, viewport, painter):
         from PySide6.QtCore import QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPen
@@ -488,6 +752,12 @@ class PlanEdit:
                                  f"{len_txt(abs(x1 - x0))} × "
                                  f"{len_txt(abs(y1 - y0))}")
                 painter.restore()
+        try:
+            self._draw_slab(painter)
+        except Exception:  # noqa: BLE001
+            pass
+        if self.drag is not None and self.drag.get("slab"):
+            return
         info = self._wall() if self.drag is None else self.drag.get("info")
         if info is None:
             return
@@ -523,6 +793,12 @@ class PlanEdit:
             else:
                 painter.drawRect(QRectF(p[0] - r, p[1] - r, 2 * r, 2 * r))
         painter.restore()
+
+
+def _area(pts) -> float:
+    n = len(pts)
+    return abs(sum(pts[i][0] * pts[(i + 1) % n][1] -
+                   pts[(i + 1) % n][0] * pts[i][1] for i in range(n))) / 2
 
 
 # ---- the model's side ---------------------------------------------------------------

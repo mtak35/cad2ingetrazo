@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "wall3", "sheet_units": "metric",
+    "terrace_rail_kind": "wall3", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,

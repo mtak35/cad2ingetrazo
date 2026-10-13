@@ -3689,7 +3689,7 @@ class Panel(QWidget):
         if hasattr(self, "x_units"):
             self.x_units.blockSignals(True)
             self.x_units.setCurrentIndex(max(self.x_units.findData(
-                st.get("sheet_units", "metric")), 0))
+                st.get("sheet_units", "drawing")), 0))
             self.x_units.blockSignals(False)
         for k, sp in getattr(self, "x_pens", {}).items():
             sp.blockSignals(True)
@@ -3905,7 +3905,7 @@ class Panel(QWidget):
                 return None
             face, pl = pick(float(pos.x()), float(pos.y()))
             if face is None or pl is None:
-                return None
+                return self._ray_hit(pos)
             tag = PJ.tag_of(pl)
             if tag and tag["type"] not in ("symbols", "levelgroup"):
                 return tag["type"], tag["id"], tag.get("seg")
@@ -3921,10 +3921,70 @@ class Panel(QWidget):
                 d = _xf_gap(xf, want)
                 if best is None or d < best[0]:
                     best = (d, (t["type"], t["id"], t.get("seg")))
-            return best[1] if best else None
+            return best[1] if best else self._ray_hit(pos)
         except Exception:  # noqa: BLE001
             log_error("panel._under_cursor")
             return None
+
+    def _ray_hit(self, pos):
+        """(kind, id, seg) of the CAD2IngeTrazo element the mouse ray meets
+        first — our own ray cast through the elements' triangles (inside
+        the floor groups too)."""
+        import numpy as np
+        vp = self.vp
+        o, d = vp._pixel_to_ray(float(pos.x()), float(pos.y()))
+        if o is None or d is None:
+            return None
+        sc = vp.scene
+        key = (id(sc.groups), getattr(sc, "version", 0), len(sc.groups))
+        cache = getattr(self, "_tri_cache", None)
+        if cache is None or cache[0] != key:
+            tris, owners, tags = [], [], []
+            for g, xf in _walk_world(sc.groups):
+                t = PJ.tag_of(g)
+                m = getattr(g, "mesh", None)
+                if not t or m is None or t["type"] in ("symbols",
+                                                      "levelgroup"):
+                    continue
+                if getattr(g, "hidden", False):
+                    continue
+                k = len(tags)
+                tags.append((t["type"], t["id"], t.get("seg")))
+                for f in m.faces:
+                    try:
+                        for a, b, c in f.triangulate():
+                            pts = []
+                            for q in (a, b, c):
+                                if xf is not None:
+                                    q = xf.map(q)
+                                pts.append((q.x(), q.y(), q.z()))
+                            tris.append(pts)
+                            owners.append(k)
+                    except Exception:  # noqa: BLE001
+                        continue
+            cache = (key, np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3),
+                     np.asarray(owners, dtype=np.int64), tags)
+            self._tri_cache = cache
+        _k, T, own, tags = cache
+        if not len(T):
+            return None
+        O = np.array([o.x(), o.y(), o.z()])
+        D = np.array([d.x(), d.y(), d.z()])
+        v0, e1, e2 = T[:, 0], T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]
+        h = np.cross(D, e2)
+        a = np.einsum("ij,ij->i", e1, h)
+        ok = np.abs(a) > 1e-12
+        f = np.where(ok, 1.0 / np.where(ok, a, 1.0), 0.0)
+        sv = O - v0
+        u = f * np.einsum("ij,ij->i", sv, h)
+        q = np.cross(sv, e1)
+        v = f * (q @ D)
+        t = f * np.einsum("ij,ij->i", e2, q)
+        hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+        if not hit.any():
+            return None
+        i = int(np.argmin(np.where(hit, t, np.inf)))
+        return tags[int(own[i])]
 
     def _watch_selection(self):
         try:
@@ -5200,6 +5260,17 @@ class Panel(QWidget):
             sc.selection.clear()
             sc.selection.add(g)
             self.vp.update()
+        else:                     # inside a floor group: the floor, and it
+            for top in sc.groups:
+                if any((PJ.tag_of(c) or {}).get("id") == sel[1]
+                       for c, _m in _walk_world(getattr(top, "children",
+                                                        None))):
+                    sc.selection.clear()
+                    sc.selection.add(top)
+                    key_ = tuple(sorted(id(e) for e in sc.selection))
+                    self._floor_memo = (key_, (sel[0], sel[1], None))
+                    self.vp.update()
+                    break
         self._sel_key = sel
         self._fill_selected()
 
@@ -5915,10 +5986,12 @@ class Panel(QWidget):
         f.addRow(self.x_sect)
         f.addRow(self.x_dims)
         self.x_units = QComboBox()
+        self.x_units.addItem("As the drawing (its units)", "drawing")
         self.x_units.addItem("Metric (m, m²)", "metric")
         self.x_units.addItem("Imperial (ft-in, ft²)", "imperial")
         self.x_units.setToolTip("The dimensions and room areas on the "
-                                "sheets — whatever unit the model is drawn in")
+                                "sheets: the drawing's own units (default), or metric / "
+                                "imperial whatever the drawing is in")
         f.addRow("Sheet units", self.x_units)
         # the line weights of the sheets (paper mm)
         self.x_pens = {}
@@ -6007,7 +6080,7 @@ class Panel(QWidget):
                 "dims": "yes" if self.x_dims.isChecked() else "no",
                 "rooms": "yes", "prefix": "A-",
                 "units": (self.x_units.currentData()
-                          if hasattr(self, "x_units") else "metric"),
+                          if hasattr(self, "x_units") else "drawing"),
                 **{"pen_" + k: round(sp.value(), 3)
                    for k, sp in getattr(self, "x_pens", {}).items()}}
 
@@ -6048,7 +6121,7 @@ class Panel(QWidget):
         from . import sheets
         doc = self.doc()
         if hasattr(self, "x_units") and doc["settings"].get(
-                "sheet_units", "metric") != self.x_units.currentData():
+                "sheet_units", "drawing") != self.x_units.currentData():
             doc["settings"]["sheet_units"] = self.x_units.currentData()
             PJ.store_only(self.vp, doc)
             doc = self.doc()
