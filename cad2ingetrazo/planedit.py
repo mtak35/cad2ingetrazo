@@ -615,9 +615,17 @@ class PlanEdit:
         if len(clean) > 2 and math.dist(clean[0], clean[-1]) <= 0.005:
             clean.pop()
         try:
-            hp = Polygon(clean)
+            hp = Polygon(clean) if len(clean) >= 3 else Polygon()
             sp = Polygon(s_["corners"]).buffer(0)
-            if len(clean) < 3 or not hp.is_valid or hp.area < 0.04:
+            a_old = Polygon(old).buffer(0).area
+            # dragged shut (an edge onto the one facing it, a corner onto
+            # another): the opening closed — the slab filled there
+            shut = len(clean) < 3 or hp.is_empty or \
+                hp.buffer(0).area < max(0.03, 0.08 * a_old) or \
+                (not hp.is_valid and hp.buffer(0).area < 0.5 * a_old)
+            if shut:
+                return self._hole_close(doc, s_, r, old)
+            if not hp.is_valid:
                 self.panel.flash("That opening would cross itself — not done")
                 self.vp.update()
                 return
@@ -648,6 +656,43 @@ class PlanEdit:
         a0, a1 = _area(d["pts"]), _area(clean)
         self.panel.commit(doc, f"Slab opening reshaped ({a0:.2f} → "
                                f"{a1:.2f} m²)")
+        try:
+            self.panel._reselect(("slab", s_["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _hole_close(self, doc, s_, r, old):
+        """The slab opening ``r`` closed: its hole (and «shaft» mark) out of
+        the slab, the hand-drawn shaft it comes from forgotten."""
+        from shapely.geometry import Polygon
+
+        from . import project as PJ
+
+        def key(h):
+            return tuple(sorted((round(p[0], 2), round(p[1], 2)) for p in h))
+        ko = key(old)
+        s_["holes"] = [h for i, h in enumerate(s_.get("holes") or [])
+                       if i != r - 1]
+        s_["shafts"] = [h for h in s_.get("shafts") or [] if key(h) != ko]
+        try:
+            op = Polygon(old).buffer(0)
+            keep = []
+            for m in doc.get("man_shafts") or []:
+                mp = Polygon(m["pts"]).buffer(0)
+                inter = mp.intersection(op).area
+                if inter > 0.5 * max(op.area, 1e-9):
+                    continue                     # this one: closed
+                keep.append(m)
+            doc["man_shafts"] = keep
+            PJ.apply_man_shafts(doc)
+            # a hole the CAD cut: kept closed at the next «Update from CAD»
+            cl = doc.setdefault("closed_holes", [])
+            c = op.representative_point()
+            cl.append({"level": s_["level"], "x": round(c.x, 3),
+                       "y": round(c.y, 3)})
+        except Exception:  # noqa: BLE001
+            pass
+        self.panel.commit(doc, "Slab opening closed (the slab filled there)")
         try:
             self.panel._reselect(("slab", s_["id"]))
         except Exception:  # noqa: BLE001
@@ -741,6 +786,9 @@ class PlanEdit:
             if self._mark is None:
                 s_ = round(s_, 2)
             s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
+            # dragged onto (or past) the other jamb: the opening closed
+            d["close"] = (k == "l" and s_ >= s1 - 0.08) or \
+                (k == "r" and s_ <= s0 + 0.08)
             if k == "l":
                 s0 = max(0.0, min(s_, s1 - 0.3))
             else:
@@ -749,6 +797,8 @@ class PlanEdit:
             new["w"] = round(s1 - s0, 4)
         elif z is not None:
             zz = round(z, 2)
+            d["close"] = (k == "t" and zz <= zb + 0.08) or \
+                (k == "b" and zz >= zt - 0.08)
             if k == "t":
                 new["h"] = round(max(zz - zb, 0.3), 4)
             else:
@@ -761,7 +811,7 @@ class PlanEdit:
     def _op_release(self):
         d, self.drag = self.drag, None
         self._mark = None
-        if d is None or d["new"] == d["o"]:
+        if d is None or (d["new"] == d["o"] and not d.get("close")):
             self.vp.update()
             return
         from . import project as PJ
@@ -769,6 +819,15 @@ class PlanEdit:
         doc = PJ.load(self._raw())
         o = PJ.find_record(doc, "opening", d["o"]["id"])
         if o is None:
+            return
+        if d.get("close"):                 # shut: the wall filled there
+            PJ.delete_record(doc, "opening", o["id"])
+            self.panel.commit(doc, f"{o.get('name') or 'Opening'} closed — "
+                                   "the wall filled there")
+            try:
+                self.panel._reselect(("wall", d["info"]["rec"]["id"]))
+            except Exception:  # noqa: BLE001
+                pass
             return
         for f in ("pos", "w", "h", "sill"):
             if f in d["new"]:
@@ -811,6 +870,8 @@ class PlanEdit:
                 from .host import len_txt
                 painter.setPen(QColor(110, 30, 180))
                 painter.drawText(QPointF(pts[2][0] + 8, pts[2][1] - 6),
+                                 "release to CLOSE the opening"
+                                 if dr.get("close") else
                                  f"{len_txt(o['w'])} × {len_txt(o['h'])}"
                                  f"  sill {len_txt(o.get('sill', 0.0))}")
             hs = {}

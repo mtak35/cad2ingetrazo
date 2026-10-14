@@ -789,6 +789,10 @@ class Panel(QWidget):
             return
         v.apply(self.vp.scene, self.vp.camera)
         self.vp.scene.version += 1
+        try:                  # a plan: the CAD's own line weights, not the
+            self._plan_lines(name.startswith("C2I · Plan"))  # model's
+        except Exception:  # noqa: BLE001
+            log_error("panel._plan_lines")
         if name.endswith("· 3D"):
             try:
                 self.win._on_standard_view("iso")
@@ -799,6 +803,26 @@ class Panel(QWidget):
                 self.win._on_zoom_extents()
             except Exception:  # noqa: BLE001
                 pass
+        self.vp.update()
+
+    def _plan_lines(self, plan):
+        """In a plan view with the CAD's linework on, the plan reads with
+        the CAD's own line weights: the model's thin edge lines are left
+        out under them (and come back in 3D, as «Model edges» says)."""
+        st_ = getattr(self.vp.scene, "display_style", None)
+        if st_ is None or not hasattr(st_, "edges"):
+            return
+        doc = self.doc()
+        want_cad = plan and doc["settings"].get("cad_lines", True)
+        if want_cad:
+            if not getattr(self, "_plan_edges_off", False):
+                self._edges_before = bool(st_.edges)
+            self._plan_edges_off = True
+            if st_.edges:
+                st_.edges = False
+        elif getattr(self, "_plan_edges_off", False):
+            self._plan_edges_off = False
+            st_.edges = bool(getattr(self, "_edges_before", True))
         self.vp.update()
 
     def show_3d(self):
@@ -2238,6 +2262,13 @@ class Panel(QWidget):
                 w.setChecked(on)
                 w.blockSignals(False)
         self._store_flag("cad_lines", on)
+        try:
+            from .host import PREFIX_PLAN_CUT as _PPC
+            sp_ = self.vp.scene.active_section()
+            self._plan_lines(str(getattr(sp_, "name", "") or "")
+                             .startswith(_PPC))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _corner_windows(self):
         lid, lv = self.level()
@@ -5472,6 +5503,8 @@ class Panel(QWidget):
         if poly.is_empty or poly.area < 0.04:
             return False
         c = poly.representative_point()
+        cands = []
+        el = PJ.elevations(doc["arch"])
         for s_ in doc["arch"]["structure"]:
             if s_["type"] != "slab" or not s_.get("corners"):
                 continue
@@ -5482,12 +5515,25 @@ class Panel(QWidget):
             except Exception:  # noqa: BLE001
                 continue
             top = self._group_top_z("slab", s_["id"])
-            if top is None or abs(top - z) > 0.03:
+            if top is None:
                 continue
-            lid = SE.floor_level_of(doc, s_)
-            pts = [list(q) for q in list(poly.exterior.coords)[:-1]]
-            return bool(PJ.add_man_shaft(doc, lid, pts, False))
-        return False
+            # on its top (or its finish): that slab; on a floor under it,
+            # within the storey: the slab over that floor
+            if -0.05 <= z - top <= 0.3:
+                cands.append((0, abs(z - top), s_))
+            elif 0.0 < top - z <= 6.0:
+                cands.append((1, top - z, s_))
+        if not cands:
+            return False
+        cands.sort(key=lambda t: (t[0], t[1]))
+        s_ = cands[0][2]
+        lid = SE.floor_level_of(doc, s_)
+        ids = [lv["id"] for lv in doc["arch"]["levels"]]
+        if lid not in ids:
+            lid = s_["level"]
+        del el
+        pts = [list(q) for q in list(poly.exterior.coords)[:-1]]
+        return bool(PJ.add_man_shaft(doc, lid, pts, False))
 
     def _drawn_outlines(self) -> list:
         """Flat faces selected in the model that are not CAD2IngeTrazo's

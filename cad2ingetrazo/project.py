@@ -120,6 +120,69 @@ BUILT = ("wall", "column", "core", "beam", "slab", "footing", "roof", "opening",
 # =====================================================================================
 # The document
 # =====================================================================================
+
+def _safe_add(mesh, loop, holes=None):
+    """``mesh.add_face`` that survives a bad hole (two openings touching,
+    one closed to nothing, one out past its face): the holes cleaned —
+    merged, kept inside — and, failing that, the face without them."""
+    try:
+        return mesh.add_face(loop, holes) if holes else mesh.add_face(loop)
+    except Exception:  # noqa: BLE001
+        pass
+    if not holes:
+        return None
+    try:
+        from PySide6.QtGui import QVector3D
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        pts = [(q.x(), q.y(), q.z()) for q in loop]
+        # the face's plane: drop the axis its normal runs along
+        nx = ny = nz = 0.0
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            nx += (a[1] - b[1]) * (a[2] + b[2])
+            ny += (a[2] - b[2]) * (a[0] + b[0])
+            nz += (a[0] - b[0]) * (a[1] + b[1])
+        k = max(range(3), key=lambda i: abs((nx, ny, nz)[i]))
+        nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+        if abs((nx, ny, nz)[k]) / nl < 0.999:
+            raise ValueError("not on an axis plane")
+        ax = [i for i in range(3) if i != k]
+
+        def two(q):
+            return (q[ax[0]], q[ax[1]])
+        outer = Polygon([two(q) for q in pts]).buffer(0)
+        hs = []
+        for h in holes:
+            hp = [(q.x(), q.y(), q.z()) for q in h]
+            if len(hp) < 3:
+                continue
+            g = Polygon([two(q) for q in hp]).buffer(0)
+            if not g.is_empty and g.area > 1e-6:
+                hs.append(g)
+        u = unary_union(hs).intersection(outer.buffer(-1e-4)) if hs else None
+        good = []
+        if u is not None and not u.is_empty:
+            ref = pts[0][k]
+            for g in getattr(u, "geoms", [u]):
+                if g.geom_type != "Polygon" or g.area < 1e-6:
+                    continue
+                ring = []
+                for c in list(g.exterior.coords)[:-1]:
+                    v = [0.0, 0.0, 0.0]
+                    v[ax[0]], v[ax[1]] = c[0], c[1]
+                    v[k] = ref
+                    ring.append(QVector3D(*v))
+                good.append(ring)
+        if good:
+            return mesh.add_face(loop, good)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return mesh.add_face(loop)
+    except Exception:  # noqa: BLE001
+        return None
+
 def empty() -> dict:
     return {"arch": M.load({"project": M.new_project(name="")}),
             "imports": {}, "texts": [], "settings": dict(DEFAULTS),
@@ -207,6 +270,9 @@ def load(raw) -> dict:
                         and f.get("key")]
     doc["ffl_marks"] = [m for m in raw.get("ffl_marks") or []
                         if isinstance(m, dict) and m.get("level") in ids]
+    # slab openings closed by hand: kept closed when the CAD is read again
+    doc["closed_holes"] = [m for m in raw.get("closed_holes") or []
+                           if isinstance(m, dict) and m.get("level") in ids]
     doc["slab_edges"] = {k: v for k, v in (raw.get("slab_edges") or {}).items()
                          if k in ids and isinstance(v, dict)}
     doc["sunshades"] = {k: v for k, v in (raw.get("sunshades") or {}).items()
@@ -1803,6 +1869,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                   if _match(lp["layer"], P["holes"])
                   and not _match(lp["layer"], P["stairs"])]
         openings_all = slab_openings(hsegs, hloops, shafts)
+        try:                 # a shaft named on the plan, boxed and X-ed on
+            openings_all += labelled_shafts(pl, openings_all)  # any layer
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.labelled_shafts")
         # an X in a hidden (dashed) line type: the slab cut there, on any
         # layer but a ceiling's, the grid's, the furniture's…
         dsh = pl.get("dashed") or []
@@ -1827,8 +1898,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         for outline in outlines:
             poly = Polygon(outline)
             inner = poly.buffer(-0.02) if poly.is_valid else poly.buffer(0)
+            shut_ = [Point(m["x"], m["y"]) for m in
+                     doc.get("closed_holes") or [] if m["level"] == lid]
             sh_open = [h for h in openings_all
-                       if inner.contains(Polygon(h).representative_point())]
+                       if inner.contains(Polygon(h).representative_point())
+                       and not any(Polygon(h).buffer(0.02).contains(q)
+                                   for q in shut_)]
             holes = [list(h) for h in sh_open]
             for sh in shafts:
                 cut = Polygon(sh).intersection(inner)
@@ -2462,6 +2537,113 @@ def _ramp_uncut(doc, lid) -> None:
 
 SINGLE_MAX = 4 * 0.3048          # 4'-0": one leaf at most
 DOUBLE_MAX = 8 * 0.3048          # 8'-0": two leaves at most
+
+
+def labelled_shafts(pl, have=()) -> list:
+    """The shafts a plan names («GEN SHAFT», «IT SHAFT», «DUCT») where it
+    draws them as a box crossed by an X on some layer that is not a hole
+    layer: the box round the label, if an X crosses it. [outline]."""
+    import re as _re
+
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import polygonize, unary_union
+    out = []
+    got = [Polygon(h).buffer(0.02) for h in have if len(h) >= 3]
+    segs = pl.get("segs") or []
+    for t in pl.get("texts") or []:
+        if not _re.search(r"SHAFT|\bDUCT|\bP\.?\s?S\.?\b",
+                          str(t.get("text", "")).upper()):
+            continue
+        P_ = Point(t["x"], t["y"])
+        if any(g.contains(P_) for g in got):
+            continue
+        near = []
+        for s_ in segs:
+            if min(s_[0], s_[2]) > t["x"] + 2.0 or \
+                    max(s_[0], s_[2]) < t["x"] - 2.0 or \
+                    min(s_[1], s_[3]) > t["y"] + 2.0 or \
+                    max(s_[1], s_[3]) < t["y"] - 2.0:
+                continue
+            a, b = (s_[0], s_[1]), (s_[2], s_[3])
+            L = math.dist(a, b)
+            if L < 0.05:
+                continue
+            ex, ey = (b[0] - a[0]) / L * 0.005, (b[1] - a[1]) / L * 0.005
+            near.append(LineString([(a[0] - ex, a[1] - ey),
+                                    (b[0] + ex, b[1] + ey)]))
+        if len(near) < 4:
+            continue
+        faces = [f for f in polygonize(unary_union(near))
+                 if 0.05 <= f.area <= 12.0]
+        # the X splits the box in four: their union is the box
+        box = None
+        for f in sorted(faces, key=lambda f: f.area):
+            if f.buffer(0.01).contains(P_):
+                box = f
+                break
+        if box is None:
+            continue
+        # the box: the smallest ring of faces round the label that a
+        # diagonal crosses — grow it over its neighbours sharing the X
+        u = unary_union([f for f in faces
+                         if f.buffer(0.01).intersects(box)
+                         and f.area <= 4 * box.area]).buffer(0)
+        hull = u.minimum_rotated_rectangle
+        diag = math.dist(*list(hull.exterior.coords)[:2]) ** 2 + \
+            math.dist(*list(hull.exterior.coords)[1:3]) ** 2
+        diag = math.sqrt(diag)
+        x_ = 0
+        for ln in near:
+            if ln.length >= 0.6 * diag and hull.buffer(0.03).contains(ln) \
+                    and not any(abs(ln.length - math.dist(*e)) < 0.02
+                                for e in zip(list(hull.exterior.coords)[:-1],
+                                             list(hull.exterior.coords)[1:])):
+                x_ += 1
+        if x_ < 1 or hull.area > 12.0:
+            continue
+        out.append([(round(x, 4), round(y, 4))
+                    for x, y in list(hull.exterior.coords)[:-1]])
+        got.append(hull.buffer(0.02))
+    return out
+
+
+def add_labelled_shafts(doc, lids=None) -> int:
+    """The named shafts (``labelled_shafts``) of the levels' CAD plans cut
+    into the slabs that hold them, now — without importing again."""
+    from shapely.geometry import Polygon
+    n = 0
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file"):
+            continue
+        try:
+            drawing = cadread.crop(cadread.read(how["file"], how.get("unit")),
+                                   how.get("region"))
+            base = cadread.base_point(drawing, how.get("base", "origin"),
+                                      (how.get("bx", 0.0), how.get("by", 0.0)))
+            pl = cadread.place(drawing, base, (how.get("ix", 0.0),
+                                               how.get("iy", 0.0)),
+                               how.get("rot", 0.0))
+        except Exception:  # noqa: BLE001
+            continue
+        slabs = [e for e in doc["arch"]["structure"] if e["type"] == "slab"
+                 and e["level"] == lid and e.get("corners")]
+        have = [h for e in slabs for h in e.get("holes") or []]
+        for sh in labelled_shafts(pl, have):
+            hp = Polygon(sh)
+            for e in slabs:
+                try:
+                    if Polygon(e["corners"]).buffer(-0.02).contains(
+                            hp.representative_point()):
+                        h = [[round(x, 4), round(y, 4)] for x, y in sh]
+                        e.setdefault("holes", []).append(h)
+                        e.setdefault("shafts", []).append(h)
+                        n += 1
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+    return n
 
 
 def lift_cores(segs, tmin=0.14, tmax=0.60, close=0.8):
@@ -3646,7 +3828,7 @@ def _groups(arch, doc=None):
     def mesh_of(lf, hid=frozenset()):
         mesh = Mesh()
         for lp, hs, col in lf:
-            face = mesh.add_face([QVector3D(*q) for q in lp],
+            face = _safe_add(mesh, [QVector3D(*q) for q in lp],
                                  [[QVector3D(*q) for q in h] for h in hs])
             if col is not None and face is not None:
                 face.attrs["color"] = col[:3]
@@ -3922,7 +4104,7 @@ def _stair_groups(doc):
         if key not in protos:
             mesh = Mesh()
             for lp, hs, col in lf:
-                face = mesh.add_face([QVector3D(*q) for q in lp],
+                face = _safe_add(mesh, [QVector3D(*q) for q in lp],
                                      [[QVector3D(*q) for q in h]
                                       for h in hs])
                 if face is not None and col is not None:
@@ -3972,7 +4154,7 @@ def _mesh_of(faces):
     from core.mesh import Mesh
     mesh = Mesh()
     for f in faces:
-        face = mesh.add_face([QVector3D(*q) for q in f["loop"]],
+        face = _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                              [[QVector3D(*q) for q in hh]
                               for hh in f.get("holes") or []])
         if face is not None and f.get("color") is not None:
@@ -4595,7 +4777,7 @@ def _finish_groups(doc):
         if key not in protos:
             mesh = Mesh()
             for lp, hs, _c in lf:
-                mesh.add_face([QVector3D(*q) for q in lp],
+                _safe_add(mesh, [QVector3D(*q) for q in lp],
                               [[QVector3D(*q) for q in h] for h in hs])
             protos[key] = mesh
         tk = CP.type_of("room", {"finish_t": f})
@@ -4949,10 +5131,10 @@ def _site_groups(doc):
         mesh = Mesh()
         for f in faces:
             if isinstance(f, dict):
-                mesh.add_face([QVector3D(*q) for q in f["loop"]],
+                _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                               [[QVector3D(*q) for q in hh] for hh in f["holes"]])
             else:
-                mesh.add_face([QVector3D(*q) for q in f])
+                _safe_add(mesh, [QVector3D(*q) for q in f])
         _soften(mesh)
         g = Group(mesh, name=name)
         g.component = False
@@ -5293,7 +5475,7 @@ def _ceiling_groups(doc):
             for f in fs:
                 if not isinstance(f, dict):
                     f = {"loop": f, "holes": []}
-                face = mesh.add_face([QVector3D(*q) for q in f["loop"]],
+                face = _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                                      [[QVector3D(*q) for q in hh]
                                       for hh in f.get("holes") or []])
                 if face is not None:
@@ -5501,7 +5683,7 @@ def _dig_groups(doc):
             continue
         mesh = Mesh()
         for f, col in fs:
-            face = mesh.add_face([QVector3D(*q) for q in f["loop"]],
+            face = _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                                  [[QVector3D(*q) for q in h]
                                   for h in f["holes"]])
             if face is not None:
@@ -5575,10 +5757,10 @@ def _plot_groups(doc):
         fs_ += W.solid({"outer": outer, "holes": hs}, top - 0.10, top)
     for f in fs_:
         if isinstance(f, dict):
-            mesh.add_face([QVector3D(*q) for q in f["loop"]],
+            _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                           [[QVector3D(*q) for q in h] for h in f["holes"]])
         else:
-            mesh.add_face([QVector3D(*q) for q in f])
+            _safe_add(mesh, [QVector3D(*q) for q in f])
     _soften(mesh)
     g = Group(mesh, name="Plot")
     g.component = False
@@ -6315,9 +6497,15 @@ def stair_trace(doc, lid):
                 n1 = sum(len(f["lines"]) for ch in more for f in ch)
                 if len(more) == len(chains) and n1 > n0:
                     chains = more
+                    segs = segs + extra
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.stair_trace extra")
+    try:                         # a turn onto another stair's treads: cut
+        chains = [ST.cut_at_foreign(ch, segs) for ch in chains]
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.stair_trace cut")
     return chains
 
 

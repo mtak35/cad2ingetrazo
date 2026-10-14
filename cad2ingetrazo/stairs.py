@@ -1057,6 +1057,35 @@ def complete(flights, n_needed, room=None):
         # corner square of an L, the full width of a U's half landing
         landings.append({"corners": _box_along(pts, d), "after": count})
     have = sum(len(f["lines"]) for f in flights)
+    if n_needed > have and len(flights) >= 2 and abs(
+            flights[-2]["d"][0] * flights[-1]["d"][0] +
+            flights[-2]["d"][1] * flights[-1]["d"][1]) < 0.3:
+        # an L drawn (the plan cut above it): the stair turns the same way
+        # again — a corner landing past the last flight, then the third
+        # flight on, as a three-flight U goes
+        f, pf = flights[-1], flights[-2]
+        d, w, g = f["d"], float(f["w"]), float(f["g"])
+        turn = pf["d"][0] * d[1] - pf["d"][1] * d[0]
+        nd = (-d[1], d[0]) if turn > 0 else (d[1], -d[0])
+        a, b = f["lines"][-1]
+        dw = (d[0] * w, d[1] * w)
+        land = [a, b, (a[0] + dw[0], a[1] + dw[1]),
+                (b[0] + dw[0], b[1] + dw[1])]
+        landings.append({"corners": _box_along(land, d), "after": have})
+        left = (-d[1], d[0])
+        # the landing's side the new flight leaves from
+        sa = (a[0] - b[0]) * left[0] + (a[1] - b[1]) * left[1]
+        e0 = a if (sa > 0) == (turn > 0) else b
+        e1 = (e0[0] + dw[0], e0[1] + dw[1])
+        nl = (-nd[1], nd[0])
+        if (e1[0] - e0[0]) * nl[0] + (e1[1] - e0[1]) * nl[1] < 0:
+            e0, e1 = e1, e0
+        k = n_needed - have
+        lines = [((e0[0] + nd[0] * g * j, e0[1] + nd[1] * g * j),
+                  (e1[0] + nd[0] * g * j, e1[1] + nd[1] * g * j))
+                 for j in range(k)]
+        flights.append({"lines": lines, "d": nd, "w": w, "g": g})
+        have = n_needed
     if n_needed > have and flights:
         f = flights[-1]
         d, w, g = f["d"], f["w"], f["g"]
@@ -1099,6 +1128,49 @@ def complete(flights, n_needed, room=None):
                          "after": sum(len(x["lines"]) for x in flights),
                          "arrival": True})
     return flights, landings
+
+
+def cut_at_foreign(flights, segs):
+    """The flights of a traced stair up to the first turn whose landing
+    the plan fills with other tread lines (the flight beyond belongs to
+    another stair — the one going down to the basement drawn beside it)."""
+    from shapely.geometry import Point, Polygon
+    if len(flights) < 2:
+        return flights
+    mine = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            for f in flights for a, b in f["lines"]]
+    other = []
+    for a, b in segs:
+        L = math.dist(a, b)
+        if not 0.5 <= L <= 2.6:
+            continue
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if any(math.dist(m, q) < 0.03 for q in mine):
+            continue
+        other.append(m)
+    if not other:
+        return flights
+    for i, f in enumerate(flights[:-1]):
+        nx = flights[i + 1]
+        la, lb = f["lines"][-1]
+        fa, fb = nx["lines"][0]
+        d = f["d"]
+        depth = f["w"] if d[0] * nx["d"][0] + d[1] * nx["d"][1] < -0.5 \
+            else 0.0
+        pts = [la, lb, fa, fb]
+        pts += [(p[0] + d[0] * depth, p[1] + d[1] * depth) for p in pts]
+        try:
+            box = Polygon(_box_along(pts, d)).buffer(-0.08)
+        except Exception:  # noqa: BLE001
+            continue
+        if box.is_empty:
+            continue
+        if sum(1 for m in other if box.contains(Point(m))) >= 2:
+            return flights[:i + 1]
+        # two flights side by side climbing the same way: not one stair
+        if d[0] * nx["d"][0] + d[1] * nx["d"][1] > 0.5 and i > 0:
+            return flights[:i + 1]
+    return flights
 
 
 def _box_along(pts, d):
