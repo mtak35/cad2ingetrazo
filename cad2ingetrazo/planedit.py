@@ -985,6 +985,10 @@ class PlanEdit:
                 ("Beam extended" if math.dist(d["na"], d["nb"]) >
                  math.dist(d["a"], d["b"]) else "Beam trimmed")
         else:
+            try:                      # a railing made by itself: kept now
+                PJ.freeze_auto_rail(doc, d["info"]["rec"]["id"])
+            except Exception:  # noqa: BLE001
+                pass
             n = apply_wall_edit(doc, d["info"]["rec"]["id"], d["a"], d["b"],
                                 d["na"], d["nb"])
             msg = "Wall moved" if d["which"] == "m" else "Wall stretched"

@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.0, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2418,6 +2418,9 @@ def face_to_slab(doc, pts, z, t=None) -> str | None:
     if best is None or best[0] > 3.0:
         return None
     _d, lid, roof, off = best
+    fin_ = float(doc["settings"].get("finish_t", 0.0508) or 0.0)
+    if -0.005 <= off <= fin_ + 0.005:
+        off = 0.0                  # drawn on the floor / its finish: level
     rec = {"type": "slab", "level": lid, "t": round(t, 4),
            "offset": round(off, 4) if abs(off) > 0.005 else 0.0,
            "corners": [[round(x, 4), round(y, 4)]
@@ -2425,6 +2428,8 @@ def face_to_slab(doc, pts, z, t=None) -> str | None:
            "holes": [], "name": "Slab (drawn)"}
     if roof:
         rec["roof"] = True
+    elif rec["offset"]:
+        rec["user"] = True         # sunk / raised: its finish follows it
     if S.why_not(rec) is not None:
         return None
     made = M.new_elements(arch["structure"], [rec])
@@ -2517,6 +2522,61 @@ def ensure_roof(doc) -> str | None:
 AUTO_RAIL = ("Roof edge railing", "Opening railing")
 
 
+def _hole_key(lid, poly):
+    c = poly.representative_point()
+    return (lid, round(c.x, 1), round(c.y, 1))
+
+
+def freeze_auto_rail(doc, wid) -> bool:
+    """A railing made by itself (round the roof's edge, round an opening)
+    about to be edited by hand: it and the rest of its set kept as they
+    are from now on — named as plain railings, no longer made again — so
+    the edit stays. True when it was one."""
+    from shapely.geometry import LineString, Polygon
+    arch = doc["arch"]
+    st = doc["settings"]
+    w = next((x for x in arch["walls"] if x.get("id") == wid), None)
+    if w is None or not str(w.get("name", "")).startswith(AUTO_RAIL):
+        return False
+    lid = w["level"]
+    if str(w["name"]).startswith("Roof edge railing"):
+        st["roof_parapet"] = False
+        k = 0
+        for x in arch["walls"]:
+            if x["level"] == lid and str(x.get("name", "")).startswith(
+                    "Roof edge railing"):
+                k += 1
+                x["name"] = f"Roof railing {k}"
+        return True
+    ln = LineString([w["a"], w["b"]])     # an opening's: the hole it rings
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid:
+            continue
+        for h in e.get("holes") or []:
+            try:
+                hp = Polygon(h).buffer(0)
+            except Exception:  # noqa: BLE001
+                continue
+            if hp.exterior.distance(ln) > 0.3:
+                continue
+            fr = st.setdefault("rail_frozen", [])
+            key = list(_hole_key(lid, hp))
+            if key not in fr:
+                fr.append(key)
+            ring = hp.exterior.buffer(0.3)
+            k = sum(1 for x in arch["walls"] if str(x.get("name", ""))
+                    .startswith("Opening parapet "))
+            for x in arch["walls"]:
+                if x["level"] == lid and str(x.get("name", "")).startswith(
+                        "Opening railing") and ring.contains(
+                        LineString([x["a"], x["b"]])):
+                    k += 1
+                    x["name"] = f"Opening parapet {k}"
+            return True
+    w["name"] = "Railing"                 # its hole not found: kept as it is
+    return True
+
+
 def opening_parapets(doc) -> int:
     """The railings made here (remade every rebuild): the terrace railing on
     its upstand round the roof's edge (``roof_parapet``) and round every
@@ -2526,6 +2586,27 @@ def opening_parapets(doc) -> int:
     from shapely.geometry import Polygon
     arch = doc["arch"]
     st = doc["settings"]
+    # made again only when what they follow changed (the roof's outline,
+    # the openings, the railing settings) — a railing edited by hand with
+    # its handles keeps the edit until then
+    import hashlib
+    sig_src = repr((
+        sorted(repr((e["level"], bool(e.get("roof")), e.get("offset"),
+                     e.get("t"), e["corners"], e.get("holes")))
+               for e in arch["structure"] if e["type"] == "slab"
+               and not e.get("grade") and not e.get("zone")
+               and (e.get("roof") or e.get("holes"))),
+        sorted(repr((m.get("level"), m.get("pts"))) for m in
+               doc.get("man_shafts") or []),
+        [st.get(k) for k in ("parapet_rail", "rail_h", "terrace_curb_h",
+                             "terrace_rail_kind", "roof_parapet",
+                             "roof_parapet_h", "slab_pos")]))
+    sig = hashlib.md5(sig_src.encode()).hexdigest()
+    have = [w for w in arch["walls"]
+            if str(w.get("name", "")).startswith(AUTO_RAIL)]
+    if have and st.get("auto_rail_sig") == sig:
+        return len(have)
+    st["auto_rail_sig"] = sig
     arch["walls"] = [w for w in arch["walls"]
                      if not str(w.get("name", "")).startswith(AUTO_RAIL)]
     if slab_on_top(doc):
@@ -2564,6 +2645,7 @@ def opening_parapets(doc) -> int:
                          curb_d=round(cd, 4))
             recs.append(r)
     man = [Polygon(m["pts"]).buffer(0) for m in doc.get("man_shafts") or []]
+    frozen = {tuple(k) for k in st.get("rail_frozen") or []}
     stairs_up = [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
                  for s_ in doc.get("stairs") or []          # up to the roof
                  if not s_.get("to") and len(s_.get("corners") or []) >= 3]
@@ -2585,6 +2667,8 @@ def opening_parapets(doc) -> int:
                 hp = Polygon(h).buffer(0)
             except Exception:  # noqa: BLE001
                 continue
+            if _hole_key(e["level"], hp) in frozen:
+                continue                     # its railing edited by hand
             if any(hp.intersects(m) and hp.intersection(m).area >
                    0.5 * hp.area for m in man + (stairs_up if roof else [])):
                 ring(h, e["level"], base, cd, False, "Opening railing")
@@ -5126,11 +5210,14 @@ def _finish_groups(doc):
                 for s_, q in whole:        # «Over the whole slab»
                     pieces += [g for g in getattr(q, "geoms", [q])
                                if g.geom_type == "Polygon" and g.area >= 0.3]
+                drop_ = float(st.get("ext_finish_drop", 0.0) or 0.0) \
+                    if lv.get("kind") == "ground" else 0.0
                 for k_, p_ in enumerate(pieces, 1):
                     c0 = p_.representative_point()
                     f = _finish_t_at(doc, None, thick, (c0.x, c0.y))
                     c_ = p_.representative_point()
-                    z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y))
+                    z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y)) \
+                        - drop_          # outside, a step down (ground)
                     piece = {"outer": S._ccw([tuple(q) for q in
                                               list(p_.exterior.coords)[:-1]]),
                              "holes": [list(reversed(S._ccw(

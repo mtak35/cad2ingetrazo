@@ -408,3 +408,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.17.6
 - **Walls attached to the slab, always**: a floor's depth — where the walls of the floor below stop and where this floor's walls reach down to — is now its main slab's (the largest one). A small slab piece sunk or raised on a floor (a toilet, a drawn slab) no longer set it for the whole floor, which left the walls below short of the slab's underside.
+
+## 3.17.7
+- **Railings edited with handles, like walls**: the roof-edge railings and the railings round drawn openings keep a handle edit (moved, stretched, trimmed) — they are made again only when what they follow changes (the roof's outline, an opening, the railing settings). Terrace railings had the wall handles already.
+- **A face made a slab: its finish on it**: a face drawn above or below a floor becomes a raised / sunk slab part whose floor finish sits on it (it hung at the floor's level before); a face drawn on a floor or its finish becomes level with the floor.
+- **A railing edited by hand stays as edited**: once a roof-edge railing or an opening's railing is moved or stretched with its handles (or changed in its fields), that set is kept as plain railings — the roof's edge (or that opening) is no longer railed again by itself.
+- **Ground floor outside finishes: a drop option** (section 9 ▸ «Ground floor outside finishes lower by»): the verandah, entrance lobby and car porch finish set lower than the rooms' — a step down at the doors (0 = level, the default).

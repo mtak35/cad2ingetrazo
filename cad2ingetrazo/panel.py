@@ -3017,6 +3017,19 @@ class Panel(QWidget):
             self.flash("There's no basement — shoring is for a basement dig")
         self.commit(doc, "Shoring " + ("on" if st["shoring"] else "off"))
 
+    def _ext_drop(self):
+        if getattr(self, "_building", False):
+            return
+        doc = self.doc()
+        v = round(float(self.r_ext_drop.value()), 4)
+        if abs(float(doc["settings"].get("ext_finish_drop", 0.0) or 0.0)
+               - v) < 1e-4:
+            return
+        doc["settings"]["ext_finish_drop"] = v
+        from .host import len_txt
+        self.commit(doc, "Ground floor outside finishes " + (
+            f"{len_txt(v)} lower" if v > 0 else "level with the rooms'"))
+
     def _ground_slab(self, on):
         if self._building:
             return
@@ -3794,6 +3807,17 @@ class Panel(QWidget):
         row.addWidget(self.r_fin_t)
         v.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(QLabel("Ground floor outside finishes lower by"))
+        self.r_ext_drop = _spin(0.0, 0.6096, 0.0, 0.0127, 3)
+        self.r_ext_drop.setToolTip(
+            "The ground floor's finishes outside its rooms — the verandah, "
+            "the entrance lobby, the car porch — set this much lower than "
+            "the rooms' (a step down at the doors; 0 = level)")
+        self.r_ext_drop.editingFinished.connect(self._ext_drop)
+        row.addWidget(self.r_ext_drop)
+        row.addStretch(1)
+        v.addLayout(row)
+        row = QHBoxLayout()
         self.r_curt = QCheckBox("Curtains at windows")
         self.r_curt.setToolTip("A rod over each window and two pleated "
                                "curtains drawn open, on the room side (the "
@@ -3982,6 +4006,9 @@ class Panel(QWidget):
         self.r_fin_on.setChecked(bool(st.get("finish_on", True)))
         self.r_fin_on.blockSignals(False)
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
+        self.r_ext_drop.blockSignals(True)
+        self.r_ext_drop.setValue(float(st.get("ext_finish_drop", 0.0) or 0.0))
+        self.r_ext_drop.blockSignals(False)
         self.r_curt.setChecked(bool(st.get("curtains")))
         self.r_plaster.setValue(float(st.get("plaster_t", 0.0127) or 0.0))
         if hasattr(self, "c_autoop"):
@@ -4755,6 +4782,11 @@ class Panel(QWidget):
             return
         widgets = widgets if widgets is not None else self._sel_widgets
         doc = self.doc()
+        if sel[0] == "wall":          # a railing made by itself: kept now
+            try:
+                PJ.freeze_auto_rail(doc, sel[1])
+            except Exception:  # noqa: BLE001
+                log_error("panel freeze_auto_rail")
         rec = PJ.find_record(doc, *sel)
         if rec is None:
             return
