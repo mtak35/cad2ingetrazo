@@ -787,16 +787,23 @@ class Panel(QWidget):
                    + (" on" if on else " off"))
 
     def _terrace_rkind(self, *_a):
-        doc = self.doc()
-        k = self.t_rkind.currentData() or "wall3"
-        if doc["settings"].get("terrace_rail_kind", "wall3") == k:
+        if getattr(self, "_building", False):
             return
-        doc["settings"]["terrace_rail_kind"] = k
-        PJ.store_only(self.vp, doc)
-        self.flash(("Terrace edges: a 3\" plastered wall" if k == "wall3"
-                    else "Terrace edges: railing on a 3\" upstand")
-                   + " — «Terrace railings from the CAD» (or a roof terrace) "
-                   "builds them", 8000)
+        doc = self.doc()
+        k = self.t_rkind.currentData() or "railing"
+        ch = round(float(self.t_curb.value()), 4)
+        st = doc["settings"]
+        if st.get("terrace_rail_kind", "railing") == k and abs(float(
+                st.get("terrace_curb_h", 0.3048)) - ch) < 1e-4:
+            return
+        st["terrace_rail_kind"] = k
+        st["terrace_curb_h"] = ch
+        n = PJ.restyle_terrace_railings(doc)       # the ones there follow
+        from .host import len_txt
+        self.commit(doc, ("Terrace edges: a 3\" plastered wall" if k ==
+                          "wall3" else "Terrace edges: railing on a 3\" "
+                          f"upstand {len_txt(ch)} high")
+                    + (f" ({n} railing(s) changed)" if n else ""))
 
     def _scene_named(self, name):
         return next((v for v in self.vp.scene.saved_views if v.name == name),
@@ -3261,14 +3268,20 @@ class Panel(QWidget):
                            "roof terraces) in this IngeTrazo material"))
         f.addRow("Terrace floor material", row)
         self.t_rkind = QComboBox()
-        self.t_rkind.addItem("3\" wall (plastered)", "wall3")
         self.t_rkind.addItem("Railing on a 3\" upstand", "railing")
+        self.t_rkind.addItem("3\" wall (plastered)", "wall3")
         self.t_rkind.setToolTip("What the terraces' edges get: a 3\" thick "
                                 "plastered wall, the railing's height "
                                 "(default), or the railing type above on a "
                                 "3\" × 6\" upstand")
         self.t_rkind.currentIndexChanged.connect(self._terrace_rkind)
         f.addRow("Terrace edge", self.t_rkind)
+        self.t_curb = _spin(0.0, 1.2192, 0.3048, 0.0254)      # 1'-0"
+        self.t_curb.setToolTip("The 3\" upstand wall on the slab's edge under "
+                               "the terrace / balcony railing (default "
+                               "1'-0\")")
+        self.t_curb.editingFinished.connect(self._terrace_rkind)
+        f.addRow("Upstand under the railing", self.t_curb)
         f.addRow(_btn("Terrace railings from the CAD (this level)",
                       self._terrace_rails,
                       "Railings all round this level's terraces: along the "
@@ -3968,7 +3981,10 @@ class Panel(QWidget):
         if hasattr(self, "t_rkind"):
             self.t_rkind.blockSignals(True)
             self.t_rkind.setCurrentIndex(max(self.t_rkind.findData(
-                st.get("terrace_rail_kind", "wall3")), 0))
+                st.get("terrace_rail_kind", "railing")), 0))
+            self.t_curb.blockSignals(True)
+            self.t_curb.setValue(float(st.get("terrace_curb_h", 0.3048)))
+            self.t_curb.blockSignals(False)
             self.t_rkind.blockSignals(False)
         if hasattr(self, "x_units"):
             self.x_units.blockSignals(True)

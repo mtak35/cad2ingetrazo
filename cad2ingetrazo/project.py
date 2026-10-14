@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "wall3", "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -637,6 +637,10 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     arch["walls"] = [w for w in arch["walls"] if not (
         w["level"] == lid and
         str(w.get("name", "")).startswith("Terrace railing"))]
+    lv_ = level_by_id(arch, lid) or {}
+    if not slab_on_top(doc) and lv_.get("kind") == "ground" and \
+            not st.get("ground_slab", False):
+        return out            # the ground floor on the ground: no terrace
     walls = [w for w in arch["walls"] if w["level"] == lid
              and not w.get("rail") and W.why_not(w) is None]
     wps = SE.wall_polys(walls)
@@ -663,6 +667,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     rk = st.get("parapet_rail", "ss_bars")
     rk = rk if rk and rk != "solid" else "ss_bars"
     rh = float(st.get("rail_h", 1.0668))
+    ch_ = float(st.get("terrace_curb_h", 0.3048) or CURB_H)  # the upstand
     # the railing lines the plan draws round the terraces
     lines = []
     if pl is None and lid in (doc.get("imports") or {}):
@@ -762,7 +767,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
                      "b": [round(b[0], 4), round(b[1], 4)], "t": 0.05,
                      "align": "centre", "side": 1, "height": round(rh, 4),
                      "base": 0.0, "level": lid, "rail": rk,
-                     "curb_h": CURB_H, "curb_t": CURB_T,
+                     "curb_h": ch_, "curb_t": CURB_T,
                      "curb_d": round(max(float(e_.get("t", 0.15))
                                          for e_ in terr), 4)})
     out["lines"] = len(recs)
@@ -786,7 +791,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
                    "b": [round(b[0] + nx * o_, 4), round(b[1] + ny * o_, 4)],
                    "t": 0.05, "align": "centre", "side": 1,
                    "height": round(rh, 4), "base": 0.0, "level": lid,
-                   "rail": rk, "curb_h": CURB_H, "curb_t": CURB_T,
+                   "rail": rk, "curb_h": ch_, "curb_t": CURB_T,
                    "curb_d": round(float(e.get("t", 0.15)), 4)}
             m2 = M.new_walls(arch["walls"], [rec])
             arch["walls"] += m2
@@ -804,6 +809,31 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     return out
 
 
+def restyle_terrace_railings(doc) -> int:
+    """The terrace railings there are given the terrace edge set now — a
+    railing on a 3" upstand ``terrace_curb_h`` high (the default), or the
+    3" plastered wall — where they stand. How many."""
+    st = doc["settings"]
+    rk = st.get("parapet_rail", "ss_bars")
+    rk = rk if rk and rk != "solid" else "ss_bars"
+    rh = float(st.get("rail_h", 1.0668))
+    ch_ = float(st.get("terrace_curb_h", 0.3048) or CURB_H)
+    walls = [w for w in doc["arch"]["walls"]
+             if str(w.get("name", "")).startswith("Terrace railing")]
+    if terrace_as_wall(st):
+        as_parapet_walls(walls, rh)
+        return len(walls)
+    for w in walls:
+        lv = w["level"]
+        t_ = max([float(e.get("t", 0.1016)) for e in doc["arch"]["structure"]
+                  if e["type"] == "slab" and e["level"] == lv
+                  and not e.get("grade")] or [0.0])
+        w.update(rail=rk, t=0.05, height=round(rh, 4), base=0.0,
+                 curb_h=round(ch_, 4), curb_t=CURB_T, curb_d=round(t_, 4))
+        w["type"] = "solid"
+    return len(walls)
+
+
 #: the terrace parapet as a wall (by default): 3" thick, plastered
 PARAPET_T = 0.0762
 
@@ -811,7 +841,7 @@ PARAPET_T = 0.0762
 def terrace_as_wall(st) -> bool:
     """Terrace railings built as a 3" plastered wall (the default) rather
     than a railing on an upstand."""
-    return (st or {}).get("terrace_rail_kind", "wall3") == "wall3"
+    return (st or {}).get("terrace_rail_kind", "railing") == "wall3"
 
 
 def as_parapet_walls(walls, h) -> int:
@@ -888,6 +918,7 @@ def roof_terrace(doc, slab_id) -> dict:
     rk = st.get("parapet_rail", "ss_bars")
     rk = rk if rk and rk != "solid" else "ss_bars"
     rh = float(st.get("rail_h", 1.0668))
+    ch_ = float(st.get("terrace_curb_h", 0.3048) or CURB_H)  # the upstand
     # its edges no wall of the terrace floor stands on (the walls under
     # the slab carry it — the edge over them is open up here)
     from shapely.geometry import LineString as _LS
@@ -1923,12 +1954,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["shafts"] += len(sh_open)
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
-    if srecs:                    # slabs as floors: over the floor below too
-        try:
-            cap_lower_floor(doc, lid)
-        except Exception:  # noqa: BLE001
-            from .host import log_error
-            log_error("project.cap_lower_floor")
+
     if rep.get("corner_windows"):    # the slab carried over them too
         try:
             cover_corner_windows(doc, lid)
@@ -2355,12 +2381,6 @@ def to_floor_slabs(doc, t=0.1016) -> int:
             e["t"] = round(float(t), 4)
             n += 1
     apply_slab_pos(doc)
-    for lv in doc["arch"]["levels"]:
-        try:
-            cap_lower_floor(doc, lv["id"])
-        except Exception:  # noqa: BLE001
-            from .host import log_error
-            log_error("project.cap_lower_floor")
     return n
 
 

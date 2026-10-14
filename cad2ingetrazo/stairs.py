@@ -1739,6 +1739,10 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
                 return zb + (s - ss[0]) * tan
             off = waist / cos
             T = waist                           # the landing's thickness
+            if count and any(lg.get("winder_line") and
+                             int(lg.get("after", -1)) == count
+                             for lg in landings):
+                T = waist + rise      # off winders: their one flat soffit
             if count == 0:                      # from the floor
                 s_x = ss[0] + off / tan
                 prof.append((ss[0], zb))
@@ -1823,6 +1827,8 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
                 pass
         th = {"monolithic": waist, "solid": zl - z0, "open": 0.10,
               "cantilever": 0.15}[kind]
+        if wl and kind == "monolithic":
+            th = waist + rise         # the winders' soffit: one flat plane
         out.append((W.solid({"outer": _ccw([tuple(p) for p in lg["corners"]]),
                              "holes": []}, zl - max(th, 0.05), zl - ft),
                     CONCRETE if kind in ("monolithic", "solid") else TIMBER))

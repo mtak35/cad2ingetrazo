@@ -389,3 +389,8 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Ground floor finishes edited with handles**: on the ground (no slab), click the floor finish outside the rooms — the verandah, lobby, car porch — and its outline's handles appear on the finish: drag corners and edges, extend or open it as a slab's; the finish follows.
 - **Floor slab flush with the floor below**: with slabs as floors, an upper floor's slab is carried out flush with the outer faces of the walls and columns of the floor under it — it caps that floor as its roof too (on import, and when a project is turned to slabs as floors).
 - **4" slab thickness by default**: the panel no longer brings back a slab thickness saved before 3.17.
+
+## 3.17.2
+- **Each floor's slab is its own**: the floor slab reaches out to that floor's external walls, columns and terrace railings (as drawn on that floor's plan) — no longer carried out over the floor below (3.17.1 undone).
+- **Terraces and balconies railed all round on a 1'-0" upstand**: the default terrace edge is now the railing on a 3" thick upstand wall, 1'-0" high (section 7 ▸ «Upstand under the railing»), run down over the slab's edge; the «3" wall» stays as the other choice. Changing either restyles the railings already made. A ground floor on the ground gets no terrace railings.
+- **Winders' soffit**: the two winder treads of a turning landing share one flat soffit (the lower one's), and the flight leaving them starts its waist from it — no more stepped, folded underside.
