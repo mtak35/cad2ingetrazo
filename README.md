@@ -369,3 +369,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 ## 3.16.5
 - **Flights, rotation and landings…** is now easy to reach: right-click a stair ▸ CAD2IngeTrazo ▸ «Flights, rotation and landings…», the «Edit properties…» dialog of a stair, section 7 (the selected stair, else this level's), and at the top of section 10 when a stair is selected. Each flight's rotation (how it turns off the landing before it) and the whole stair's rotation are set there.
 - **Railings locked to the flights**: the stair's railings are rebuilt on the new flights and landings, and the slab's old opening over the stair (a stair hole from the CAD merged into it too) is closed before the new one is cut — so the railing round the opening upstairs moves with the stair instead of staying on the old hole.
+
+## 3.16.6
+- **Stair railings on the right side**: the well (inner) side of each flight is now taken from the stair's own turns — a flight that turns left at its landing has its railing on its left, a right turn on its right, a straight run keeps the side before — so the railing no longer jumps to the outer edge or cuts diagonally across a landing after the stair is laid out or turned by hand. (Stairs read from the CAD still leave a side running along a wall open.)
+- **The total number of steps kept**: in «Flights, rotation and landings…», raising one flight's risers takes them from the next flight (from the one before for the last flight), lowering gives them back — the storey's risers stay the same.

@@ -4346,6 +4346,38 @@ class Panel(QWidget):
         lay.addLayout(row)
         state.update(counts=cs, turns=ts, rot=rs)
         ui["state"] = state
+        # the total number of risers kept: one flight more, the next (else
+        # the one before, then the others) one less — and back
+        last = [c.value() for c in cs]
+
+        def balance(_v, i, _cs=cs, _last=last):
+            new_v = _cs[i].value()
+            delta = new_v - _last[i]
+            if not delta:
+                return
+            order = [j for j in range(i + 1, len(_cs))] + \
+                [j for j in range(i - 1, -1, -1)]
+            left = delta
+            for j in order:
+                if not left:
+                    break
+                cur = _cs[j].value()
+                nv = min(max(cur - left, 2), 40)
+                left -= cur - nv
+                _cs[j].blockSignals(True)
+                _cs[j].setValue(nv)
+                _cs[j].blockSignals(False)
+                _last[j] = nv
+            if left:                      # nothing left to take it from
+                _cs[i].blockSignals(True)
+                _cs[i].setValue(new_v - left)
+                _cs[i].blockSignals(False)
+            _last[i] = _cs[i].value()
+        for i_, c_ in enumerate(cs):
+            c_.valueChanged.connect(lambda v, i=i_: balance(v, i))
+            c_.setToolTip("The risers of this flight: the total stays the "
+                          "same — the next flight (the one before for the "
+                          "last) takes or gives the difference")
         if box is not None:
             box.setVisible(True)
 

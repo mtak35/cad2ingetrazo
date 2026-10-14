@@ -1592,8 +1592,18 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
                 out += _pieces(path, h, kind, gap, floor)
         return out
     picked = []
+    want = _inner_sides(st)            # the well side of each flight, by
+    hand = st.get("turns") is not None  # its turns (left / right of climb)
     for i in range(nfl):
         two = [r for r in runs if r[0] == i]
+        w_ = want[i] if want and i < len(want) else None
+        if nfl > 1 and w_ is not None and len(two) == 2 and not (
+                walls is not None and not hand and _walled_one(
+                    two, walls, inset)):
+            inner = next((r for r in two if r[1] == w_), two[0])
+            outer = next((r for r in two if r is not inner), two[-1])
+            picked.append(outer if sides == "outer" else inner)
+            continue
         if nfl == 1:                   # one flight: inner = its left side
             picked.append(next((r for r in two
                                 if r[1] == (sides != "outer")), two[0]))
@@ -1663,6 +1673,57 @@ def railing(st, runs, kind, h=0.9, sides="inner", gap=0.0, ext=0.0,
     for pth in paths:
         if len(pth) >= 2:
             out += _pieces(pth, h, kind, gap, floor)
+    return out
+
+
+def _walled_one(two, walls, inset) -> bool:
+    """One side of the flight runs along a wall, the other is open."""
+    from shapely.geometry import LineString
+    w = [walls.distance(LineString([r[2][:2], r[3][:2]])) < inset + 0.15
+         for r in two]
+    return w[0] != w[1]
+
+
+def _inner_sides(st) -> list:
+    """For each flight (of two risers or more, as ``_runs`` counts them):
+    the «is-left» flag of ``_runs`` of its well side — the side it turns
+    to at its landing (a left turn or U-turn left: its left), else the
+    side the turn before it came from, else the flight before's side. None
+    where a stair runs straight all the way."""
+    flights, _l = as_flights(st)
+    keep = [f for f in flights if len(f["lines"]) >= 2]
+    if len(keep) < 2:
+        return []
+    turns = flight_turns({"traced": True, "flights": keep, "landings": []})
+
+    def side(t):
+        return "L" if t in ("left", "uleft") else \
+            "R" if t in ("right", "uright") else None
+    climb = []
+    for i in range(len(keep)):
+        s_ = side(turns[i]) if i < len(turns) else None
+        if s_ is None and i > 0:
+            s_ = side(turns[i - 1])
+        climb.append(s_)
+    for i in range(1, len(climb)):          # straight on: the side before
+        if climb[i] is None:
+            climb[i] = climb[i - 1]
+    for i in range(len(climb) - 2, -1, -1):
+        if climb[i] is None:
+            climb[i] = climb[i + 1]
+    if all(c is None for c in climb):        # straight all the way: one
+        climb = ["L"] * len(climb)           # side, not crossing over
+    out = []
+    for f, s_ in zip(keep, climb):
+        if s_ is None:
+            out.append(None)
+            continue
+        (a, b) = f["lines"][0]
+        d = _nrm(f["d"])
+        lf = (-d[1], d[0])
+        r = (b[0] - a[0], b[1] - a[1])
+        a_left = (r[0] * lf[0] + r[1] * lf[1]) < 0   # going a→b goes right
+        out.append(a_left if s_ == "L" else not a_left)
     return out
 
 
