@@ -405,3 +405,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.17.5
 - **Terraces over the floor below, as before**: where the floor below reaches out past a floor (its outer walls, columns and its own outline — porch, verandah), that floor's slab is carried out over it, flush with them — a terrace — then cut back to the railing lines drawn on that floor's plan and railed round its open edges (railing on the 1'-0" × 3" upstand). Made on import of a floor; the roof slab over the top floor still only when asked.
+
+## 3.17.6
+- **Walls attached to the slab, always**: a floor's depth — where the walls of the floor below stop and where this floor's walls reach down to — is now its main slab's (the largest one). A small slab piece sunk or raised on a floor (a toilet, a drawn slab) no longer set it for the whole floor, which left the walls below short of the slab's underside.

@@ -225,7 +225,7 @@ def levels_info(doc: dict, elevations) -> dict:
     levels = doc["levels"]
     ground = doc["project"]["ground_level"] if doc.get("project") else 0.0
     elev = elevations(levels, ground)
-    slab_t, roof_t = {}, {}
+    slab_t, roof_t, main_a = {}, {}, {}
     off_next = next_floor_offsets(doc)
     for s in doc.get("structure") or []:
         if s["type"] != "slab" or s.get("skip") or s.get("user") \
@@ -236,9 +236,17 @@ def levels_info(doc: dict, elevations) -> dict:
                                      float(s["t"])
                                      - off_next.get(s["level"], 0.0))
             continue
-        d = roof_t if s.get("roof") else slab_t
-        d[s["level"]] = max(d.get(s["level"], 0.0),
-                            float(s["t"]) - float(s.get("offset", 0)))
+        if s.get("roof"):
+            roof_t[s["level"]] = max(roof_t.get(s["level"], 0.0),
+                                     float(s["t"]) - float(s.get("offset", 0)))
+            continue
+        # the floor's depth: its MAIN slab's (the largest) — a small piece
+        # sunk / raised (a toilet, a drawn slab) does not set the depth the
+        # walls of the floor below stop at, or this floor's walls reach to
+        a_ = _area(s.get("corners") or [])
+        if a_ > main_a.get(s["level"], -1.0):
+            main_a[s["level"]] = a_
+            slab_t[s["level"]] = float(s["t"]) - float(s.get("offset", 0))
     out = {}
     for i, lv in enumerate(levels):
         top = elev[i] + float(lv["height"])
@@ -254,11 +262,15 @@ def levels_info(doc: dict, elevations) -> dict:
 def main_slab_offset(doc: dict, lid) -> float:
     """The level's open floor against its floor level (its main slab's
     offset) — 0 without one."""
+    best = None
     for s in doc.get("structure") or []:
         if s["type"] == "slab" and s["level"] == lid and not (
-                s.get("zone") or s.get("user") or s.get("roof")):
-            return float(s.get("offset", 0.0) or 0.0)
-    return 0.0
+                s.get("zone") or s.get("user") or s.get("roof")
+                or s.get("grade")):
+            a_ = _area(s.get("corners") or [])
+            if best is None or a_ > best[0]:
+                best = (a_, float(s.get("offset", 0.0) or 0.0))
+    return best[1] if best else 0.0
 
 
 def next_floor_offsets(doc: dict) -> dict:
