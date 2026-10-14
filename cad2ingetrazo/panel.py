@@ -3767,6 +3767,11 @@ class Panel(QWidget):
             self.commit(doc, "Flat roof: the roof slab over the top floor, "
                         "its finish and parapet")
             return
+        # a hip / gable roof, or none: no roof slab made by itself
+        doc["settings"]["roof_auto"] = False
+        doc["arch"]["structure"] = [
+            e for e in doc["arch"]["structure"]
+            if not (e["type"] == "slab" and e.get("auto_roof"))]
         ok = PJ.set_roof(doc, kind, self.r_slope.value(), self.r_over.value(),
                          self.r_par.value(), self.r_t.value())
         if not ok:

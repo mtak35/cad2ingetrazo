@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": True, "roof_parapet": True, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2437,7 +2437,7 @@ def ensure_roof(doc) -> str | None:
     outer faces of that floor's walls, its top at the floor's top — made
     when there is none (moved up when a floor is added on top: the one
     made on the floor below goes). The level it is on, or None."""
-    if slab_on_top(doc) or not doc["settings"].get("roof_auto", True):
+    if slab_on_top(doc) or not doc["settings"].get("roof_auto", False):
         return None
     arch = doc["arch"]
     top = top_floor(doc)
@@ -3861,7 +3861,11 @@ def delete_record(doc, kind, rid, seg=None) -> None:
             doc["ramps"] = [x for x in doc["ramps"] if x["id"] != rid]
             _ramp_cut(doc, r["level"])
     else:
+        gone = [e for e in arch["structure"] if e["id"] == rid]
         arch["structure"] = [e for e in arch["structure"] if e["id"] != rid]
+        if any(e.get("auto_roof") for e in gone):
+            # the roof slab deleted: not made again by itself
+            doc["settings"]["roof_auto"] = False
 
 
 def check_record(doc, kind, rec) -> str | None:
