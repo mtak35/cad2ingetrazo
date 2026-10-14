@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": True, "roof_parapet": True, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2361,6 +2361,210 @@ def level_below(doc, lid):
     return order[k - 1] if k > 0 else None
 
 
+def face_to_slab(doc, pts, z, t=None) -> str | None:
+    """A flat face drawn in the model made a slab: on the floor it lies at
+    (its top the face — a slab of that floor, raised / sunk by the
+    difference), or the roof over the top floor when it lies there. Its
+    id, or None (no level near)."""
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    g = Polygon([tuple(p[:2]) for p in pts]).buffer(0)
+    if g.is_empty or g.area < 0.05:
+        return None
+    if g.geom_type != "Polygon":
+        g = max(g.geoms, key=lambda q: q.area)
+    el = elevations(arch)
+    t = float(t or doc["settings"].get("slab_t", 0.1016) or 0.1016)
+    best = None
+    for i, lv in enumerate(arch["levels"]):
+        z0 = el[i]
+        top = z0 + float(lv.get("height") or 3.0)
+        for roof, ref in ((False, z0), (True, top)):
+            if roof and lv["id"] != top_floor(doc):
+                continue
+            d = abs(float(z) - ref)
+            if best is None or d < best[0]:
+                best = (d, lv["id"], roof, float(z) - ref)
+    if best is None or best[0] > 3.0:
+        return None
+    _d, lid, roof, off = best
+    rec = {"type": "slab", "level": lid, "t": round(t, 4),
+           "offset": round(off, 4) if abs(off) > 0.005 else 0.0,
+           "corners": [[round(x, 4), round(y, 4)]
+                       for x, y in S._ccw(list(g.exterior.coords)[:-1])],
+           "holes": [], "name": "Slab (drawn)"}
+    if roof:
+        rec["roof"] = True
+    if S.why_not(rec) is not None:
+        return None
+    made = M.new_elements(arch["structure"], [rec])
+    arch["structure"] += made
+    return made[0]["id"] if made else None
+
+
+def roof_top(doc, lid):
+    """The top of the roof slab over level ``lid`` (absolute), or None."""
+    arch = doc["arch"]
+    r = [e for e in arch["structure"] if e["type"] == "slab"
+         and e["level"] == lid and e.get("roof") and not e.get("user")]
+    if not r:
+        return None
+    lv = level_by_id(arch, lid)
+    el = elevations(arch)
+    i = arch["levels"].index(lv)
+    return el[i] + float(lv.get("height") or 3.0) + float(
+        r[0].get("offset", 0.0) or 0.0)
+
+
+def top_floor(doc):
+    """The highest level with walls (not a «Roof» level), or None."""
+    arch = doc["arch"]
+    el = elevations(arch)
+    best = None
+    for i, lv in enumerate(arch["levels"]):
+        if str(lv.get("name", "")).strip().lower() == "roof":
+            continue
+        if not any(w["level"] == lv["id"] and not w.get("rail")
+                   for w in arch["walls"]):
+            continue
+        if best is None or el[i] > best[0]:
+            best = (el[i], lv["id"])
+    return best[1] if best else None
+
+
+def ensure_roof(doc) -> str | None:
+    """Slabs as floors: the roof slab over the top floor — its outline the
+    outer faces of that floor's walls, its top at the floor's top — made
+    when there is none (moved up when a floor is added on top: the one
+    made on the floor below goes). The level it is on, or None."""
+    if slab_on_top(doc) or not doc["settings"].get("roof_auto", True):
+        return None
+    arch = doc["arch"]
+    top = top_floor(doc)
+    if any(str(lv.get("name", "")).strip().lower() == "roof"
+           for lv in arch["levels"]):
+        top = None                       # a «Roof» level is the roof
+    arch["structure"] = [e for e in arch["structure"] if not (
+        e["type"] == "slab" and e.get("auto_roof") and e["level"] != top)]
+    if top is None:
+        return None
+    if any(e["type"] == "roof" and e["level"] == top
+           for e in arch["structure"]):
+        arch["structure"] = [e for e in arch["structure"] if not (
+            e["type"] == "slab" and e.get("auto_roof"))]
+        return None                      # a hip / gable roof made there
+    if any(e["type"] == "slab" and e["level"] == top and e.get("roof")
+           for e in arch["structure"]):
+        return top
+    walls = [w for w in arch["walls"] if w["level"] == top
+             and not w.get("rail") and W.why_not(w) is None
+             and w.get("height", "level") == "level"]
+    plans = W.plan([S._plastered(w, float(doc["settings"].get(
+        "plaster_t", 0.0127) or 0.0)) for w in walls])
+    loops = _outer_loops([pc for ps in plans.values() for pc in ps])
+    t = float(doc["settings"].get("roof_t") or doc["settings"].get(
+        "slab_t", 0.1016) or 0.1016)
+    from shapely.geometry import Polygon as _Pg
+    wells = []                    # the stairs going up to the roof: open
+    for st_ in doc.get("stairs") or []:
+        if st_.get("level") == top and not st_.get("to") and \
+                len(st_.get("corners") or []) >= 3:
+            wells.append([list(p[:2]) for p in st_["corners"]])
+    made = []
+    for o in loops:
+        op = _Pg(o).buffer(0)
+        hs = [w_ for w_ in wells if op.buffer(-0.05).intersects(_Pg(w_))]
+        rec = {"type": "slab", "level": top, "roof": True, "auto_roof": True,
+               "corners": [[round(p[0], 4), round(p[1], 4)]
+                           for p in S._ccw(o)],
+               "holes": hs, "t": t, "offset": 0.0, "name": "Roof slab"}
+        if S.why_not(rec) is None:
+            made.append(rec)
+    arch["structure"] += M.new_elements(arch["structure"], made)
+    return top if made else None
+
+
+AUTO_RAIL = ("Roof edge railing", "Opening railing")
+
+
+def opening_parapets(doc) -> int:
+    """The railings made here (remade every rebuild): the terrace railing on
+    its upstand round the roof's edge (``roof_parapet``) and round every
+    opening drawn by hand in a slab or the roof. How many."""
+    import math as _m
+
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    st = doc["settings"]
+    arch["walls"] = [w for w in arch["walls"]
+                     if not str(w.get("name", "")).startswith(AUTO_RAIL)]
+    if slab_on_top(doc):
+        return 0
+    rk = st.get("parapet_rail", "ss_bars")
+    rk = rk if rk and rk != "solid" else "ss_bars"
+    rh = float(st.get("rail_h", 1.0668))
+    ch_ = float(st.get("terrace_curb_h", 0.3048) or CURB_H)
+    as_wall = terrace_as_wall(st)
+    o_ = CURB_T / 2
+    recs = []
+
+    def ring(pts, lid, base, cd, inward, name, h_=None):
+        rh_ = rh if h_ is None else float(h_)
+        p = Polygon(pts).buffer(0)
+        if p.is_empty or p.area < 0.04:
+            return
+        q = p.buffer(-o_ if inward else o_, join_style=2)
+        if q.is_empty:
+            return
+        q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
+        cs = list(q.exterior.coords)[:-1]
+        for a, b in zip(cs, cs[1:] + cs[:1]):
+            if _m.dist(a, b) < 0.05:
+                continue
+            r = {"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+                 "b": [round(b[0], 4), round(b[1], 4)], "align": "centre",
+                 "side": 1, "base": round(base, 4), "level": lid,
+                 "name": name}
+            if as_wall:
+                r.update(t=PARAPET_T, height=round(base + rh_, 4),
+                         type="solid")
+            else:
+                r.update(t=0.05, height=round(base + rh_, 4), rail=rk,
+                         curb_h=round(ch_, 4), curb_t=CURB_T,
+                         curb_d=round(cd, 4))
+            recs.append(r)
+    man = [Polygon(m["pts"]).buffer(0) for m in doc.get("man_shafts") or []]
+    stairs_up = [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
+                 for s_ in doc.get("stairs") or []          # up to the roof
+                 if not s_.get("to") and len(s_.get("corners") or []) >= 3]
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e.get("grade") or e.get("zone"):
+            continue
+        lv = level_by_id(arch, e["level"])
+        if lv is None:
+            continue
+        roof = bool(e.get("roof"))
+        base = (float(lv.get("height") or 3.0) if roof else 0.0) + float(
+            e.get("offset", 0.0) or 0.0)
+        cd = float(e.get("t", 0.1016) or 0.1016)
+        if roof and st.get("roof_parapet", True):
+            ring(e["corners"], e["level"], base, cd, True,
+                 "Roof edge railing", st.get("roof_parapet_h") or None)
+        for h in e.get("holes") or []:       # the openings drawn by hand
+            try:
+                hp = Polygon(h).buffer(0)
+            except Exception:  # noqa: BLE001
+                continue
+            if any(hp.intersects(m) and hp.intersection(m).area >
+                   0.5 * hp.area for m in man + (stairs_up if roof else [])):
+                ring(h, e["level"], base, cd, False, "Opening railing")
+    made = M.new_walls(arch["walls"], recs)
+    for w, r in zip(made, recs):
+        w["name"] = r["name"]
+    arch["walls"] += made
+    return len(made)
+
+
 def to_floor_slabs(doc, t=0.1016) -> int:
     """A project made with slabs over each floor turned to slabs as floors:
     each floor's slab under it (the ground floor on the ground, its
@@ -2417,7 +2621,7 @@ def _floor_slabs(doc, lid) -> list:
     arch = doc["arch"]
     slabs = [s for s in arch["structure"] if s["type"] == "slab"]
     if not slab_on_top(doc):
-        return [s for s in slabs if s["level"] == lid]
+        return [s for s in slabs if s["level"] == lid and not s.get("roof")]
     el = elevations(arch)
     order = [arch["levels"][i]["id"] for i in
              sorted(range(len(arch["levels"])), key=lambda i: el[i])]
@@ -2429,7 +2633,8 @@ def _floor_slabs(doc, lid) -> list:
     return out or [s for s in slabs if s["level"] == lid]
 
 
-def add_man_shaft(doc, lid, pts, through=False) -> str | None:
+def add_man_shaft(doc, lid, pts, through=False, z=None,
+                  roof=None) -> str | None:
     """A shaft / slab opening drawn by hand on the floor of ``lid`` (or
     through every floor): kept in ``doc["man_shafts"]`` and cut again into
     the slabs at every rebuild. Its id, or None when it cuts no slab."""
@@ -2443,6 +2648,11 @@ def add_man_shaft(doc, lid, pts, through=False) -> str | None:
     rec = {"id": uuid.uuid4().hex[:8], "level": lid, "through": bool(through),
            "pts": [[round(x, 4), round(y, 4)]
                    for x, y in list(g.exterior.coords)[:-1]]}
+    if roof is None and z is not None and not through:
+        rt = roof_top(doc, lid)            # drawn on the roof over it
+        roof = rt is not None and abs(float(z) - rt) < 0.45
+    if roof:
+        rec["roof"] = True
     doc.setdefault("man_shafts", []).append(rec)
     n = apply_man_shafts(doc)
     if not n.get(rec["id"]):
@@ -2514,8 +2724,10 @@ def apply_man_shafts(doc) -> dict:
     out = {}
     for m in doc.get("man_shafts") or []:
         hp = Polygon(m["pts"]).buffer(0)
-        targets = slabs if m.get("through") else _floor_slabs(doc,
-                                                              m["level"])
+        targets = slabs if m.get("through") else (
+            [s_ for s_ in slabs if s_["level"] == m["level"]
+             and s_.get("roof")] if m.get("roof")
+            else _floor_slabs(doc, m["level"]))
         n = 0
         for s in targets:
             try:
@@ -4909,6 +5121,35 @@ def _finish_groups(doc):
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project edge finish")
+    if st.get("finish_on", True):        # the roof's finish, over its slab
+        for e in arch["structure"]:
+            if e["type"] != "slab" or not e.get("roof") or e.get("user"):
+                continue
+            lv = level_by_id(arch, e["level"])
+            if lv is None:
+                continue
+            try:
+                i_ = arch["levels"].index(lv)
+                z = elev[i_] + float(lv.get("height") or 3.0) + float(
+                    e.get("offset", 0.0) or 0.0)
+                f = float(st.get("roof_finish_t", st.get("finish_t", 0.0508))
+                          or 0.0)
+                p_ = _poly_of(e)
+                for g_ in getattr(p_, "geoms", [p_]):
+                    if g_.geom_type != "Polygon" or g_.area < 0.3 or f <= 0:
+                        continue
+                    piece = {"outer": S._ccw([tuple(q) for q in list(
+                        g_.exterior.coords)[:-1]]),
+                             "holes": [list(reversed(S._ccw(
+                                 [tuple(q) for q in list(h.coords)[:-1]])))
+                                 for h in g_.interiors]}
+                    faces = W.solid(piece, z, z + f)
+                    if faces:
+                        edge.append((lv, e["level"], f"roof{len(edge)}",
+                                     faces, e.get("id")))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project roof finish")
     protos, out = {}, []
     for lv, lid, k_, faces, sid_ in edge:
         g = Group(_mesh_of([f_ if isinstance(f_, dict) else
@@ -6086,11 +6327,21 @@ def commit(viewport, doc, opts=None) -> None:
     arch["_walls_down"] = not slab_on_top(doc)
     apply_ground_ffl(doc)
     apply_slab_pos(doc)
+    try:                       # slabs as floors: the roof over the top floor
+        ensure_roof(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ensure_roof")
     try:
         apply_man_shafts(doc)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.apply_man_shafts")
+    try:                       # the roof's and the openings' railings
+        opening_parapets(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.opening_parapets")
     try:
         sync_room_floors(doc)
     except Exception:  # noqa: BLE001

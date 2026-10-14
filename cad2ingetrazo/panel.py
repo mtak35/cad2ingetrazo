@@ -3751,6 +3751,22 @@ class Panel(QWidget):
     def _roof(self):
         doc = self.doc()
         kind = self.r_kind.currentData()
+        if kind == "flat" and not PJ.slab_on_top(doc):
+            # slabs as floors: a flat roof is the roof slab over the top
+            # floor — its finish, handles, openings and edge parapet
+            st = doc["settings"]
+            st["roof_auto"] = True
+            st["roof_parapet"] = self.r_par.value() > 0.01
+            st["roof_parapet_h"] = round(self.r_par.value(), 4)
+            st["roof_t"] = round(self.r_t.value(), 4)
+            arch = doc["arch"]
+            arch["structure"] = [e for e in arch["structure"] if not (
+                e["type"] == "roof" or (e["type"] == "slab"
+                                        and e.get("auto_roof")))]
+            PJ.ensure_roof(doc)
+            self.commit(doc, "Flat roof: the roof slab over the top floor, "
+                        "its finish and parapet")
+            return
         ok = PJ.set_roof(doc, kind, self.r_slope.value(), self.r_over.value(),
                          self.r_par.value(), self.r_t.value())
         if not ok:
@@ -4130,6 +4146,11 @@ class Panel(QWidget):
                             "spacing: «Selected element»)"))
         row2.addWidget(_btn("→ solid wall",
                             lambda: self.convert_selected_walls("solid")))
+        row2.addWidget(_btn("Selected face → slab", self._face_to_slab,
+                            "A flat face drawn in the model (Rectangle / "
+                            "Line tools) made a slab of the floor it lies at "
+                            "(or the roof over the top floor) — handles, "
+                            "openings and finish as any slab"))
         v.addLayout(row2)
         v.addWidget(QLabel("<i>Right-click an element in the model: edit "
                            "its properties there, change a door's type, "
@@ -4915,6 +4936,8 @@ class Panel(QWidget):
         except Exception:  # noqa: BLE001
             drawn = []
         if drawn:
+            menu.addAction("CAD2IngeTrazo · Face → slab",
+                           lambda d_=drawn: self._face_to_slab(d_))
             m_ = menu.addMenu("CAD2IngeTrazo · Shaft (the rectangle drawn)")
             m_.addAction("Open a shaft here (this floor's slab)",
                          lambda d_=drawn: self._shaft_drawn(d_, False))
@@ -5983,7 +6006,54 @@ class Panel(QWidget):
             lid = s_["level"]
         del el
         pts = [list(q) for q in list(poly.exterior.coords)[:-1]]
-        return bool(PJ.add_man_shaft(doc, lid, pts, False))
+        # on the roof slab over the floor: the roof cut (its height tells)
+        roof_ = bool(s_.get("roof")) and s_["level"] == lid
+        return bool(PJ.add_man_shaft(doc, lid, pts, False, z=z,
+                                     roof=True if roof_ else None))
+
+    def _face_to_slab(self, drawn=None):
+        """The flat faces drawn and selected (Rectangle / Line tools) made
+        slabs — of the floor they lie at, or the roof over the top floor —
+        and the drawn faces taken away."""
+        drawn = drawn if drawn is not None else self._drawn_outlines()
+        if not drawn:
+            self.flash("Select a flat face drawn in the model (Rectangle / "
+                       "Line tools) first", 7000)
+            return
+        doc = self.doc()
+        made = 0
+        for vs in drawn:
+            z = sum(v[2] for v in vs) / len(vs)
+            if PJ.face_to_slab(doc, [v[:2] for v in vs], z):
+                made += 1
+        if not made:
+            self.flash("No slab made — the face is far from every floor",
+                       7000)
+            return
+        try:                               # the drawn faces away
+            from core.history import CompoundCommand, DeleteEdgesCommand
+            sc = self.vp.scene
+            m = getattr(sc, "loose_mesh", None) or getattr(sc, "mesh", None)
+            edges = []
+            for f in [e for e in list(sc.selection)
+                      if hasattr(e, "loop") and hasattr(e, "vertices")
+                      and not PJ.tag_of(e)]:
+                vv = list(f.vertices)
+                for i in range(len(vv)):
+                    a = m.vertex_at(getattr(vv[i], "position", vv[i]))
+                    b = m.vertex_at(getattr(vv[(i + 1) % len(vv)],
+                                            "position", vv[(i + 1) % len(vv)]))
+                    e = m.find_edge(a, b) if a is not None and \
+                        b is not None else None
+                    if e is not None and e not in edges:
+                        edges.append(e)
+            if edges:
+                sc.selection.clear()
+                self.vp.history.execute(CompoundCommand(
+                    [DeleteEdgesCommand(edges)]))
+        except Exception:  # noqa: BLE001
+            log_error("panel._face_to_slab delete")
+        self.commit(doc, f"{made} face(s) made slab(s)")
 
     def _drawn_outlines(self) -> list:
         """Flat faces selected in the model that are not CAD2IngeTrazo's
