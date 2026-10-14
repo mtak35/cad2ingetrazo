@@ -2637,6 +2637,11 @@ class Panel(QWidget):
                 log_error("panel._update_levels")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            try:                       # the stairs still reach the floor up
+                from . import stairs as ST
+                ST.refit_heights(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel._update_levels stairs")
             try:
                 PJ.recut_wells(doc)
             except Exception:  # noqa: BLE001
@@ -2816,19 +2821,30 @@ class Panel(QWidget):
         f = _form(body)
         self.s_slab = QCheckBox("Floor slab on import (outline layer, else "
                                 "round the walls)")
-        self.s_slab_t = _spin(0.05, 2, 0.15)
+        self.s_slab_t = _spin(0.05, 2, 0.1016)          # 4"
         f.addRow(self.s_slab)
         f.addRow("Slab thickness", self.s_slab_t)
         self.s_slab_pos = QComboBox()
+        self.s_slab_pos.addItem("Under each floor — the slab is the floor "
+                                "(walls down over its edge)", "bottom")
         self.s_slab_pos.addItem("Over each floor (cast on its walls)", "top")
-        self.s_slab_pos.addItem("Under each floor (at its floor level)",
-                                "bottom")
         self.s_slab_pos.setToolTip(
-            "Over: each floor's slab on top of its walls — the top floor "
-            "gets its roof slab, the ground floor stands on the ground. "
-            "The stair / ramp wells move with it.")
+            "Under (default): each floor's slab is that floor — its top at "
+            "the floor level, its finishes on it, the floor's walls running "
+            "down to the slab's bottom over its edge (thicker slab: the "
+            "walls follow); the ground floor on the ground (finishes only, "
+            "unless «Ground floor slab»). Over: each floor's slab on top of "
+            "its walls. The stair / ramp wells move with it.")
         self.s_slab_pos.currentIndexChanged.connect(self._slab_pos)
         f.addRow("Slab position", self.s_slab_pos)
+        self.s_gslab = QCheckBox("Ground floor slab (off: the ground floor's "
+                                 "finishes laid on the ground)")
+        self.s_gslab.setToolTip(
+            "Off (default): the ground floor gets no concrete slab — its "
+            "floor finish covers the slab outline: every room, the verandah, "
+            "the entrance lobby, the car porch. On: a slab under it too.")
+        self.s_gslab.toggled.connect(self._ground_slab)
+        f.addRow(self.s_gslab)
         f.addRow(QLabel("<i>Sunk / raised floor — select rooms' floor "
                         "finishes, or draw a rectangle (Rectangle tool) on "
                         "the floor and select it:</i>"))
@@ -2994,11 +3010,22 @@ class Panel(QWidget):
             self.flash("There's no basement — shoring is for a basement dig")
         self.commit(doc, "Shoring " + ("on" if st["shoring"] else "off"))
 
+    def _ground_slab(self, on):
+        if self._building:
+            return
+        doc = self.doc()
+        if bool(doc["settings"].get("ground_slab", False)) == bool(on):
+            return
+        doc["settings"]["ground_slab"] = bool(on)
+        PJ.apply_slab_pos(doc)
+        self.commit(doc, "Ground floor " + ("on a slab" if on else
+                                            "on the ground (finishes only)"))
+
     def _slab_pos(self, _i=None):
         if self._building:
             return
         doc = self.doc()
-        pos = self.s_slab_pos.currentData() or "top"
+        pos = self.s_slab_pos.currentData() or "bottom"
         if doc["settings"].get("slab_pos", "top") == pos:
             return
         doc["settings"]["slab_pos"] = pos
@@ -7181,8 +7208,12 @@ class Panel(QWidget):
             log_error("panel shoring fill")
         self.s_slab_pos.blockSignals(True)
         self.s_slab_pos.setCurrentIndex(max(self.s_slab_pos.findData(
-            doc["settings"].get("slab_pos", "top")), 0))
+            doc["settings"].get("slab_pos", "bottom")), 0))
         self.s_slab_pos.blockSignals(False)
+        self.s_gslab.blockSignals(True)
+        self.s_gslab.setChecked(bool(doc["settings"].get("ground_slab",
+                                                         False)))
+        self.s_gslab.blockSignals(False)
         if self._sel_key:
             self._fill_selected()
         self._show_portion()

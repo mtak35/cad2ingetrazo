@@ -376,6 +376,31 @@ def _cut(arch, lid, corners) -> int:
 HEADROOM = 2.1336            # 7'-0" clear over every step
 
 
+def refit_heights(doc) -> int:
+    """Every stair's risers re-spaced to its storey's height now (the
+    floors and levels changed): the same steps, the risers taller or
+    shorter so the stair still lands on the floor above. How many."""
+    from .engine import model as M
+    from .engine import structure as S
+    arch = doc["arch"]
+    info = S.levels_info(arch, M.elevations)
+    n = 0
+    for st in doc.get("stairs") or []:
+        lv = info.get(st.get("level"))
+        if lv is None:
+            continue
+        up = info.get(st.get("to")) if st.get("to") else None
+        H = (up["z0"] - lv["z0"]) if up else float(lv["height"])
+        k = int(st.get("risers") or 0)
+        if k <= 0 or H <= 0:
+            continue
+        r = round(H / k, 4)
+        if abs(r - float(st.get("rise") or 0)) > 1e-4:
+            st["rise"] = r
+            n += 1
+    return n
+
+
 def cut_well(doc, r) -> int:
     """The well of stair ``r`` cut in the slab over it (as «Stairs» does)."""
     from . import project as PJ
@@ -1611,12 +1636,24 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
                                             zk[k] + 0.003), o, d, r, 0.05,
                                        wv - 0.05), STRIP))
             if ends_on_:                # the landing's finish over the
-                q = [_at(o, d, r, ss[m - 1] - rt - nos_p, 0),   # last riser
+                s_l = ss[m - 1] - rt    # last riser (flush with its finish)
+                q = [_at(o, d, r, s_l, 0),
                      _at(o, d, r, ss[m - 1] + 0.01, 0),
                      _at(o, d, r, ss[m - 1] + 0.01, wv),
-                     _at(o, d, r, ss[m - 1] - rt - nos_p, wv)]
+                     _at(o, d, r, s_l, wv)]
                 land_ext.setdefault(count + m, []).append(
                     [(p_[0], p_[1]) for p_ in q])
+                # the landing's front edge: a step like the others — the
+                # same nosing (and anti-slip strip) over the last riser
+                sf = s_l - nos_p
+                if ft > 0 and nos_p > 1e-4:
+                    out.append((_prism(_clean(_nose_profile(
+                        sf, s_l, zk[m], ft, nose_type)), o, d, r, 0.0, wv),
+                        fin))
+                if ft > 0 and nose_type == "strip" and wv > 0.2:
+                    out.append((_prism(_box(sf + 0.012, sf + 0.052, zk[m],
+                                            zk[m] + 0.003), o, d, r, 0.05,
+                                       wv - 0.05), STRIP))
         if kind == "solid":
             for k in range(1, m):
                 q = [_at(o, d, r, ss[k - 1] - nos, 0), _at(o, d, r, ss[k], 0),

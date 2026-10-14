@@ -473,7 +473,7 @@ def _structure(raw, level_ids: set) -> list[dict]:
                     rec["zone"] = True
                 # a part sunk / raised by hand; the roof slab on the top
                 # floor; a slab not built (the ground floor's, slabs on top)
-                for k_ in ("user", "roof", "skip", "top"):
+                for k_ in ("user", "roof", "skip", "top", "grade"):
                     if e.get(k_):
                         rec[k_] = True
                 if e.get("room"):          # sunk / raised for this room

@@ -67,7 +67,7 @@ DEFAULTS = {
     "door_frame": "auto", "win_frame": "auto", "floor_h": 3.048,
     "tmin": 0.08, "tmax": 0.40,
     "door_h": 2.10, "win_h": 1.20, "sill": 0.90,
-    "slab_on": True, "slab_t": 0.15, "slab_pos": "top",
+    "slab_on": True, "slab_t": 0.1016, "slab_pos": "bottom", "ground_slab": False,
     "stair_rail": "ss_bars", "stair_rail_h": 0.9144, "stair_rail_sides": "inner",
     "stair_rail_off": 0.05, "stair_rail_gap": 0.0, "stair_rail_ext": 0.0,
     "parapet_rail": "solid",
@@ -2274,11 +2274,38 @@ def slab_on_top(doc) -> bool:
     return (doc.get("settings") or {}).get("slab_pos", "top") == "top"
 
 
+def to_floor_slabs(doc, t=0.1016) -> int:
+    """A project made with slabs over each floor turned to slabs as floors:
+    each floor's slab under it (the ground floor on the ground, its
+    finishes only), ``t`` thick where they had the old default thickness —
+    the walls follow. How many slabs changed thickness."""
+    st = doc["settings"]
+    old = float(st.get("slab_t", 0.15) or 0.15)
+    st["slab_pos"] = "bottom"
+    st["slab_t"] = round(float(t), 4)
+    st.setdefault("ground_slab", False)
+    n = 0
+    for e in doc["arch"]["structure"]:
+        if e["type"] != "slab" or e.get("zone") or e.get("user") or \
+                e.get("roof"):
+            continue
+        if abs(float(e.get("t", old)) - old) < 1e-4 or \
+                abs(float(e.get("t", old)) - 0.15) < 1e-4:
+            e["t"] = round(float(t), 4)
+            n += 1
+    apply_slab_pos(doc)
+    return n
+
+
 def apply_slab_pos(doc) -> None:
     """The levels' main slabs marked for where they stand (``top``: over
     the floor) — the CAD zones, the parts sunk / raised and the roof
     slabs keep theirs."""
     on_top = slab_on_top(doc)
+    ground = {lv["id"] for lv in doc["arch"]["levels"]
+              if lv.get("kind") == "ground"}
+    grade = not on_top and not (doc.get("settings") or {}).get(
+        "ground_slab", False)
     for s in doc["arch"]["structure"]:
         if s["type"] != "slab" or s.get("zone") or s.get("user") \
                 or s.get("roof"):
@@ -2287,6 +2314,13 @@ def apply_slab_pos(doc) -> None:
             s["top"] = True
         else:
             s.pop("top", None)
+        # slabs as floors: the ground floor on the ground — its slab
+        # outline kept for the floor finish (rooms, verandah, lobby, porch)
+        # but no concrete slab made
+        if grade and s["level"] in ground:
+            s["grade"] = True
+        else:
+            s.pop("grade", None)
 
 
 def _floor_slabs(doc, lid) -> list:
@@ -4731,7 +4765,10 @@ def _finish_groups(doc):
         from . import slabedges as SE
         for i, lv in enumerate(arch["levels"]):
             lid = lv["id"]
-            no_edge = lid in (doc.get("parking") or {}) or \
+            # a parking floor: no finish out to its edges — but the ground
+            # floor's car porch, verandah and lobby are finished
+            no_edge = (lid in (doc.get("parking") or {})
+                       and lv.get("kind") != "ground") or \
                 not any(w["level"] == lid for w in arch["walls"])
             try:
                 rooms_ = [] if no_edge else spaces.of_level(arch, lid)
@@ -5935,6 +5972,7 @@ def commit(viewport, doc, opts=None) -> None:
     arch = doc["arch"]
     arch["levels"] = M.fix_levels(arch["levels"])
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
+    arch["_walls_down"] = not slab_on_top(doc)
     apply_ground_ffl(doc)
     apply_slab_pos(doc)
     try:
@@ -6042,8 +6080,10 @@ def commit(viewport, doc, opts=None) -> None:
             from .host import log_error
             log_error("project.group_by_level")
     arch.pop("_plaster", None)
+    arch.pop("_walls_down", None)
     data = copy.deepcopy(doc)
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
+    arch["_walls_down"] = not slab_on_top(doc)
     want = [level_layer(lv["name"]) for lv in arch["levels"]] + \
         [ann_layer(lv["name"]) for lv in arch["levels"]] + \
         [text_layer(lv["name"]) for lv in arch["levels"]] + \

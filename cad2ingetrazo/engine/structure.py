@@ -55,6 +55,18 @@ def PLASTER(doc) -> float:
         return 0.0
 
 
+def _down(doc, w, li) -> float:
+    """How far a wall standing on its floor reaches down — to the bottom
+    of the floor slab under it (slabs as floors: the slab between the
+    walls, the walls down over its edge, so the outer face runs on in one
+    plane). 0 otherwise, or for a wall set on its own base / a railing."""
+    if not doc.get("_walls_down"):
+        return 0.0
+    if w.get("rail") or abs(float(w.get("base", 0.0) or 0.0)) > 1e-6:
+        return 0.0
+    return max(float(li.get("slab", 0.0) or 0.0), 0.0)
+
+
 def _plastered(w, p):
     """The wall as built with its plaster: a coat ``p`` thick on both
     faces (its centre line kept) and, standing up to the slab over it, on
@@ -217,7 +229,7 @@ def levels_info(doc: dict, elevations) -> dict:
     off_next = next_floor_offsets(doc)
     for s in doc.get("structure") or []:
         if s["type"] != "slab" or s.get("skip") or s.get("user") \
-                or s.get("zone"):
+                or s.get("zone") or s.get("grade"):
             continue
         if s.get("top"):        # the slab over the floor: on its walls
             roof_t[s["level"]] = max(roof_t.get(s["level"], 0.0),
@@ -1933,7 +1945,7 @@ def build(doc: dict, elevations) -> list[dict]:
         if ramps:
             mine2, ops_extra = [], []
             for w in mine:
-                b_ = z0 + float(w.get("base", 0.0))
+                b_ = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
                 t_ = under if w.get("height", "level") == "level" \
                     else z0 + float(w["height"])
                 try:
@@ -1983,7 +1995,7 @@ def build(doc: dict, elevations) -> list[dict]:
             pieces = plans.get(w["id"])
             if not pieces:
                 continue
-            b = z0 + float(w.get("base", 0.0))
+            b = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
             top = under if w.get("height", "level") == "level" \
                 else z0 + float(w["height"])
             if top - b < 0.01:
@@ -2145,7 +2157,19 @@ def build(doc: dict, elevations) -> list[dict]:
         ids_ = [lv["id"] for lv in doc["levels"]]
         k_ = ids_.index(lid) if lid in ids_ else -1
         nxt = ids_[k_ + 1] if 0 <= k_ < len(ids_) - 1 else None
+        down_cut = []
+        if doc.get("_walls_down"):         # the walls standing on the slab
+            try:
+                wp_ = W.plan([w for w in mine if not w.get("rail") and abs(
+                    float(w.get("base", 0.0) or 0.0)) < 1e-6
+                    and W.why_not(w) is None])
+                down_cut = [{"corners": [list(q) for q in pc["outer"]]}
+                            for pcs in wp_.values() for pc in pcs]
+            except Exception:  # noqa: BLE001
+                down_cut = []
         for s in slabs_:
+            if s.get("grade"):
+                continue          # on the ground: its finish only
             if s.get("top"):
                 # the slab OVER the floor (as cast on site): on its walls,
                 # under the next floor's open floor; the next floor's
@@ -2170,6 +2194,9 @@ def build(doc: dict, elevations) -> list[dict]:
                        # openings wound the other way round
                        "holes": [list(reversed(_ccw([tuple(p) for p in h])))
                                  for h in s.get("holes") or []]}]
+            if down_cut and not s.get("top") and not s.get("roof") and \
+                    not s.get("zone"):
+                cut = list(cut) + down_cut
             if cut:
                 parts_ = _minus(s, cut) or parts_
             band_ = []
