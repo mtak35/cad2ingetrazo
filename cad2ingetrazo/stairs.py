@@ -310,6 +310,7 @@ def auto(doc, cad=None, flip=False) -> dict:
                             and math.dist(ft, x[1]) < 0.6), None)
                 if hit is not None:
                     try:
+                        drop_holes_over(doc, r)   # the CAD's hole there
                         r = relay(r, hit[2], hit[3], hit[4])
                         r["foot0"] = list(hit[1])
                     except Exception:  # noqa: BLE001
@@ -405,6 +406,40 @@ def cut_well(doc, r) -> int:
     return 0
 
 
+def drop_holes_over(doc, st) -> int:
+    """The slab openings over stair ``st``'s outline (its well, a stair hole
+    drawn in the CAD merged with it) closed — on its level and the next —
+    before the stair is laid out again somewhere else."""
+    from shapely.geometry import Polygon
+    cs = st.get("corners") or []
+    if len(cs) < 3:
+        return 0
+    o = Polygon(cs).buffer(0.05)
+    if not o.is_valid:
+        o = o.buffer(0)
+    lids = {st.get("level"), st.get("to")}
+    n = 0
+    for s in doc["arch"]["structure"]:
+        if s["type"] != "slab" or s["level"] not in lids:
+            continue
+        keep = []
+        for h in s.get("holes") or []:
+            try:
+                hp = Polygon(h)
+                if not hp.is_valid:
+                    hp = hp.buffer(0)
+                share = hp.intersection(o).area
+            except Exception:  # noqa: BLE001
+                keep.append(h)
+                continue
+            if hp.area >= 0.3 and share >= 0.3 * hp.area:
+                n += 1
+                continue
+            keep.append(h)
+        s["holes"] = keep
+    return n
+
+
 def restair(doc, sid, turns, rot, counts) -> dict:
     """Stair ``sid`` laid again by hand: ``counts`` risers in each flight
     (their number the number of flights), ``turns`` how each flight leaves
@@ -421,6 +456,7 @@ def restair(doc, sid, turns, rot, counts) -> dict:
     new["rot"] = float(rot or 0.0)
     new["foot0"] = [round(foot0[0], 4), round(foot0[1], 4)]
     _uncut(doc, [st])
+    drop_holes_over(doc, st)               # its old opening, upstairs too
     i = doc["stairs"].index(st)
     doc["stairs"][i] = new
     cut_well(doc, new)

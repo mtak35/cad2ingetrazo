@@ -3144,6 +3144,12 @@ class Panel(QWidget):
                            primary=True))
         row.addWidget(_btn("Remove", self._stairs_remove))
         f.addRow(row)
+        f.addRow(_btn("Flights, rotation and landings…",
+                      lambda: self.stair_flights_dialog(),
+                      "Lay a stair out by hand where the CAD was read "
+                      "wrong: the flights, how each turns off its landing, "
+                      "the whole stair turned — the landings and railings "
+                      "follow (the selected stair, else this level's)"))
         f.addRow(QLabel("<i>Terraces (every upper floor):</i>"))
         row = QHBoxLayout()
         self.te_h = _spin(0, 3, 1.0)
@@ -3973,10 +3979,8 @@ class Panel(QWidget):
                                 "slab, footing or roof in the model</i>")
         self.sel_title.setWordWrap(True)
         v.addWidget(self.sel_title)
-        self.sel_form_host = QWidget()
-        self.sel_form = QFormLayout(self.sel_form_host)
-        v.addWidget(self.sel_form_host)
-        self.stf_box = QGroupBox("Flights and landings (this stair)")
+        self.stf_box = QGroupBox("Flights, rotation and landings "
+                                 "(this stair)")
         self.stf_box.setToolTip(
             "Lay the stair out by hand where the CAD plan was read wrong: "
             "how many flights, the risers in each, the way each flight "
@@ -3987,6 +3991,9 @@ class Panel(QWidget):
         self.stf_lay = QVBoxLayout(self.stf_box)
         self.stf_box.setVisible(False)
         v.addWidget(self.stf_box)
+        self.sel_form_host = QWidget()
+        self.sel_form = QFormLayout(self.sel_form_host)
+        v.addWidget(self.sel_form_host)
         row = QHBoxLayout()
         self.sel_apply = _btn("Apply", self._apply_selected, primary=True)
         self.sel_flip = _btn("Flip hinge", self._flip)
@@ -4219,8 +4226,15 @@ class Panel(QWidget):
             log_error("panel._fill_stair_flights")
 
     # ---- a stair's flights, turns and landings by hand ------------------------
-    def _fill_stair_flights(self, st, counts=None, turns=None, rot=None):
-        lay = self.stf_lay
+    def _fill_stair_flights(self, st, counts=None, turns=None, rot=None,
+                            ui=None):
+        """The flights / turns / rotation controls of stair ``st`` into
+        ``ui`` ({"lay", "box"}; the panel's own box by default)."""
+        if ui is None:
+            ui = getattr(self, "_stf_ui", None)
+            if ui is None:
+                ui = self._stf_ui = {"lay": self.stf_lay, "box": self.stf_box}
+        lay, box = ui["lay"], ui.get("box")
         while lay.count():
             it = lay.takeAt(0)
             w_ = it.widget()
@@ -4232,15 +4246,16 @@ class Panel(QWidget):
                     i2 = l_.takeAt(0)
                     if i2.widget() is not None:
                         i2.widget().deleteLater()
+        ui["state"] = None
         if st is None:
-            self.stf_box.setVisible(False)
-            self._stf = None
+            if box is not None:
+                box.setVisible(False)
             return
         from . import stairs as ST
         flights, _l = ST.as_flights(st)
         if not flights:
-            self.stf_box.setVisible(False)
-            self._stf = None
+            if box is not None:
+                box.setVisible(False)
             return
         if counts is None:
             counts = [len(f["lines"]) for f in flights]
@@ -4249,7 +4264,7 @@ class Panel(QWidget):
         turns = (list(turns) + ["right"] * len(counts))[:len(counts) - 1]
         if rot is None:
             rot = float(st.get("rot") or 0.0)
-        self._stf = {"id": st["id"]}
+        state = {"id": st["id"]}
         row = QHBoxLayout()
         row.addWidget(QLabel("Flights"))
         nf = QSpinBox()
@@ -4262,14 +4277,15 @@ class Panel(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
 
-        def renum(n):
-            tot = sum(c.value() for c in self._stf["counts"])
+        def renum(n, _ui=ui):
+            stt = _ui["state"]
+            tot = sum(c.value() for c in stt["counts"])
             n = max(1, int(n))
             base = [tot // n + (1 if i < tot % n else 0) for i in range(n)]
-            cur_t = [c.currentData() for c in self._stf["turns"]]
+            cur_t = [c.currentData() for c in stt["turns"]]
             self._fill_stair_flights(
-                PJ.find_record(self.doc(), "stair", st["id"]), base,
-                cur_t, self._stf["rot"].value())
+                PJ.find_record(self.doc(), "stair", stt["id"]), base,
+                cur_t, stt["rot"].value(), _ui)
         nf.valueChanged.connect(renum)
         cs, ts = [], []
         for i, n in enumerate(counts):
@@ -4286,8 +4302,9 @@ class Panel(QWidget):
                 for k, lab in ST.TURNS:
                     cb.addItem(lab, k)
                 cb.setCurrentIndex(max(cb.findData(turns[i - 1]), 0))
-                cb.setToolTip("How this flight leaves the landing before it "
-                              "(seen walking up); the landing is made to fit")
+                cb.setToolTip("Flight rotation: how this flight turns off "
+                              "the landing before it (seen walking up); the "
+                              "landing and the railing follow")
                 row.addWidget(cb)
                 ts.append(cb)
             else:
@@ -4295,7 +4312,7 @@ class Panel(QWidget):
             row.addStretch(1)
             lay.addLayout(row)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Turn the whole stair"))
+        row.addWidget(QLabel("Rotate whole stair"))
         rs = QDoubleSpinBox()
         rs.setRange(-360.0, 360.0)
         rs.setDecimals(1)
@@ -4305,30 +4322,37 @@ class Panel(QWidget):
         rs.setToolTip("Degrees, anticlockwise, round the middle of the first "
                       "step")
         row.addWidget(rs)
-        row.addWidget(_btn("⟲ 90°", lambda: (rs.setValue(rs.value() + 90.0),
-                                             self._stair_relay())))
-        row.addWidget(_btn("⟳ 90°", lambda: (rs.setValue(rs.value() - 90.0),
-                                             self._stair_relay())))
+        row.addWidget(_btn("⟲ 90°", lambda _ui=ui: (
+            rs.setValue(rs.value() + 90.0), self._stair_relay(_ui))))
+        row.addWidget(_btn("⟳ 90°", lambda _ui=ui: (
+            rs.setValue(rs.value() - 90.0), self._stair_relay(_ui))))
         row.addStretch(1)
         lay.addLayout(row)
         row = QHBoxLayout()
-        row.addWidget(_btn("Apply flights", self._stair_relay,
-                           "Lay the stair out as set above: the landings "
-                           "follow the turns, the slab's well is cut again",
+        row.addWidget(_btn("Apply flights", lambda _ui=ui:
+                           self._stair_relay(_ui),
+                           "Lay the stair out as set above: the landings and "
+                           "the railings follow the flights, the slab's "
+                           "opening (and its railing upstairs) is made again",
                            primary=True))
-        row.addWidget(_btn("Mirror turns", self._stair_mirror,
+        row.addWidget(_btn("Mirror turns", lambda _ui=ui:
+                           self._stair_mirror(_ui),
                            "Every left turn made right and every right "
                            "turn left"))
-        row.addWidget(_btn("Back to the CAD", self._stair_unrelay,
+        row.addWidget(_btn("Back to the CAD", lambda _ui=ui:
+                           self._stair_unrelay(_ui),
                            "Forget the turns set by hand: the stair read "
                            "from the CAD plan again"))
         lay.addLayout(row)
-        self._stf.update(counts=cs, turns=ts, rot=rs)
-        self.stf_box.setVisible(True)
+        state.update(counts=cs, turns=ts, rot=rs)
+        ui["state"] = state
+        if box is not None:
+            box.setVisible(True)
 
-    def _stair_relay(self):
+    def _stair_relay(self, ui=None):
         from . import stairs as ST
-        f = getattr(self, "_stf", None)
+        ui = ui or getattr(self, "_stf_ui", None) or {}
+        f = ui.get("state")
         if not f:
             return
         doc = self.doc()
@@ -4345,12 +4369,17 @@ class Panel(QWidget):
                          for t in turns) or "one flight"
         if self.commit(doc, f"Stair laid out: {len(counts)} flight"
                        f"{'s' if len(counts) > 1 else ''} ({what}), "
+                       f"rotated {f['rot'].value():.0f}°, "
                        f"{new['risers']} risers of "
                        f"{new['rise'] * 1000:.0f} mm"):
             self._reselect(("stair", f["id"]))
+            if ui.get("box") is None:          # a dialog: its controls again
+                self._fill_stair_flights(
+                    PJ.find_record(self.doc(), "stair", f["id"]), ui=ui)
 
-    def _stair_mirror(self):
-        f = getattr(self, "_stf", None)
+    def _stair_mirror(self, ui=None):
+        ui = ui or getattr(self, "_stf_ui", None) or {}
+        f = ui.get("state")
         if not f:
             return
         sw = {"left": "right", "right": "left", "uleft": "uright",
@@ -4358,17 +4387,72 @@ class Panel(QWidget):
         for cb in f["turns"]:
             k = cb.currentData()
             cb.setCurrentIndex(max(cb.findData(sw.get(k, k)), 0))
-        self._stair_relay()
+        self._stair_relay(ui)
 
-    def _stair_unrelay(self):
+    def _stair_unrelay(self, ui=None):
         from . import stairs as ST
-        f = getattr(self, "_stf", None)
+        ui = ui or getattr(self, "_stf_ui", None) or {}
+        f = ui.get("state")
         if not f:
             return
         doc = self.doc()
         ST.unstair(doc, f["id"])
         PJ.store_only(self.vp, doc)
         self._stairs()
+
+    def stair_flights_dialog(self, sid=None):
+        """The stair's flights, their rotation (turns) and the whole
+        stair's rotation, in a dialog."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        if sid is None:
+            sel = self._sel_key or self._selected()
+            if not sel or sel[0] not in ("stair", "stairrail"):
+                doc = self.doc()
+                lid = self.level()[0]
+                mine = [s_ for s_ in doc.get("stairs") or []
+                        if s_["level"] == lid] or doc.get("stairs") or []
+                if not mine:
+                    self.flash("No stair in the model — «Stairs» first")
+                    return
+                sid = mine[0]["id"]
+            else:
+                sid = sel[1]
+        st = PJ.find_record(self.doc(), "stair", sid)
+        if st is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{st.get('name') or 'Stair'} — flights, "
+                           "rotation and landings")
+        v = QVBoxLayout(dlg)
+        doc = self.doc()
+        others = [s_ for s_ in doc.get("stairs") or []]
+        if len(others) > 1:
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Stair"))
+            pick = QComboBox()
+            names = {lv["id"]: lv["name"] for lv in doc["arch"]["levels"]}
+            for i, s_ in enumerate(others):
+                pick.addItem(f"Stair {i + 1} · {names.get(s_['level'], '')}",
+                             s_["id"])
+            pick.setCurrentIndex(max(pick.findData(sid), 0))
+            row.addWidget(pick)
+            row.addStretch(1)
+            v.addLayout(row)
+        host = QVBoxLayout()
+        v.addLayout(host)
+        ui = {"lay": host, "box": None}
+        self._fill_stair_flights(st, ui=ui)
+        if len(others) > 1:
+            pick.currentIndexChanged.connect(
+                lambda _i: self._fill_stair_flights(
+                    PJ.find_record(self.doc(), "stair", pick.currentData()),
+                    ui=ui))
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.setModal(False)
+        dlg.show()
+        self._stf_dlg = dlg
 
     def _build_fields(self, form, kind, rec) -> dict:
         """The element's fields into ``form``: {key: (type, widget)}."""
@@ -4680,6 +4764,9 @@ class Panel(QWidget):
                 sub.addSeparator()
         except Exception:  # noqa: BLE001
             log_error("panel extend-to-selected menu")
+        if sel[0] in ("stair", "stairrail"):
+            sub.addAction("Flights, rotation and landings…",
+                          lambda: self.stair_flights_dialog(sel[1]))
         sub.addAction("Edit properties…", lambda: self.edit_dialog(sel))
         if sel[0] == "wall" and rec.get("type") == "curtain":
             sub.addAction("Add door in this curtain wall…",
@@ -4949,6 +5036,11 @@ class Panel(QWidget):
         widgets = self._build_fields(form, sel[0], rec)
         if not widgets:
             form.addRow(QLabel("Nothing to edit here — use the panel"))
+        if sel[0] in ("stair", "stairrail"):
+            form.addRow(_btn("Flights, rotation and landings…",
+                             lambda: (dlg.reject(),
+                                      self.stair_flights_dialog(sel[1])),
+                             primary=True))
         if sel[0] == "slab":
             row = QHBoxLayout()
             row.addWidget(_btn("Edges, railing, sun shades, openings…",
