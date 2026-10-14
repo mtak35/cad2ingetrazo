@@ -213,6 +213,12 @@ FIELDS = {
               ("risers", "Number of risers (steps)", "int", (2, 80)),
               ("stype", "Stair type", "choice",
                ("monolithic", "solid", "open", "cantilever")),
+              ("fin", "Tread / riser finish", "choice",
+               ("marble", "granite", "terrazzo", "porcelain", "wood",
+                "bare")),
+              ("nose_type", "Nosing type", "choice",
+               ("square", "bullnose", "pencil", "chamfer", "flush",
+                "strip")),
               ("rail", "Railing", "choice",
                ("none", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
                 "wood", "wall_rail", "solid")),
@@ -269,6 +275,12 @@ def _choice_labels() -> dict:
     from . import ceilings as CE_
     out.update({t[0]: t[1] for t in CE_.TYPES})
     out.update({"level": "As the level"})
+    try:
+        from . import stairs as ST_
+        out.update({k: lab for k, lab, _c in ST_.FINISHES })
+        out.update(dict(ST_.NOSINGS))
+    except Exception:  # noqa: BLE001
+        pass
     out.update({"none": "No railing", "inner": "Inner side (by the well)",
                 "both": "Both sides", "outer": "Outer side (by the wall)",
                 "monolithic": "Monolithic RCC",
@@ -3099,7 +3111,51 @@ class Panel(QWidget):
         row.addWidget(self.st_going)
         f.addRow("Riser (max) / tread", row)
         self.st_nose = _spin(0.0, 0.1, 0.025, 0.005)
-        f.addRow("Nosing", self.st_nose)
+        self.st_nose.setToolTip("How far the tread's front edge projects "
+                                "past the riser")
+        f.addRow("Nosing projection", self.st_nose)
+        self.st_nose_type = QComboBox()
+        for k_, lab_ in ST.NOSINGS:
+            self.st_nose_type.addItem(lab_, k_)
+        self.st_nose_type.setToolTip("The shape of the tread finish's front "
+                                     "edge")
+        f.addRow("Nosing type", self.st_nose_type)
+        self.st_fin = QComboBox()
+        for k_, lab_, _c in ST.FINISHES:
+            self.st_fin.addItem(lab_, k_)
+        self.st_fin.setToolTip("A finish layer on the treads, the risers "
+                               "and the landings (monolithic / solid "
+                               "stairs) — the concrete is set down and back "
+                               "under it, so the finished riser and going "
+                               "stay as drawn")
+        f.addRow("Tread / riser finish", self.st_fin)
+        row_ = QHBoxLayout()
+        self.st_fin_t = _spin(0.0, 0.08, 0.02, 0.005)
+        self.st_fin_t.setToolTip("The tread (and landing) finish's "
+                                 "thickness")
+        self.st_fin_rt = _spin(0.0, 0.05, 0.015, 0.005)
+        self.st_fin_rt.setToolTip("The riser finish's thickness")
+        row_.addWidget(QLabel("tread"))
+        row_.addWidget(self.st_fin_t)
+        row_.addWidget(QLabel("riser"))
+        row_.addWidget(self.st_fin_rt)
+        f.addRow("Finish thickness", row_)
+        self.st_fin_follow = QCheckBox("Follow the slab's floor finish")
+        self.st_fin_follow.setChecked(True)
+        self.st_fin_follow.setToolTip(
+            "On: the stair climbs from the finished floor below to the "
+            "finished floor of the slab it arrives at (the floor finish "
+            "of each — the room's own, the slab's, else the default), all "
+            "its risers equal between them, and its treads and landings "
+            "take that slab's finish thickness — no step at the top or "
+            "the bottom. Off: the slabs' bare tops and the tread thickness "
+            "above.")
+        self.st_fin_follow.toggled.connect(
+            lambda _on: (not self._building) and self._stair_type())
+        f.addRow("", self.st_fin_follow)
+        for w__ in (self.st_nose_type, self.st_fin):
+            w__.currentIndexChanged.connect(
+                lambda _i: (not self._building) and self._stair_type())
         self.st_tread = _spin(0.02, 0.2, 0.05, 0.005)
         f.addRow("Tread thickness (open / cantilever)", self.st_tread)
         from .engine import railings as RL_
@@ -3253,6 +3309,16 @@ class Panel(QWidget):
         self.st_riser.setValue(float(stt.get("stair_riser", 0.1778)))
         self.st_going.setValue(float(stt.get("stair_going", 0.2794)))
         self.st_nose.setValue(float(stt.get("stair_nosing", 0.025)))
+        for cb_, k_, dv_ in ((self.st_nose_type, "stair_nose_type", "square"),
+                             (self.st_fin, "stair_fin", "marble")):
+            cb_.blockSignals(True)
+            cb_.setCurrentIndex(max(cb_.findData(stt.get(k_, dv_)), 0))
+            cb_.blockSignals(False)
+        self.st_fin_t.setValue(float(stt.get("stair_fin_t", 0.02)))
+        self.st_fin_follow.blockSignals(True)
+        self.st_fin_follow.setChecked(bool(stt.get("stair_fin_follow", True)))
+        self.st_fin_follow.blockSignals(False)
+        self.st_fin_rt.setValue(float(stt.get("stair_fin_rt", 0.015)))
         self.st_tread.setValue(float(stt.get("stair_tread", 0.05)))
         n_cad = sum(len(v) for v in doc.get("stair_cad", {}).values())
         n = len(doc.get("stairs") or [])
@@ -3272,6 +3338,13 @@ class Panel(QWidget):
                                stair_riser=self.st_riser.value(),
                                stair_going=self.st_going.value(),
                                stair_nosing=self.st_nose.value(),
+                               stair_nose_type=self.st_nose_type
+                               .currentData(),
+                               stair_fin=self.st_fin.currentData(),
+                               stair_fin_t=self.st_fin_t.value(),
+                               stair_fin_rt=self.st_fin_rt.value(),
+                               stair_fin_follow=self.st_fin_follow
+                               .isChecked(),
                                stair_tread=self.st_tread.value(),
                                stair_rail=self.st_rail.currentData(),
                                stair_rail_h=self.st_rail_h.value(),
@@ -4329,6 +4402,28 @@ class Panel(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(QLabel("Finish"))
+        fc = QComboBox()
+        stt_ = self.doc()["settings"]
+        cur_f = st.get("fin") or stt_.get("stair_fin", "marble")
+        for k_, lab_, _c in ST.FINISHES:
+            fc.addItem(lab_, k_)
+        fc.setCurrentIndex(max(fc.findData(cur_f), 0))
+        fc.setToolTip("The finish layer on this stair's treads, risers and "
+                      "landings")
+        row.addWidget(fc)
+        row.addWidget(QLabel("Nosing"))
+        nc = QComboBox()
+        cur_n = st.get("nose_type") or stt_.get("stair_nose_type", "square")
+        for k_, lab_ in ST.NOSINGS:
+            nc.addItem(lab_, k_)
+        nc.setCurrentIndex(max(nc.findData(cur_n), 0))
+        nc.setToolTip("The shape of the tread finish's front edge")
+        row.addWidget(nc)
+        row.addStretch(1)
+        lay.addLayout(row)
+        state.update(fin=fc, nose=nc)
+        row = QHBoxLayout()
         row.addWidget(_btn("Apply flights", lambda _ui=ui:
                            self._stair_relay(_ui),
                            "Lay the stair out as set above: the landings and "
@@ -4390,6 +4485,10 @@ class Panel(QWidget):
         doc = self.doc()
         counts = [c.value() for c in f["counts"]]
         turns = [c.currentData() for c in f["turns"]]
+        rec_ = PJ.find_record(doc, "stair", f["id"])
+        if rec_ is not None and f.get("fin") is not None:
+            rec_["fin"] = f["fin"].currentData()
+            rec_["nose_type"] = f["nose"].currentData()
         try:
             new = ST.restair(doc, f["id"], turns, f["rot"].value(), counts)
         except Exception as e:  # noqa: BLE001

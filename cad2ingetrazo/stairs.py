@@ -556,7 +556,7 @@ def _uncut(doc, only=None) -> None:
 
 #: what one stair may set for itself (else the panel's defaults)
 OWN = ("stype", "rail", "rail_h", "rail_sides", "rail_off", "rail_gap",
-       "rail_ext")
+       "rail_ext", "fin", "nose_type")
 SIDES = ("inner", "outer", "both", "none")
 
 
@@ -578,7 +578,10 @@ def eff(st, stt) -> dict:
             "rail_gap": float(_own(st, "rail_gap", stt, "stair_rail_gap",
                                    0.0)),
             "rail_ext": float(_own(st, "rail_ext", stt, "stair_rail_ext",
-                                   0.0))}
+                                   0.0)),
+            "fin": st.get("fin") or stt.get("stair_fin", "marble"),
+            "nose_type": st.get("nose_type") or stt.get("stair_nose_type",
+                                                        "square")}
 
 
 def groups(doc, z_of, layer_of):
@@ -591,9 +594,27 @@ def groups(doc, z_of, layer_of):
         if z0 is None:
             continue
         e = eff(st, stt)
+        fin_t = float(stt.get("stair_fin_t", 0.02))
+        try:                  # finished floor to finished floor: the floor
+            lo, hi = floor_finishes(doc, st)    # finish under its foot and
+        except Exception:  # noqa: BLE001      # on the slab it arrives at
+            from .host import log_error
+            log_error("stairs.floor_finishes")
+            lo = hi = 0.0
+        if lo or hi:
+            n_ = int(st.get("risers") or 1) or 1
+            H_ = float(st["rise"]) * n_ + hi - lo
+            st = dict(st, rise=H_ / n_)
+            z0 += lo
+            if hi > 0.001:
+                fin_t = hi            # treads / landings: the slab's finish
         parts = build(st, z0, e["stype"], float(stt.get("stair_waist", 0.15)),
                       float(stt.get("stair_nosing", 0.025)),
-                      float(stt.get("stair_tread", 0.05)), None)
+                      float(stt.get("stair_tread", 0.05)), None,
+                      fin=fin_colour(e["fin"]),
+                      fin_t=fin_t,
+                      fin_rt=float(stt.get("stair_fin_rt", 0.015)),
+                      nose_type=e["nose_type"])
         rails = build_rail(st, z0, e["rail"], e["rail_h"], e["rail_sides"],
                            e["rail_off"], e["rail_gap"], e["rail_ext"],
                            _floor_of(parts), _walls_of(doc, st["level"]))
@@ -611,6 +632,55 @@ def groups(doc, z_of, layer_of):
         out.append((f"Stair {len(out) + 1}", st["id"], st["level"], parts,
                     layer_of(st["level"]), rails))
     return out
+
+
+def floor_finishes(doc, st) -> tuple:
+    """(below, above): the floor finish's thickness (m) under the stair's
+    first step, on its own level, and where it arrives, on the slab above —
+    each the finish of that room / slab zone (its own, the slab's, else the
+    default); 0 with floor finishes off or «Stair finish follows the floor
+    finish» unticked. The stair climbs from finished floor to finished
+    floor and its treads and landings take the slab's finish."""
+    stt = doc.get("settings") or {}
+    if not stt.get("finish_on", True) or not stt.get("stair_fin_follow",
+                                                      True):
+        return 0.0, 0.0
+    from . import project as PJ
+    from .engine import spaces
+    from shapely.geometry import Point
+    flights, _l = as_flights(st)
+    if not flights or not flights[0]["lines"]:
+        return 0.0, 0.0
+    foot = _mid(flights[0]["lines"][0])
+    d0 = _nrm(flights[0]["d"])
+    foot = (foot[0] - d0[0] * 0.3, foot[1] - d0[1] * 0.3)   # before it
+    top_l = flights[-1]["lines"][-1]
+    dt = _nrm(flights[-1]["d"])
+    g = float(flights[-1].get("g") or 0.28)
+    top = _mid(top_l)
+    top = (top[0] + dt[0] * (g + 0.3), top[1] + dt[1] * (g + 0.3))
+
+    def at(lid, pt):
+        if not lid:
+            return None
+        rec = None
+        try:
+            for room in spaces.of_level(doc["arch"], lid):
+                if room["poly"].contains(Point(pt)):
+                    rec = room.get("rec")
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _z, _w, thick = PJ._slab_finish_zones(doc, lid)
+        except Exception:  # noqa: BLE001
+            thick = []
+        return float(PJ._finish_t_at(doc, rec, thick, pt) or 0.0)
+    lo = at(st.get("level"), foot) or 0.0
+    hi = at(st.get("to"), top)
+    if hi is None:
+        hi = lo
+    return max(lo, 0.0), max(hi, 0.0)
 
 
 def _well_guard(doc, st, z0, kind, h, gap) -> list:
@@ -1421,11 +1491,70 @@ def _clean(profile):
     return out
 
 
+FINISHES = [("marble", "White marble", (0.92, 0.91, 0.88)),
+            ("granite", "Black granite", (0.22, 0.22, 0.23)),
+            ("terrazzo", "Terrazzo", (0.84, 0.80, 0.74)),
+            ("porcelain", "Porcelain tile (grey)", (0.72, 0.72, 0.70)),
+            ("wood", "Timber", (0.62, 0.45, 0.30)),
+            ("bare", "No finish (bare concrete)", None)]
+NOSINGS = [("square", "Square (projecting)"),
+           ("bullnose", "Bullnose (fully rounded)"),
+           ("pencil", "Pencil round (small radius)"),
+           ("chamfer", "Chamfered"),
+           ("flush", "Flush (no projection)"),
+           ("strip", "Square with anti-slip metal strip")]
+STRIP = (0.70, 0.71, 0.73)
+
+
+def fin_colour(key):
+    return next((c for k, _l, c in FINISHES if k == key), None)
+
+
+def _box(s0, s1, z0, z1):
+    """A rectangle in the (s, z) plane, in the profiles' turning sense."""
+    return [(s0, z0), (s0, z1), (s1, z1), (s1, z0)]
+
+
+def _nose_profile(s_front, s_back, z_top, ft, kind):
+    """A tread finish's section: its front edge shaped as the nosing."""
+    zb = z_top - ft
+    if kind == "bullnose" and ft > 0.004:
+        r = ft / 2.0
+        cx, cz = s_front + r, z_top - r
+        arc = [(cx + r * math.cos(math.radians(a)),
+                cz + r * math.sin(math.radians(a)))
+               for a in range(270, 89, -20)]
+        return arc + [(s_back, z_top), (s_back, zb)]
+    if kind == "pencil" and ft > 0.004:
+        rr = min(0.006, ft / 2.0)
+        cx, cz = s_front + rr, z_top - rr
+        arc = [(cx + rr * math.cos(math.radians(a)),
+                cz + rr * math.sin(math.radians(a)))
+               for a in range(180, 89, -15)]
+        return [(s_front, zb)] + arc + [(s_back, z_top), (s_back, zb)]
+    if kind == "chamfer":
+        c = min(0.01, ft * 0.6)
+        return [(s_front, zb), (s_front, z_top - c), (s_front + c, z_top),
+                (s_back, z_top), (s_back, zb)]
+    return _box(s_front, s_back, zb, z_top)
+
+
 def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
           tread_t=0.05, rail=None, rail_h=0.9, rail_sides="inner",
-          rail_off=0.05, rail_gap=0.0, rail_ext=0.0):
+          rail_off=0.05, rail_gap=0.0, rail_ext=0.0, fin=None, fin_t=0.02,
+          fin_rt=0.015, nose_type="square"):
     """[(faces, colour)] of a stair of the chosen type — with its railing
-    (``rail``: a railings type; None / "none" = no railing)."""
+    (``rail``: a railings type; None / "none" = no railing). ``fin`` (a
+    colour): a finish on the treads (``fin_t`` thick, its front edge the
+    ``nose_type`` nosing, ``nosing`` past the riser), on the risers
+    (``fin_rt``) and on the landings — the concrete set down / back by it,
+    so the finished risers and goings stay as drawn."""
+    from shapely.geometry import Polygon as _Pg
+    has_fin = fin is not None and kind in ("monolithic", "solid")
+    ft = max(float(fin_t), 0.0) if has_fin else 0.0
+    rt = max(float(fin_rt), 0.0) if has_fin else 0.0
+    nos_p = 0.0 if nose_type == "flush" else float(nosing)
+    land_ext = {}                     # landing «after» → finish run-ons
     from .engine import walls as W
     flights, landings = as_flights(st)
     rise = st["rise"]
@@ -1459,12 +1588,41 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
         tan = rise / g if g > 1e-6 else 1.0
         cos = 1.0 / math.sqrt(1.0 + tan * tan)
         nos = nosing if kind in ("monolithic", "solid") else 0.0
+        if has_fin:
+            nos = 0.0                   # the finish makes the nosing
+        ends_on_ = any(int(lg.get("after", -1)) == count + m
+                       for lg in landings)
+        if has_fin:
+            for j in range(m):          # the risers' finish
+                ztop = zk[j + 1] - ft if (j < m - 1 or ends_on_) \
+                    else zk[j + 1]
+                if rt > 0 and ztop > zk[j] + 1e-4:
+                    out.append((_prism(_box(ss[j] - rt, ss[j], zk[j], ztop),
+                                       o, d, r, 0.0, wv), fin))
+            for k in range(1, m):       # the treads' finish, nosing front
+                if ft <= 0:
+                    break
+                sf = ss[k - 1] - rt - nos_p
+                out.append((_prism(_clean(_nose_profile(
+                    sf, ss[k], zk[k], ft, nose_type)), o, d, r, 0.0, wv),
+                    fin))
+                if nose_type == "strip" and wv > 0.2:
+                    out.append((_prism(_box(sf + 0.012, sf + 0.052, zk[k],
+                                            zk[k] + 0.003), o, d, r, 0.05,
+                                       wv - 0.05), STRIP))
+            if ends_on_:                # the landing's finish over the
+                q = [_at(o, d, r, ss[m - 1] - rt - nos_p, 0),   # last riser
+                     _at(o, d, r, ss[m - 1] + 0.01, 0),
+                     _at(o, d, r, ss[m - 1] + 0.01, wv),
+                     _at(o, d, r, ss[m - 1] - rt - nos_p, wv)]
+                land_ext.setdefault(count + m, []).append(
+                    [(p_[0], p_[1]) for p_ in q])
         if kind == "solid":
             for k in range(1, m):
                 q = [_at(o, d, r, ss[k - 1] - nos, 0), _at(o, d, r, ss[k], 0),
                      _at(o, d, r, ss[k], wv), _at(o, d, r, ss[k - 1] - nos, wv)]
                 out.append((W.solid({"outer": _ccw(q), "holes": []},
-                                    zb, zk[k]), CONCRETE))
+                                    zb, zk[k] - ft), CONCRETE))
         elif kind == "monolithic":
             prof = []
 
@@ -1483,6 +1641,9 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
                 prof.append((ss[0], zb - T))
                 prof.append((ss[0], zb))
             for k in range(1, m):
+                if has_fin:             # set down under the finish
+                    prof += [(ss[k - 1], zk[k] - ft), (ss[k], zk[k] - ft)]
+                    continue
                 tn = min(0.03, rise / 3)
                 prof += [(ss[k - 1], zk[k] - tn), (ss[k - 1] - nos, zk[k] - tn),
                          (ss[k - 1] - nos, zk[k]), (ss[k], zk[k])]
@@ -1533,8 +1694,23 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
         th = {"monolithic": waist, "solid": zl - z0, "open": 0.10,
               "cantilever": 0.15}[kind]
         out.append((W.solid({"outer": _ccw([tuple(p) for p in lg["corners"]]),
-                             "holes": []}, zl - max(th, 0.05), zl),
+                             "holes": []}, zl - max(th, 0.05), zl - ft),
                     CONCRETE if kind in ("monolithic", "solid") else TIMBER))
+        if has_fin and ft > 0:          # the landing's finish
+            try:
+                from shapely.ops import unary_union as _uu
+                pg = _Pg([tuple(p[:2]) for p in lg["corners"]]).buffer(0)
+                ext = [_Pg(q).buffer(0) for q in
+                       land_ext.get(int(lg.get("after", -1)), [])]
+                u = _uu([pg] + ext).buffer(1e-4, join_style=2).buffer(
+                    -1e-4, join_style=2)
+                for g_ in getattr(u, "geoms", [u]):
+                    if g_.geom_type == "Polygon" and g_.area > 1e-3:
+                        out.append((W.solid({"outer": _ccw(list(
+                            g_.exterior.coords)[:-1]), "holes": []},
+                            zl - ft, zl), fin))
+            except Exception:  # noqa: BLE001
+                pass
     return out
 
 

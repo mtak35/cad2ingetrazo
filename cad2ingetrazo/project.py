@@ -97,7 +97,7 @@ DEFAULTS = {
     "basement_rcc": True, "retain_t": 0.3048,           # 12" RCC retaining
     "shoring": False, "shoring_type": "piles", "shoring_d": 0.6096,
     "shoring_embed": 3.048,                              # 10'-0" below
-    "stair_nosing": 0.025, "stair_tread": 0.05,
+    "stair_nosing": 0.025, "stair_tread": 0.05, "stair_fin": "marble", "stair_fin_t": 0.02, "stair_fin_rt": 0.015, "stair_nose_type": "square", "stair_fin_follow": True,
 }
 
 IFC = {"wall": "IfcWall", "column": "IfcColumn", "beam": "IfcBeam",
