@@ -355,3 +355,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Shafts named on the plan**: «GEN SHAFT», «IT SHAFT», «DUCT»… drawn as a box with an X on any layer are cut through the slab.
 - **Furniture**: the library model for each fixture chosen better (a WC is a toilet unit, not a Turkish toilet; a hob a cooker…); blocks on window, column, AC, pipe… layers left alone; kitchen base cabinets along the walls the sink and hob stand on; and the bedrooms, living / drawing rooms and dining rooms the plan leaves empty furnished — a bed and a wardrobe, a sofa and a coffee table, a table and chairs — against the walls no door opens on (section 9 ▸ «Furniture & fixtures from the CAD»).
 - **Plan views in the CAD's line weights**: with «The CAD's linework» on, a plan view shows the CAD's own line weights and types, the model's thin edge lines left out under them (back in 3D).
+
+## 3.16.2
+- The panel's title shows the version installed (it had stayed at 3.15.3).

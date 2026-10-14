@@ -599,9 +599,14 @@ class Panel(QWidget):
 
     # ---- top: the views --------------------------------------------------------
     def _head(self):
+        try:                   # the version installed (never typed in)
+            import sys as _sys
+            ver = getattr(_sys.modules.get(__package__), "__version__", "")
+        except Exception:  # noqa: BLE001
+            ver = ""
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
-                   "3.15.3</span>")
+                   f"{ver}</span>")
         self.lay.addWidget(t)
         row = QHBoxLayout()
         self.level_box = QComboBox()
