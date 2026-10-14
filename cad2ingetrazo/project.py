@@ -2095,6 +2095,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.slab_zones")
+    try:                                  # out over the floor below: its
+        cap_lower_floor(doc, lid)         # terraces (slabs as floors)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.cap_lower_floor")
     if st.get("terrace_rails", True):    # railings round its terraces
         try:
             rep["terrace_railings"] = terrace_railings(doc, lid, pl, P)
@@ -2307,10 +2312,11 @@ def slab_on_top(doc) -> bool:
 
 
 def cap_lower_floor(doc, lid) -> int:
-    """Slabs as floors: the floor slab of ``lid`` carried out over the
-    floor below it — flush with that floor's external walls and columns
-    (their outer faces), so it caps the floor under it as its roof too.
-    How many slabs grew."""
+    """Slabs as floors: where the floor below reaches out past this floor,
+    this floor's slab is carried out over it — flush with that floor's
+    external walls and columns (their outer faces) — a terrace, railed
+    round by ``terrace_railings``. This floor's slabs there are made one
+    (their openings kept). How many slabs grew."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     if slab_on_top(doc):
@@ -2320,13 +2326,22 @@ def cap_lower_floor(doc, lid) -> int:
         return 0
     arch = doc["arch"]
     walls = [w for w in arch["walls"] if w["level"] == below
-             and not w.get("rail") and W.why_not(w) is None]
+             and not w.get("rail") and W.why_not(w) is None
+             and not str(w.get("name", "")).startswith(
+                 ("Terrace railing", "Roof", "Opening"))]
     plans = W.plan([S._plastered(w, float(doc["settings"].get(
         "plaster_t", 0.0127) or 0.0)) for w in walls])
     loops = _outer_loops([pc for ps in plans.values() for pc in ps])
     polys = [Polygon(o).buffer(0) for o in loops]
     for e in arch["structure"]:
         if e["type"] in ("column", "core") and e["level"] == below and \
+                len(e.get("corners") or []) >= 3:
+            polys.append(Polygon([tuple(q[:2]) for q in e["corners"]])
+                         .buffer(0))
+        # the floor below's own outline (its porch, verandah…), as the
+        # slab over it was before slabs were floors
+        if e["type"] == "slab" and e["level"] == below and not (
+                e.get("zone") or e.get("user") or e.get("roof")) and \
                 len(e.get("corners") or []) >= 3:
             polys.append(Polygon([tuple(q[:2]) for q in e["corners"]])
                          .buffer(0))
@@ -2339,16 +2354,31 @@ def cap_lower_floor(doc, lid) -> int:
                                            or e.get("grade"))]
     if not mine:
         return 0
-    main = max(mine, key=lambda e: Polygon(e["corners"]).buffer(0).area)
-    u = unary_union([Polygon(main["corners"]).buffer(0), foot]).buffer(
-        1e-4, join_style=2).buffer(-1e-4, join_style=2)
-    g = max(getattr(u, "geoms", [u]), key=lambda q: q.area)
-    if g.geom_type != "Polygon" or g.area <= Polygon(
-            main["corners"]).buffer(0).area + 0.05:
+    own = unary_union([Polygon(e["corners"]).buffer(0) for e in mine])
+    u = unary_union([own, foot]).buffer(1e-4, join_style=2).buffer(
+        -1e-4, join_style=2)
+    if u.area <= own.area + 0.5:
         return 0
-    main["corners"] = [[round(x, 4), round(y, 4)]
-                       for x, y in S._ccw(list(g.exterior.coords)[:-1])]
-    return 1
+    holes = [h for e in mine for h in e.get("holes") or []]
+    shafts = [h for e in mine for h in e.get("shafts") or []]
+    base = max(mine, key=lambda e: Polygon(e["corners"]).buffer(0).area)
+    arch["structure"] = [e for e in arch["structure"] if e not in mine]
+    made = []
+    for g in getattr(u, "geoms", [u]):
+        if g.geom_type != "Polygon" or g.area < 1.0:
+            continue
+        rec = dict(base)
+        rec.pop("id", None)
+        rec["corners"] = [[round(x, 4), round(y, 4)]
+                          for x, y in S._ccw(list(g.exterior.coords)[:-1])]
+        inside = g.buffer(0.05)
+        rec["holes"] = [h for h in holes
+                        if inside.contains(Polygon(h).buffer(0))]
+        rec["shafts"] = [h for h in shafts
+                         if inside.contains(Polygon(h).buffer(0))]
+        made.append(rec)
+    arch["structure"] += M.new_elements(arch["structure"], made)
+    return len(made)
 
 
 def level_below(doc, lid):

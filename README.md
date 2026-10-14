@@ -402,3 +402,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.17.4
 - **The roof slab only when asked**: the roof slab over the top floor is made only by section 8 ▸ «Flat with parapet» ▸ «Roof over the top level» (3.17.3 made it on every project by itself). Delete it and it stays deleted; a hip / gable roof or «No roof» takes it away too. Once asked for, it moves up with the top floor when a floor is added.
+
+## 3.17.5
+- **Terraces over the floor below, as before**: where the floor below reaches out past a floor (its outer walls, columns and its own outline — porch, verandah), that floor's slab is carried out over it, flush with them — a terrace — then cut back to the railing lines drawn on that floor's plan and railed round its open edges (railing on the 1'-0" × 3" upstand). Made on import of a floor; the roof slab over the top floor still only when asked.
