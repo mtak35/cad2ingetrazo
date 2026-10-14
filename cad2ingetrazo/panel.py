@@ -4167,6 +4167,10 @@ class Panel(QWidget):
                 if tag and tag["type"] == "levelgroup":
                     floor = True
                     continue
+                if tag and tag["type"] == "finish_edge" and tag.get("slab"):
+                    # a ground floor finish (no slab): its finish-only slab
+                    self._sel_seg = None
+                    return "slab", tag["slab"]
                 if tag and tag["type"] != "symbols":
                     self._sel_seg = tag.get("seg")
                     return tag["type"], tag["id"]
@@ -4188,6 +4192,19 @@ class Panel(QWidget):
         return None
 
     def _under_cursor(self):
+        """As ``_under_cursor_raw`` — a ground floor finish (no slab under
+        it) given as its finish-only slab, so its handles edit it."""
+        hit = self._under_cursor_raw()
+        if hit and hit[0] == "finish_edge":
+            for g in PJ.all_groups(self.vp.scene):
+                t = PJ.tag_of(g) or {}
+                if t.get("type") == "finish_edge" and t.get("id") == hit[1]:
+                    if t.get("slab"):
+                        return ("slab", t["slab"], None)
+                    break
+        return hit
+
+    def _under_cursor_raw(self):
         """(kind, id, seg) of the CAD2IngeTrazo element under the mouse in
         the 3D view (inside the floor groups too), or None."""
         try:
@@ -4352,7 +4369,7 @@ class Panel(QWidget):
                 box.setVisible(False)
             return
         from . import stairs as ST
-        flights, _l = ST.as_flights(st)
+        flights = ST.real_flights(st)
         if not flights:
             if box is not None:
                 box.setVisible(False)
@@ -5705,7 +5722,8 @@ class Panel(QWidget):
         zs = []
         for g in PJ.all_groups(self.vp.scene):
             t = PJ.tag_of(g) or {}
-            if t.get("type") != kind or t.get("id") != eid:
+            if not ((t.get("type") == kind and t.get("id") == eid) or (
+                    kind == "slab" and t.get("slab") == eid)):
                 continue
             m = getattr(g, "mesh", None)
             xf = getattr(g, "xform", None)
@@ -5998,14 +6016,18 @@ class Panel(QWidget):
         """The rebuilt element selected again, its fields shown."""
         sc = self.vp.scene
         g = next((g for g in sc.groups if PJ.tag_of(g)
-                  and PJ.tag_of(g)["id"] == sel[1]), None)
+                  and (PJ.tag_of(g)["id"] == sel[1] or (
+                      sel[0] == "slab"
+                      and PJ.tag_of(g).get("slab") == sel[1]))), None)
         if g is not None:
             sc.selection.clear()
             sc.selection.add(g)
             self.vp.update()
         else:                     # inside a floor group: the floor, and it
             for top in sc.groups:
-                if any((PJ.tag_of(c) or {}).get("id") == sel[1]
+                if any((PJ.tag_of(c) or {}).get("id") == sel[1] or (
+                        sel[0] == "slab"
+                        and (PJ.tag_of(c) or {}).get("slab") == sel[1])
                        for c, _m in _walk_world(getattr(top, "children",
                                                         None))):
                     sc.selection.clear()
@@ -7032,7 +7054,8 @@ class Panel(QWidget):
         self.o_win_h.setValue(g("win_h", d["win_h"]))
         self.o_sill.setValue(g("sill", d["sill"]))
         self.s_slab.setChecked(b("slab_on", d["slab_on"]))
-        self.s_slab_t.setValue(g("slab_t", d["slab_t"]))
+        # (v2: the 4" floor slab — a thickness saved before 3.17 not kept)
+        self.s_slab_t.setValue(g("slab_t_v2", d["slab_t"]))
         self.i_file.setText(str(s.value("file", "")))
         k = self.o_wstyle.findData(str(s.value("win_style", "sliding")))
         self.o_wstyle.setCurrentIndex(max(k, 0))
@@ -7062,6 +7085,7 @@ class Panel(QWidget):
         for k, v in self._settings_from_ui().items():
             if k not in self.i_layers:
                 s.setValue(k, v)
+        s.setValue("slab_t_v2", self.s_slab_t.value())
         s.setValue("file", self.i_file.text())
         for c, k in ((self.c_dims, "ann_dims"), (self.c_roomlbl, "ann_rooms"),
                      (self.c_texts, "ann_texts"), (self.x_elev, "x_elev"),

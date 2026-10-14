@@ -125,6 +125,9 @@ class PlanEdit:
                     i = next(k for k, lv in enumerate(doc["arch"]["levels"])
                              if lv["id"] == s_["level"])
                     z = el[i]
+                    if s_.get("grade"):          # on the ground: on its
+                        z += float(doc["settings"].get(   # finish
+                            "finish_t", 0.0508) or 0.0)
                 info = {"rec": s_, "z": z + 0.01, "level": s_["level"],
                         "kind": "slab"}
         except Exception:  # noqa: BLE001

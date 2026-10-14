@@ -383,3 +383,9 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Ground floor on the ground**: no concrete slab under the ground floor by default (section 6 ▸ «Ground floor slab» to add one) — its floor finish covers the whole slab outline: every room, the verandah, the entrance lobby and the car porch (a ground floor with parking was left unfinished outside its rooms before).
 - **«Update floors and levels»** also re-spaces each stair's risers to its storey height, so the stairs still land on the floor above when the ground floor level or a floor height changes.
 - **Stair landings**: the step up onto a landing gets the same nosing as every tread — the chosen type (square, bullnose, pencil, chamfer, anti-slip strip…) — instead of a plain square edge.
+
+## 3.17.1
+- **Winders**: a turning landing the plan splits with a diagonal from corner to corner (on any layer but walls, doors, windows, grid, columns) is made two triangular winder treads, a riser apart, with the riser and the nosing along the diagonal — the stair's risers re-spaced to the storey (re-made with «Stairs on all floors»).
+- **Ground floor finishes edited with handles**: on the ground (no slab), click the floor finish outside the rooms — the verandah, lobby, car porch — and its outline's handles appear on the finish: drag corners and edges, extend or open it as a slab's; the finish follows.
+- **Floor slab flush with the floor below**: with slabs as floors, an upper floor's slab is carried out flush with the outer faces of the walls and columns of the floor under it — it caps that floor as its roof too (on import, and when a project is turned to slabs as floors).
+- **4" slab thickness by default**: the panel no longer brings back a slab thickness saved before 3.17.

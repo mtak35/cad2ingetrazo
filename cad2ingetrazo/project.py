@@ -1923,6 +1923,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["shafts"] += len(sh_open)
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
+    if srecs:                    # slabs as floors: over the floor below too
+        try:
+            cap_lower_floor(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.cap_lower_floor")
     if rep.get("corner_windows"):    # the slab carried over them too
         try:
             cover_corner_windows(doc, lid)
@@ -2274,6 +2280,61 @@ def slab_on_top(doc) -> bool:
     return (doc.get("settings") or {}).get("slab_pos", "top") == "top"
 
 
+def cap_lower_floor(doc, lid) -> int:
+    """Slabs as floors: the floor slab of ``lid`` carried out over the
+    floor below it — flush with that floor's external walls and columns
+    (their outer faces), so it caps the floor under it as its roof too.
+    How many slabs grew."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    if slab_on_top(doc):
+        return 0
+    below = level_below(doc, lid)
+    if below is None:
+        return 0
+    arch = doc["arch"]
+    walls = [w for w in arch["walls"] if w["level"] == below
+             and not w.get("rail") and W.why_not(w) is None]
+    plans = W.plan([S._plastered(w, float(doc["settings"].get(
+        "plaster_t", 0.0127) or 0.0)) for w in walls])
+    loops = _outer_loops([pc for ps in plans.values() for pc in ps])
+    polys = [Polygon(o).buffer(0) for o in loops]
+    for e in arch["structure"]:
+        if e["type"] in ("column", "core") and e["level"] == below and \
+                len(e.get("corners") or []) >= 3:
+            polys.append(Polygon([tuple(q[:2]) for q in e["corners"]])
+                         .buffer(0))
+    if not polys:
+        return 0
+    foot = unary_union(polys)
+    mine = [e for e in arch["structure"] if e["type"] == "slab"
+            and e["level"] == lid and not (e.get("zone") or e.get("user")
+                                           or e.get("roof")
+                                           or e.get("grade"))]
+    if not mine:
+        return 0
+    main = max(mine, key=lambda e: Polygon(e["corners"]).buffer(0).area)
+    u = unary_union([Polygon(main["corners"]).buffer(0), foot]).buffer(
+        1e-4, join_style=2).buffer(-1e-4, join_style=2)
+    g = max(getattr(u, "geoms", [u]), key=lambda q: q.area)
+    if g.geom_type != "Polygon" or g.area <= Polygon(
+            main["corners"]).buffer(0).area + 0.05:
+        return 0
+    main["corners"] = [[round(x, 4), round(y, 4)]
+                       for x, y in S._ccw(list(g.exterior.coords)[:-1])]
+    return 1
+
+
+def level_below(doc, lid):
+    """The level under ``lid`` (by height), or None."""
+    arch = doc["arch"]
+    el = elevations(arch)
+    order = [arch["levels"][i]["id"] for i in
+             sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+    k = order.index(lid) if lid in order else -1
+    return order[k - 1] if k > 0 else None
+
+
 def to_floor_slabs(doc, t=0.1016) -> int:
     """A project made with slabs over each floor turned to slabs as floors:
     each floor's slab under it (the ground floor on the ground, its
@@ -2294,6 +2355,12 @@ def to_floor_slabs(doc, t=0.1016) -> int:
             e["t"] = round(float(t), 4)
             n += 1
     apply_slab_pos(doc)
+    for lv in doc["arch"]["levels"]:
+        try:
+            cap_lower_floor(doc, lv["id"])
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.cap_lower_floor")
     return n
 
 
@@ -4643,6 +4710,16 @@ def _slab_finish_zones(doc, lid):
     return (unary_union(zone) if zone else None), whole, thick
 
 
+def _poly_of(s_):
+    """A slab record's outline (shapely), its openings out."""
+    from shapely.geometry import Polygon
+    p = Polygon([tuple(q[:2]) for q in s_["corners"]]).buffer(0)
+    for h in s_.get("holes") or []:
+        if len(h) >= 3:
+            p = p.difference(Polygon([tuple(v[:2]) for v in h]).buffer(0))
+    return p
+
+
 def _floor_shape(doc, lid):
     """The floor slabs of ``lid`` as one outline less their openings (a
     little grown, to forgive the wall faces), or None when the level has
@@ -4795,20 +4872,34 @@ def _finish_groups(doc):
                                  for h in p_.interiors]}
                     faces = W.solid(piece, z, z + f)
                     if faces:
-                        edge.append((lv, lid, k_, faces))
+                        # on the ground (no slab): the finish-only slab
+                        # it belongs to — selected, its handles edit it
+                        sid_ = None
+                        for s2 in arch["structure"]:
+                            if s2["type"] == "slab" and s2.get("grade") \
+                                    and s2["level"] == lid:
+                                try:
+                                    if _poly_of(s2).buffer(0.05).contains(
+                                            c0):
+                                        sid_ = s2.get("id")
+                                        break
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        edge.append((lv, lid, k_, faces, sid_))
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project edge finish")
     protos, out = {}, []
-    for lv, lid, k_, faces in edge:
+    for lv, lid, k_, faces, sid_ in edge:
         g = Group(_mesh_of([f_ if isinstance(f_, dict) else
                             {"loop": f_, "holes": []} for f_ in faces]),
                   name=f"Floor finish · slab edge {k_} · {lv['name']}")
         g.component = False
         g.material = {"color": COLOR["room"], "opacity": 1.0}
         g.layer = level_layer(lv["name"])
-        g.ext = {KEY: {"type": "finish_edge", "id": f"edge-{lid}-{k_}",
-                       "level": lid}}
+        g.ext = {KEY: dict({"type": "finish_edge", "id": f"edge-{lid}-{k_}",
+                            "level": lid}, **({"slab": sid_} if sid_
+                                              else {}))}
         out.append(g)
     for lv, lid, room, f, z, lf, key in prep:
         if key not in protos:
@@ -6468,6 +6559,44 @@ def overlap_offset(doc, lid, ref, method="best"):
     return best[1], best[2], best[0] / max(len(mc), 1)
 
 
+def plan_lines_near(doc, lid, boxes, lo=0.3, hi=3.0) -> list:
+    """The CAD plan's lines of level ``lid`` (any layer but the walls',
+    doors', windows', grid and text) ``lo``–``hi`` m long inside any of
+    ``boxes`` [(x0, y0, x1, y1)], in model coordinates: [((x, y), (x, y))]
+    — the winder diagonals of a stair's landings."""
+    how = doc["imports"].get(lid)
+    if not how or not how.get("file") or not boxes:
+        return []
+    st = doc["settings"]
+    try:
+        drawing = cadread.crop(cadread.read(how["file"], how.get("unit")),
+                               how.get("region"))
+    except Exception:  # noqa: BLE001
+        return []
+    base = cadread.base_point(drawing, how.get("base", "origin"),
+                              (how.get("bx", 0.0), how.get("by", 0.0)))
+    pl = cadread.place(drawing, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
+                       how.get("rot", 0.0))
+    P, _f = layer_patterns(drawing, how, st)
+    lay = pl["layers"]
+    skip = [P.get(k) for k in ("walls", "doors", "windows", "grid", "text",
+                               "columns")]
+    out = []
+    for s_ in pl["segs"]:
+        ln = lay[s_[4]]
+        if any(pp and _match(ln, pp) for pp in skip):
+            continue
+        a, b = (s_[0], s_[1]), (s_[2], s_[3])
+        L = math.dist(a, b)
+        if not lo <= L <= hi:
+            continue
+        if any(bx[0] <= min(a[0], b[0]) and max(a[0], b[0]) <= bx[2] and
+               bx[1] <= min(a[1], b[1]) and max(a[1], b[1]) <= bx[3]
+               for bx in boxes):
+            out.append((a, b))
+    return out
+
+
 def stair_trace(doc, lid):
     """The stairs drawn on the level's CAD plan (its stair layers' tread
     lines), traced: [[flight…] per stair] — see stairs.trace."""
@@ -6546,6 +6675,31 @@ def stair_trace(doc, lid):
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.stair_trace cut")
+    try:                         # the winders' lines: diagonals across the
+        for ch in chains:        # turning landings (any layer but walls…)
+            if not ch:
+                continue
+            xs = [p[0] for f in ch for ln in f["lines"] for p in ln]
+            ys = [p[1] for f in ch for ln in f["lines"] for p in ln]
+            bx = (min(xs) - 2.0, min(ys) - 2.0, max(xs) + 2.0, max(ys) + 2.0)
+            skip = [P.get(k) for k in ("walls", "doors", "windows", "grid",
+                                       "columns")]
+            dg = []
+            for s_ in pl["segs"]:
+                if any(pp and _match(lay[s_[4]], pp) for pp in skip):
+                    continue
+                a_, b_ = (s_[0], s_[1]), (s_[2], s_[3])
+                L = math.dist(a_, b_)
+                if not 0.6 <= L <= 4.0 or abs(a_[0] - b_[0]) < 0.2 or \
+                        abs(a_[1] - b_[1]) < 0.2:
+                    continue             # level / plumb: not a diagonal
+                if all(bx[0] <= q[0] <= bx[2] and bx[1] <= q[1] <= bx[3]
+                       for q in (a_, b_)):
+                    dg.append([list(a_), list(b_)])
+            ch[0]["_diag"] = dg
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.stair_trace winders")
     return chains
 
 

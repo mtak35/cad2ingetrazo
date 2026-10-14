@@ -269,11 +269,20 @@ def auto(doc, cad=None, flip=False) -> dict:
             # riser of 8" at most: no return flight invented beside them
             have = sum(len(f["lines"]) for f in flights)
             n_use = have if have and H / have <= 0.2032 else n_need
+            diag = flights[0].get("_diag") if flights else None
             fl, lands = complete(flights, n_use, room)
+            if diag:
+                try:                 # winders drawn on a turning landing
+                    fl, lands = winders(fl, lands, diag)
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("stairs.winders")
             n = sum(len(f["lines"]) for f in fl)
             st = {"traced": True, "flights": [
-                {"lines": [[list(a), list(b)] for a, b in f["lines"]],
-                 "d": list(f["d"]), "w": f["w"], "g": f["g"]} for f in fl],
+                dict({"lines": [[list(a), list(b)] for a, b in f["lines"]],
+                      "d": list(f["d"]), "w": f["w"], "g": f["g"]},
+                     **({"winder": True} if f.get("winder") else {}))
+                for f in fl],
                 "landings": lands, "risers": n, "rise": round(H / n, 4),
                 "going": round(fl[0]["g"], 4), "kind": "traced"}
             st["corners"] = outline_of(st)
@@ -1343,6 +1352,69 @@ def complete(flights, n_needed, room=None):
     return flights, landings
 
 
+def winders(flights, lands, diags, tol=0.2):
+    """A turning landing the plan splits with a diagonal from corner to
+    corner: two winder treads, one riser apart — the landing made two
+    triangles (the first by the flight arriving, the second by the one
+    leaving, a riser up) and a one-line «flight» on the diagonal between
+    them (its riser), the landings and risers after it one higher."""
+    from shapely.geometry import Point, Polygon
+    out_f, out_l = list(flights), []
+    shift = 0
+    for lg in sorted(lands, key=lambda g: int(g.get("after", 0))):
+        lg = dict(lg, after=int(lg.get("after", 0)) + shift)
+        cs = [tuple(p[:2]) for p in lg.get("corners") or []]
+        if lg.get("arrival") or len(cs) != 4:
+            out_l.append(lg)
+            continue
+        hit = None
+        for a, b in diags:
+            ia = min(range(4), key=lambda i: math.dist(cs[i], a))
+            ib = min(range(4), key=lambda i: math.dist(cs[i], b))
+            if (ia - ib) % 4 == 2 and math.dist(cs[ia], a) < tol and \
+                    math.dist(cs[ib], b) < tol:
+                hit = (ia, ib)
+                break
+        if hit is None:
+            out_l.append(lg)
+            continue
+        ia, ib = hit
+        t1 = [cs[ia], cs[(ia + 1) % 4], cs[ib]]
+        t2 = [cs[ib], cs[(ib + 1) % 4], cs[ia]]
+        # the flight arriving here: its last riser on an edge of t1 or t2
+        k_in, acc = None, 0
+        for i, f in enumerate(out_f):
+            acc += len(f["lines"])
+            if acc == lg["after"]:
+                k_in = i
+                break
+        if k_in is None:
+            out_l.append(lg)
+            continue
+        m_in = Point(_mid(out_f[k_in]["lines"][-1]))
+        if Polygon(t2).distance(m_in) < Polygon(t1).distance(m_in) - 1e-6:
+            t1, t2 = t2, t1
+        c1 = Polygon(t1).centroid
+        c2 = Polygon(t2).centroid
+        dd = _nrm((c2.x - c1.x, c2.y - c1.y))
+        diag = [list(cs[ia]), list(cs[ib])]
+        out_f.insert(k_in + 1, {"lines": [diag], "d": [dd[0], dd[1]],
+                                "w": math.dist(cs[ia], cs[ib]),
+                                "g": 0.0, "winder": True})
+        out_l.append({"corners": [list(p) for p in t1], "after": lg["after"]})
+        out_l.append({"corners": [list(p) for p in t2],
+                      "after": lg["after"] + 1, "winder_line": diag,
+                      "winder_d": [dd[0], dd[1]]})
+        shift += 1
+    return out_f, out_l
+
+
+def real_flights(st) -> list:
+    """The stair's flights without its winders' one-line «flights»."""
+    flights, _l = as_flights(st)
+    return [f for f in flights if not f.get("winder")]
+
+
 def cut_at_foreign(flights, segs):
     """The flights of a traced stair up to the first turn whose landing
     the plan fills with other tread lines (the flight beyond belongs to
@@ -1728,6 +1800,27 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
                           rail_gap, rail_ext)
     for lg in landings:
         zl = z0 + lg["after"] * rise
+        wl = lg.get("winder_line")
+        if wl and kind in ("monolithic", "solid"):
+            try:                         # the winder's riser and nosing
+                a_w, b_w = tuple(wl[0][:2]), tuple(wl[1][:2])
+                Lw = math.dist(a_w, b_w)
+                rw = ((b_w[0] - a_w[0]) / Lw, (b_w[1] - a_w[1]) / Lw)
+                dw = _nrm(lg.get("winder_d") or (-rw[1], rw[0]))
+                if has_fin and rt > 0:
+                    out.append((_prism(_box(-rt, 0.0, zl - rise, zl - ft),
+                                       a_w, dw, rw, 0.0, Lw), fin))
+                if has_fin and ft > 0 and nos_p > 1e-4:
+                    out.append((_prism(_clean(_nose_profile(
+                        -rt - nos_p, 0.0, zl, ft, nose_type)), a_w, dw, rw,
+                        0.0, Lw), fin))
+                if has_fin and ft > 0 and nose_type == "strip" and Lw > 0.2:
+                    sf = -rt - nos_p
+                    out.append((_prism(_box(sf + 0.012, sf + 0.052, zl,
+                                            zl + 0.003), a_w, dw, rw, 0.05,
+                                       Lw - 0.05), STRIP))
+            except Exception:  # noqa: BLE001
+                pass
         th = {"monolithic": waist, "solid": zl - z0, "open": 0.10,
               "cantilever": 0.15}[kind]
         out.append((W.solid({"outer": _ccw([tuple(p) for p in lg["corners"]]),
@@ -2049,7 +2142,7 @@ def _left_of(d):
 def flight_turns(st) -> list:
     """How each flight after the first leaves the landing before it:
     "straight", "left", "right", "uleft", "uright" (seen climbing)."""
-    flights, _l = as_flights(st)
+    flights = real_flights(st)
     out = []
     for f0, f1 in zip(flights, flights[1:]):
         d0, d1 = _nrm(f0["d"]), _nrm(f1["d"])
@@ -2076,7 +2169,7 @@ def relay(st, turns=None, rot=0.0, counts=None, gap=U_GAP) -> dict:
     a square for a 90° turn, both flights' width for a U, a flight's width
     on a straight run — and the arrival landing past the last riser. The
     storey height stays (the riser height follows the risers' number)."""
-    flights, _lands = as_flights(st)
+    flights = real_flights(st)
     if not flights:
         return dict(st)
     turns0 = list(turns or flight_turns(st))
