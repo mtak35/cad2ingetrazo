@@ -98,6 +98,9 @@ def _pattern(pat, ppm, width):
     return out
 
 
+_doc_memo = None
+
+
 def draw(viewport, painter) -> None:
     scene = viewport.scene
     sp = scene.active_section() if hasattr(scene, "active_section") else None
@@ -109,7 +112,12 @@ def draw(viewport, painter) -> None:
     if not raw:
         return
     from . import project as PJ
-    doc = PJ.load(raw)
+    global _doc_memo
+    if _doc_memo is not None and _doc_memo[0] is raw:
+        doc = _doc_memo[1]               # the same document: read once
+    else:
+        doc = PJ.load(raw)
+        _doc_memo = (raw, doc)
     if not doc["settings"].get("cad_lines", True):
         return
     lv = _level_of(doc, name)

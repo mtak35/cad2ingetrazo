@@ -71,6 +71,22 @@ def found(walls: list[dict]) -> list[dict]:
 
 def gross(walls: list[dict]) -> float:
     """The level's gross area: inside the walls' outer faces."""
+    key = ("gross",) + tuple(sorted(repr((w["id"], w.get("a"), w.get("b"),
+                       w.get("m"), w.get("c"), w.get("r"), w.get("t"),
+                       w.get("align"), w.get("side"), w.get("kind")))
+                       for w in walls))
+    if key in _gross:
+        return _gross[key]
+    if len(_gross) > 64:
+        _gross.clear()
+    _gross[key] = v = _gross_of(walls)
+    return v
+
+
+_gross: dict = {}
+
+
+def _gross_of(walls: list[dict]) -> float:
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     polys = [Polygon(pc["outer"], pc["holes"]).buffer(0)

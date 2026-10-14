@@ -224,11 +224,20 @@ def draw(viewport, painter) -> None:
     painter.setRenderHint(painter.RenderHint.Antialiasing, True)
     painter.setRenderHint(painter.RenderHint.TextAntialiasing, True)
     font = QFont()
-    for x, y, z, text, h, rot, bold, align in items:
+    pts = None
+    try:                                   # all the points at once
+        import numpy as np
+        X_, Y_, OK_ = viewport._project_px(np.array(
+            [(it[0], it[1], it[2]) for it in items], dtype=float))
+        pts = [(float(a), float(b)) if k else None
+               for a, b, k in zip(X_, Y_, OK_)]
+    except Exception:  # noqa: BLE001
+        pts = None
+    for i_, (x, y, z, text, h, rot, bold, align) in enumerate(items):
         px = h * ppm
         if px < MIN_PX:
             continue
-        p = w2p(QVector3D(x, y, z))
+        p = pts[i_] if pts is not None else w2p(QVector3D(x, y, z))
         if p is None or not (-200 < p[0] < W + 200 and -200 < p[1] < H + 200):
             continue
         px = min(px, MAX_PX)

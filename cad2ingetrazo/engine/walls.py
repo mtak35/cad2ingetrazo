@@ -719,6 +719,13 @@ def _to_corner(walls: list[dict]) -> list[dict]:
             ends += [tuple(w["a"]), tuple(w["b"])]
         elif w.get("kind") == "arc":
             ends += [tuple(w["a"]), tuple(w["b"])]
+    _oends = []
+    for o in walls:
+        if is_closed(o) or why_not(o) is not None:
+            _oends.append(None)
+            continue
+        od = drawn(o)
+        _oends.append((od.at(0.0), od.at(1.0)))
     out = []
     for wi, w in enumerate(walls):
         if w.get("kind", "line") != "line":
@@ -732,14 +739,17 @@ def _to_corner(walls: list[dict]) -> list[dict]:
                 continue                         # already meets an end
             best = None
             for oi, o in enumerate(walls):
-                if oi == wi or is_closed(o) or why_not(o) is not None:
+                oe = _oends[oi]
+                if oe is None or oi == wi:
                     continue
+                lim = max(o["t"], w["t"]) + JOIN_TOL + 0.01
+                if _dist(oe[0], p) > lim and _dist(oe[1], p) > lim:
+                    continue                     # no end of it in reach
                 s = centre(o)
                 f, off = s.project(p)
                 if abs(off) > o["t"] / 2.0 + BODY_TOL:
                     continue                     # not on its body / face
-                od = drawn(o)
-                for e in (od.at(0.0), od.at(1.0)):
+                for e in oe:
                     v = _sub(e, p)
                     along = _dot(v, back)        # beyond the end, its way
                     across = abs(_cross(back, v))
@@ -753,10 +763,35 @@ def _to_corner(walls: list[dict]) -> list[dict]:
     return out
 
 
+_PLANS: dict = {}
+
+
+def _copy_plan(out: dict) -> dict:
+    return {k: [dict(pc, outer=list(pc["outer"]),
+                     holes=[list(h) for h in pc["holes"]]) for pc in pcs]
+            for k, pcs in out.items()}
+
+
 def plan(walls: list[dict]) -> dict:
     """Each wall's plan, joined: {wall id: [pieces]} — a piece is
     {"outer": [(x, y)…] counter-clockwise, "holes": [[(x, y)…]]}. Walls
-    that can't be built (``why_not``) are left out."""
+    that can't be built (``why_not``) are left out. The same walls are
+    worked out once (the answer kept; a copy handed out)."""
+    try:
+        key = repr(walls)
+    except Exception:  # noqa: BLE001
+        key = None
+    if key is not None and key in _PLANS:
+        return _copy_plan(_PLANS[key])
+    out = _plan(walls)
+    if key is not None:
+        if len(_PLANS) > 96:
+            _PLANS.clear()
+        _PLANS[key] = _copy_plan(out)
+    return out
+
+
+def _plan(walls: list[dict]) -> dict:
     good = _to_corner([w for w in walls if why_not(w) is None])
     pieces = _pieces(good)
     ends = _ends(pieces)

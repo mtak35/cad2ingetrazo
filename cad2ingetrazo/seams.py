@@ -54,15 +54,25 @@ def _stacked(a, b, me, solids, z):
     carries straight on, flush, above or below it (a wall under the slab's
     plastered edge): the joint line between the two — hidden."""
     from shapely.geometry import LineString
-    ln = LineString([(a[0], a[1]), (b[0], b[1])])
-    if ln.length < 1e-4:
+    if abs(a[0] - b[0]) + abs(a[1] - b[1]) < 1e-4:
         return False
+    x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+    y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+    ln = None
     for x in solids:
         if x[0] == me:
             continue
         lo, hi = x[2]
         if not (abs(lo - z) < 0.01 or abs(hi - z) < 0.01):
             continue
+        bb = x[5] if len(x) > 5 else None
+        if bb is not None and (x0 < bb[0] or y0 < bb[1] or x1 > bb[2]
+                               or y1 > bb[3]):
+            continue
+        if ln is None:
+            ln = LineString([(a[0], a[1]), (b[0], b[1])])
+            if ln.length < 1e-4:
+                return False
         if x[4].contains(ln):
             return True
     return False
@@ -75,7 +85,9 @@ def solids_of(items) -> list:
     for key, faces in items:
         pl, zr = _plan_of(faces)
         if pl is not None:
-            out.append((key, pl, zr, None, prep(pl.boundary.buffer(TOL))))
+            b = pl.bounds
+            out.append((key, pl, zr, None, prep(pl.boundary.buffer(TOL)),
+                        (b[0] - TOL, b[1] - TOL, b[2] + TOL, b[3] + TOL)))
     return out
 
 
@@ -90,7 +102,9 @@ def hidden_edges(walls, slabs=(), solids=None) -> dict:
     for key, faces in walls:
         pl, zr = _plan_of(faces)
         if pl is not None:
-            plans.append((key, pl, zr, prep(pl.buffer(TOL, join_style=2))))
+            b = pl.bounds
+            plans.append((key, pl, zr, prep(pl.buffer(TOL, join_style=2)),
+                          (b[0] - TOL, b[1] - TOL, b[2] + TOL, b[3] + TOL)))
     # every solid's outline (walls and slabs), for the flush joints between
     # one stacked on the other
     if solids is None:
@@ -99,7 +113,7 @@ def hidden_edges(walls, slabs=(), solids=None) -> dict:
         return {}
     if not plans:
         plans_u = [_plan_of(f)[0] for _k, f in slabs]
-    U = unary_union([p for _k, p, _z, _pp in plans] or
+    U = unary_union([x[1] for x in plans] or
                     [p for p in plans_u if p is not None]).buffer(
         1e-5, join_style=2).buffer(-1e-5, join_style=2)
     bnd = U.boundary
@@ -129,10 +143,19 @@ def hidden_edges(walls, slabs=(), solids=None) -> dict:
             if key not in wkeys:
                 continue
             zlo, zhi = min(a[2], b[2]), max(a[2], b[2])
-            m = Point((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
-            cover = [x for x in others
-                     if x[2][0] - 0.01 <= zlo and x[2][1] + 0.01 >= zhi
-                     and x[3].contains(m)]
+            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            m = None
+            cover = []
+            for x in others:
+                if not (x[2][0] - 0.01 <= zlo and x[2][1] + 0.01 >= zhi):
+                    continue
+                bb = x[4]
+                if mx < bb[0] or my < bb[1] or mx > bb[2] or my > bb[3]:
+                    continue
+                if m is None:
+                    m = Point(mx, my)
+                if x[3].contains(m):
+                    cover.append(x)
             if not cover:
                 continue
             if vert:

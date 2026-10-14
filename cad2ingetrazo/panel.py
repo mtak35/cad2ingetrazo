@@ -724,7 +724,10 @@ class Panel(QWidget):
         doc = self.doc()
         n = sum(1 for f in doc.get("furniture") or [] if f.get("cad"))
         if not n:
-            self.flash("No furniture from the CAD to remove")
+            if doc["settings"].get("cad_furniture"):
+                doc["settings"]["cad_furniture"] = False
+                PJ.store_only(self.vp, doc)
+            self.flash("Furniture from the CAD: off")
             return
         doc["furniture"] = [f for f in doc["furniture"] if not f.get("cad")]
         doc["settings"]["cad_furniture"] = False
@@ -3651,20 +3654,6 @@ class Panel(QWidget):
         row.addWidget(self.r_fin_t)
         v.addLayout(row)
         row = QHBoxLayout()
-        row.addWidget(_btn("Furniture & fixtures from the CAD",
-                           self._cad_furniture,
-                           "The CAD plan's blocks — beds, WCs, basins, "
-                           "showers, sofas, chairs, tables, wardrobes, "
-                           "kitchen sinks, stoves, fridges, plants, trees — "
-                           "as IngeTrazo library models at the same place, "
-                           "turned and sized as drawn (every imported floor; "
-                           "made again, it replaces only its own)",
-                           primary=True))
-        row.addWidget(_btn("Remove", self._cad_furniture_off,
-                           "The furniture taken from the CAD out (the "
-                           "pieces you placed by hand stay)"))
-        v.addLayout(row)
-        row = QHBoxLayout()
         self.r_curt = QCheckBox("Curtains at windows")
         self.r_curt.setToolTip("A rod over each window and two pleated "
                                "curtains drawn open, on the room side (the "
@@ -3866,6 +3855,10 @@ class Panel(QWidget):
                 cb.blockSignals(True)
                 cb.setChecked(bool(getattr(st_, nm)))
                 cb.blockSignals(False)
+        if hasattr(self, "c_furn"):
+            self.c_furn.blockSignals(True)
+            self.c_furn.setChecked(bool(st.get("cad_furniture", False)))
+            self.c_furn.blockSignals(False)
         if hasattr(self, "t_rkind"):
             self.t_rkind.blockSignals(True)
             self.t_rkind.setCurrentIndex(max(self.t_rkind.findData(
@@ -5672,8 +5665,36 @@ class Panel(QWidget):
         row.addWidget(_btn("Refresh", lambda: self._fill_components(
             self.doc())))
         v.addLayout(row)
+        row = QHBoxLayout()
+        self.c_furn = QCheckBox("Furniture && fixtures from the CAD")
+        self.c_furn.setToolTip(
+            "Off by default. On: the CAD plan's blocks — beds, WCs, "
+            "basins, showers, sofas, chairs, tables, wardrobes, kitchen "
+            "sinks, stoves, fridges, plants — placed as IngeTrazo library "
+            "models where they are drawn (every imported floor, and again "
+            "on each import / update). Off: the furniture taken from the "
+            "CAD removed (pieces placed by hand stay).")
+        self.c_furn.toggled.connect(self._furn_toggle)
+        row.addWidget(self.c_furn)
+        row.addStretch(1)
+        row.addWidget(_btn("Place again", self._cad_furniture,
+                           "Read the CAD's furniture and fixture blocks "
+                           "again (replaces only its own pieces)"))
+        v.addLayout(row)
         self._cp_keys = []
         self.lay.addWidget(box)
+
+    def _furn_toggle(self, on):
+        if self._building:
+            return
+        if on:
+            self._cad_furniture()
+        else:
+            self._cad_furniture_off()
+        doc = self.doc()
+        self.c_furn.blockSignals(True)
+        self.c_furn.setChecked(bool(doc["settings"].get("cad_furniture")))
+        self.c_furn.blockSignals(False)
 
     def _fill_components(self, doc):
         from . import components as CP

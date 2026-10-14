@@ -11,7 +11,7 @@ ArchXQ IT Lite (c) Orlando Souza / XQ, GPL-3.0-or-later.
 """
 from __future__ import annotations
 
-__version__ = "3.16.2"
+__version__ = "3.16.3"
 TITLE = "CAD2IngeTrazo"
 
 _panel = None

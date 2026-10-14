@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "wall3", "auto_openings": True, "cad_furniture": True, "sheet_units": "drawing",
+    "terrace_rail_kind": "wall3", "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2069,7 +2069,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.terrace_railings")
-    if st.get("cad_furniture", True):    # its furniture and fixtures
+    if st.get("cad_furniture", False):    # its furniture and fixtures
         try:
             from . import furnish as FU
             rep["furniture"] = FU.furnish(doc, [lid]).get(lid, {})

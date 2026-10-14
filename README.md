@@ -358,3 +358,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.16.2
 - The panel's title shows the version installed (it had stayed at 3.15.3).
+
+## 3.16.3
+- **Faster**: an edit (a handle dragged, a field changed) rebuilds in about half the time — the wall joins are worked out once per set of walls and kept, the hidden-seam pass skips elements nowhere near the edge it tests, and wall corners only test the walls within reach. The panel's refresh after an edit is ~30× quicker (the floor's gross area kept), and plan views draw about 3× faster (the CAD linework no longer re-reads the project on every frame; the room labels placed in one go). The model built is unchanged.
+- **Furniture & fixtures from the CAD** moved to section 12 «Components (types)» as a checkbox, **off by default**: tick it to place the CAD's furniture and fixtures as library models (and on every import / update after), untick it to take them out (pieces placed by hand stay). «Place again» reads them again.
