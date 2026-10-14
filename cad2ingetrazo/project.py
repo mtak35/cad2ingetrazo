@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "wall3", "sheet_units": "drawing",
+    "terrace_rail_kind": "wall3", "auto_openings": True, "cad_furniture": True, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1994,6 +1994,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.terrace_railings")
+    if st.get("cad_furniture", True):    # its furniture and fixtures
+        try:
+            from . import furnish as FU
+            rep["furniture"] = FU.furnish(doc, [lid]).get(lid, {})
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.furnish")
     return rep
 
 
@@ -4420,6 +4427,34 @@ def _slab_finish_zones(doc, lid):
     return (unary_union(zone) if zone else None), whole, thick
 
 
+def _floor_shape(doc, lid):
+    """The floor slabs of ``lid`` as one outline less their openings (a
+    little grown, to forgive the wall faces), or None when the level has
+    no slab of its own under it (the ground)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    ps = []
+    fl = _floor_slabs(doc, lid)
+    if slab_on_top(doc) and fl and all(s_["level"] == lid and s_.get("top")
+                                       for s_ in fl):
+        return None                    # the ground floor: no slab under it
+    for s_ in fl:
+        try:
+            p = Polygon([tuple(q[:2]) for q in s_["corners"]]).buffer(0)
+            for h in s_.get("holes") or []:
+                if len(h) >= 3:
+                    p = p.difference(Polygon([tuple(v[:2]) for v in h])
+                                     .buffer(0))
+            ps.append(p)
+        except Exception:  # noqa: BLE001
+            continue
+    if not ps:
+        return None
+    u = unary_union(ps)
+    return None if u.is_empty or u.area < 1.0 else u.buffer(0.03,
+                                                           join_style=2)
+
+
 def _finish_t_at(doc, rec, thick, pt):
     """A room's finish: its own, else the slab's own thickness under it,
     else the default."""
@@ -4463,7 +4498,18 @@ def _finish_groups(doc):
             from .host import log_error
             log_error("project._slab_finish_zones")
             zone, thick = None, []
-        for room in spaces.of_level(arch, lid):
+        slab_u = _floor_shape(doc, lid)     # the finish follows the slab
+        rooms_ = spaces.of_level(arch, lid)
+        if slab_u is not None:              # (a slab that is the floor:
+            try:                            # not a porch on the ground)
+                from shapely.ops import unary_union as _uu
+                ru_ = _uu([r["poly"] for r in rooms_])
+                if ru_.is_empty or ru_.intersection(slab_u).area < \
+                        0.6 * ru_.area:
+                    slab_u = None
+            except Exception:  # noqa: BLE001
+                slab_u = None
+        for room in rooms_:
             if room["area"] < 1.0:          # a duct / shaft: no finish
                 continue
             f = _finish_t_at(doc, room.get("rec"), thick, room["at"])
@@ -4471,6 +4517,11 @@ def _finish_groups(doc):
                 continue
             z = elev[i] + floor_offset_at(doc, lid, room["at"])
             poly = room["poly"]
+            if slab_u is not None:
+                try:                         # none out past the slab
+                    poly = poly.intersection(slab_u)
+                except Exception:  # noqa: BLE001
+                    pass
             for cut_ in (voids, zone):
                 if cut_ is not None and poly.intersects(cut_):
                     try:
@@ -5109,6 +5160,15 @@ def _furniture_pose(f, pr, z):
     m.translate(float(f["x"]), float(f["y"]), z)
     if abs(float(f.get("rot", 0.0) or 0.0)) > 1e-9:
         m.rotate(float(f["rot"]), 0.0, 0.0, 1.0)
+    fit = f.get("fit")
+    if fit and len(fit) == 2:            # fitted to the CAD block's sides
+        try:
+            sx = float(fit[0]) / max(x1 - x0, 1e-6)
+            sy = float(fit[1]) / max(y1 - y0, 1e-6)
+            if 0.75 <= sx <= 1.33 and 0.75 <= sy <= 1.33:
+                m.scale(sx, sy, 1.0)        # (far off: the model's own size)
+        except (TypeError, ValueError):
+            pass
     m.translate(-(x0 + x1) / 2, -(y0 + y1) / 2, -z0)
     return m
 
@@ -6208,7 +6268,57 @@ def stair_trace(doc, lid):
     segs = [((s[0], s[1]), (s[2], s[3])) for s in pl["segs"]
             if _match(lay[s[4]], P["stairs"])]
     words = [(t["x"], t["y"], t["text"]) for t in pl["texts"]]
-    return ST.trace(segs, words) if segs else []
+    if not segs:
+        return []
+    chains = ST.trace(segs, words)
+    # the rest of the stair as drawn on other layers (the upper flight,
+    # its landing treads…): tread lines of any layer but the walls', doors'
+    # and windows' round the stair found, traced with it
+    try:
+        boxes = []
+        for ch in chains:
+            xs = [p[0] for f in ch for ln in f["lines"] for p in ln]
+            ys = [p[1] for f in ch for ln in f["lines"] for p in ln]
+            if xs:
+                boxes.append((min(xs) - 1.6, min(ys) - 1.6,
+                              max(xs) + 1.6, max(ys) + 1.6))
+        if boxes:
+            skip = [P.get(k) for k in ("walls", "doors", "windows", "stairs",
+                                       "grid", "text", "columns")]
+            extra = []
+            for s_ in pl["segs"]:
+                ln = lay[s_[4]]
+                if any(pp and _match(ln, pp) for pp in skip):
+                    continue
+                L = math.dist((s_[0], s_[1]), (s_[2], s_[3]))
+                if not 0.5 <= L <= 2.6:
+                    continue
+                mx, my = (s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2
+                if any(b[0] <= mx <= b[2] and b[1] <= my <= b[3]
+                       for b in boxes):
+                    extra.append(((s_[0], s_[1]), (s_[2], s_[3])))
+            if extra:
+                more = ST.trace(segs + extra, words)
+                own = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                       for a, b in segs]
+
+                def mine(f):
+                    return any(math.dist(((a[0] + b[0]) / 2,
+                                          (a[1] + b[1]) / 2), q) < 0.02
+                               for a, b in f["lines"] for q in own)
+                # a short run of the other layers' lines (a cupboard's
+                # shelves): not a flight
+                more = [[f for f in ch if mine(f) or len(f["lines"]) >= 4]
+                        for ch in more]
+                more = [ch for ch in more if ch]
+                n0 = sum(len(f["lines"]) for ch in chains for f in ch)
+                n1 = sum(len(f["lines"]) for ch in more for f in ch)
+                if len(more) == len(chains) and n1 > n0:
+                    chains = more
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.stair_trace extra")
+    return chains
 
 
 # ---- materials (finishes) ----------------------------------------------------------------

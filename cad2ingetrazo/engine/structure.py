@@ -147,6 +147,65 @@ def _slab_plaster(s, parts, p):
 PLASTER_COLOR = (0.88, 0.86, 0.82, 1.0)     # plastered and painted
 
 
+def _newell(loop):
+    nx = ny = nz = 0.0
+    n = len(loop)
+    for i in range(n):
+        a, b = loop[i], loop[(i + 1) % n]
+        nx += (a[1] - b[1]) * (a[2] + b[2])
+        ny += (a[2] - b[2]) * (a[0] + b[0])
+        nz += (a[0] - b[0]) * (a[1] + b[1])
+    return nx, ny, nz
+
+
+def _facing(loop, want):
+    """``loop`` wound so its normal points along ``want``."""
+    nn = _newell(loop)
+    if nn[0] * want[0] + nn[1] * want[1] + nn[2] * want[2] < 0:
+        return list(reversed(loop))
+    return list(loop)
+
+
+def round_infill(w, seg, o, z0, n=32) -> list:
+    """A round opening: the wall filled back between its square cut and
+    the circle (both faces), and the circle's reveal through the wall."""
+    T2 = float(w["t"]) / 2
+    u = seg.u
+    nv = (-u[1], u[0])
+    sc = float(o["pos"])
+    hw, hh = float(o["w"]) / 2, float(o["h"]) / 2
+    zc = z0 + float(o.get("sill", 0.0)) + hh
+    r = max(min(hw, hh) - 0.002, 0.02)
+
+    def P(s_, z, c):
+        return (seg.p0[0] + u[0] * s_ + nv[0] * c,
+                seg.p0[1] + u[1] * s_ + nv[1] * c, z)
+    out = []
+    for side in (1.0, -1.0):
+        c = side * T2
+        want = (nv[0] * side, nv[1] * side, 0.0)
+        rect = [P(sc - hw, zc - hh, c), P(sc + hw, zc - hh, c),
+                P(sc + hw, zc + hh, c), P(sc - hw, zc + hh, c)]
+        circ = [P(sc + r * math.cos(2 * math.pi * k / n),
+                  zc + r * math.sin(2 * math.pi * k / n), c)
+                for k in range(n)]
+        outer = _facing(rect, want)
+        hole = list(reversed(_facing(circ, want)))
+        out.append({"loop": outer, "holes": [hole], "color": None})
+    for k in range(n):                       # the reveal, facing the hole
+        a0 = 2 * math.pi * k / n
+        a1 = 2 * math.pi * (k + 1) / n
+        q = [P(sc + r * math.cos(a0), zc + r * math.sin(a0), T2),
+             P(sc + r * math.cos(a1), zc + r * math.sin(a1), T2),
+             P(sc + r * math.cos(a1), zc + r * math.sin(a1), -T2),
+             P(sc + r * math.cos(a0), zc + r * math.sin(a0), -T2)]
+        am = (a0 + a1) / 2
+        want = (-u[0] * math.cos(am), -u[1] * math.cos(am),
+                -math.sin(am))
+        out.append({"loop": _facing(q, want), "holes": [], "color": None})
+    return out
+
+
 def levels_info(doc: dict, elevations) -> dict:
     """Per level id: z0 (floor), height, the slab thickness ON it, and
     ``under`` = where things of this level stop (the next level's slab
@@ -1986,6 +2045,12 @@ def build(doc: dict, elevations) -> list[dict]:
                 faces = [f for pc in pieces
                          for f in wall_with_openings(pc, seg, ops, z0, b,
                                                      top)]
+                for o in ops:                # a round hole: the wall back
+                    if o.get("shape") == "round":    # round it
+                        try:
+                            faces += round_infill(w, seg, o, z0)
+                        except Exception:  # noqa: BLE001
+                            pass
                 for o in ops:
                     parts = opening_parts(
                         dict(_lifted(o, lifts), _t=float(w["t"])), seg, z0)

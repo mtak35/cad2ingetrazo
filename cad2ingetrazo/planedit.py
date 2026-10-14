@@ -90,7 +90,10 @@ class PlanEdit:
                 else:
                     z = el[i] + float(w.get("base", 0.0)) + 0.02
                 info = {"rec": w, "z": z, "level": w["level"],
-                        "kind": sel[0]}
+                        "kind": sel[0], "z0": el[i]}
+                if sel[0] == "wall":          # its doors / windows
+                    info["ops"] = [o for o in doc["arch"]["openings"]
+                                   if o.get("wall") == w["id"]]
         except Exception:  # noqa: BLE001
             info = None
         self._cache = (key, info)
@@ -130,17 +133,85 @@ class PlanEdit:
         return info
 
     @staticmethod
-    def _slab_handles(pts):
-        """Corners «v<i>» (move the corner), edge middles «e<i>» (push /
-        pull that edge square to itself)."""
-        out = {}
-        n = len(pts)
-        for i, q in enumerate(pts):
-            out[f"v{i}"] = (q[0], q[1])
-            r = pts[(i + 1) % n]
-            if math.dist(q, r) > 0.3:
-                out[f"e{i}"] = ((q[0] + r[0]) / 2, (q[1] + r[1]) / 2)
+    def _slab_rings(rec):
+        """[(ring, points)]: 0 the slab's outline, 1… its openings (stair
+        wells, shafts — drawn by hand or from the CAD)."""
+        out = [(0, [tuple(q[:2]) for q in rec.get("corners") or []])]
+        for k, h in enumerate(rec.get("holes") or [], 1):
+            if len(h) >= 3:
+                out.append((k, [tuple(q[:2]) for q in h]))
         return out
+
+    @staticmethod
+    def _slab_handles(rings):
+        """Corners «v<ring>.<i>» (move the corner), edge middles
+        «e<ring>.<i>» (push / pull that edge square to itself) — of the
+        outline and of every opening. (A bare list: the outline only.)"""
+        if rings and not isinstance(rings[0][1], list):
+            rings = [(0, rings)]
+        out = {}
+        for r, pts in rings:
+            n = len(pts)
+            for i, q in enumerate(pts):
+                out[f"v{r}.{i}"] = (q[0], q[1])
+                nx = pts[(i + 1) % n]
+                if math.dist(q, nx) > (0.3 if r == 0 else 0.15):
+                    out[f"e{r}.{i}"] = ((q[0] + nx[0]) / 2,
+                                        (q[1] + nx[1]) / 2)
+        return out
+
+    # ---- object snap (AutoCAD's OSNAP) -----------------------------------
+    def _osnap(self, q, info, ev=None, base=None, skip=()):
+        """``q`` locked onto the geometry under the cursor (wall faces,
+        slab edges, columns, jambs…) by the object snap modes; Alt held:
+        free. The marker is drawn while dragging."""
+        from PySide6.QtCore import Qt
+        self._mark = None
+        try:
+            if ev is not None and ev.modifiers() & Qt.AltModifier:
+                return q
+            from . import osnap as OS
+            st = OS.settings()
+            if not st.get("on", True):
+                return q
+            z = info["z"]
+            p1, p2 = self._px(q[0], q[1], z), self._px(q[0] + 1.0, q[1], z)
+            p3 = self._px(q[0], q[1] + 1.0, z)
+            if p1 is None or p2 is None or p3 is None:
+                return q
+            ppm = max(math.hypot(p2[0] - p1[0], p2[1] - p1[1]),
+                      math.hypot(p3[0] - p1[0], p3[1] - p1[1]), 1e-6)
+            tol = float(st.get("aperture", 12)) / ppm
+            sn = self._snapper(info, tuple(skip))
+            p, mode = sn.snap(q, tol, base=base, modes=st)
+            if mode:
+                self._mark = (p, mode, z)
+            return p
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("planedit._osnap")
+            return q
+
+    def _snapper(self, info, skip):
+        from . import osnap as OS
+        from . import project as PJ
+        raw = self._raw()
+        key = (id(raw), info["level"], skip)
+        c = getattr(self, "_snapper_c", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        doc = PJ.load(raw)
+        lids = {info["level"]}
+        try:                      # the floor over / under it too
+            ids = [lv["id"] for lv in doc["arch"]["levels"]]
+            j = ids.index(info["level"])
+            if j + 1 < len(ids):
+                lids.add(ids[j + 1])
+        except Exception:  # noqa: BLE001
+            pass
+        sn = OS.level_geometry(doc, lids, skip)
+        self._snapper_c = (key, sn)
+        return sn
 
     def _handles(self, info):
         a, b = info["rec"]["a"], info["rec"]["b"]
@@ -250,6 +321,8 @@ class PlanEdit:
         info = self._wall()
         if info is None:
             return False
+        if info.get("ops") and self._op_press(ev, info):
+            return True
         pos = ev.position()
         best = None
         for k, (x, y) in self._handles(info).items():
@@ -353,10 +426,10 @@ class PlanEdit:
         info = self._slab()
         if info is None:
             return False
-        pts = [tuple(q) for q in info["rec"]["corners"]]
+        rings = self._slab_rings(info["rec"])
         pos = ev.position()
         best = None
-        for k, (x, y) in self._slab_handles(pts).items():
+        for k, (x, y) in self._slab_handles(rings).items():
             p = self._px(x, y, info["z"])
             if p is None:
                 continue
@@ -367,8 +440,10 @@ class PlanEdit:
         if best is None:
             return False
         p0 = self._world(pos, info["z"])
+        r = int(best[1][1:].split(".")[0])
+        pts = dict(rings)[r]
         self.drag = {"slab": True, "which": best[1], "info": info,
-                     "pts": pts, "new": list(pts), "p0": p0}
+                     "ring": r, "pts": pts, "new": list(pts), "p0": p0}
         return True
 
     def _slab_move(self, ev):
@@ -381,16 +456,18 @@ class PlanEdit:
         pts = d["pts"]
         n = len(pts)
         k = d["which"]
-        i = int(k[1:])
+        i = int(k[1:].split(".")[1])
         new = list(pts)
         mods = ev.modifiers()
+        skip = (info["rec"]["id"],)
         if k[0] == "v":
-            q = (round(p[0], 2), round(p[1], 2))
+            q = self._osnap(p, info, ev, base=pts[i], skip=skip)
+            if self._mark is None:
+                q = (round(q[0], 2), round(q[1], 2))
             if mods & Qt.ShiftModifier:       # square: along x or y only
                 o = pts[i]
                 q = (q[0], o[1]) if abs(q[0] - o[0]) >= abs(q[1] - o[1]) \
                     else (o[0], q[1])
-            q = self._snap_slab(q, info)
             new[i] = q
         else:
             a, b = pts[i], pts[(i + 1) % n]
@@ -399,10 +476,17 @@ class PlanEdit:
             nn = (-u[1], u[0])
             dx, dy = p[0] - d["p0"][0], p[1] - d["p0"][1]
             if mods & Qt.ControlModifier:     # the edge moved freely
-                dx, dy = round(dx, 2), round(dy, 2)
+                q = self._osnap(p, info, ev, skip=skip)
+                if self._mark is not None:
+                    dx, dy = q[0] - d["p0"][0], q[1] - d["p0"][1]
+                dx, dy = round(dx, 3), round(dy, 3)
             else:                              # square to the edge
-                t = round(dx * nn[0] + dy * nn[1], 2)
-                t = self._snap_push(a, b, nn, t, info)
+                mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                q = self._osnap(p, info, ev, base=mid, skip=skip)
+                if self._mark is not None:     # the edge through the snap
+                    t = (q[0] - a[0]) * nn[0] + (q[1] - a[1]) * nn[1]
+                else:
+                    t = round(dx * nn[0] + dy * nn[1], 2)
                 dx, dy = nn[0] * t, nn[1] * t
             new[i] = (a[0] + dx, a[1] + dy)
             new[(i + 1) % n] = (b[0] + dx, b[1] + dy)
@@ -476,6 +560,8 @@ class PlanEdit:
         s_ = PJ.find_record(doc, "slab", d["info"]["rec"]["id"])
         if s_ is None:
             return
+        if d.get("ring", 0):
+            return self._hole_release(doc, s_, d)
         new = [[round(q[0], 4), round(q[1], 4)] for q in d["new"]]
         # (corners that fall on one another merged)
         clean = []
@@ -509,6 +595,238 @@ class PlanEdit:
         except Exception:  # noqa: BLE001
             pass
 
+    def _hole_release(self, doc, s_, d):
+        """A slab opening (stair well, shaft) reshaped by its handles: the
+        slab's hole — and the hand-drawn shaft it comes from, on every
+        floor it goes through — and its «shaft» mark follow."""
+        from shapely.geometry import Polygon
+
+        from . import project as PJ
+        r = d["ring"]
+        holes = s_.get("holes") or []
+        if r - 1 >= len(holes):
+            return
+        old = holes[r - 1]
+        new = [[round(q[0], 4), round(q[1], 4)] for q in d["new"]]
+        clean = []
+        for q in new:
+            if not clean or math.dist(q, clean[-1]) > 0.005:
+                clean.append(q)
+        if len(clean) > 2 and math.dist(clean[0], clean[-1]) <= 0.005:
+            clean.pop()
+        try:
+            hp = Polygon(clean)
+            sp = Polygon(s_["corners"]).buffer(0)
+            if len(clean) < 3 or not hp.is_valid or hp.area < 0.04:
+                self.panel.flash("That opening would cross itself — not done")
+                self.vp.update()
+                return
+            if not sp.buffer(0.01).contains(hp):
+                self.panel.flash("The opening must stay inside the slab")
+                self.vp.update()
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
+        def key(h):
+            return tuple(sorted((round(p[0], 2), round(p[1], 2)) for p in h))
+        ko = key(old)
+        holes[r - 1] = clean
+        s_["shafts"] = [clean if key(h) == ko else h
+                        for h in s_.get("shafts") or []]
+        try:                       # a shaft drawn by hand: its record too
+            op = Polygon(old).buffer(0)
+            for m in doc.get("man_shafts") or []:
+                mp = Polygon(m["pts"]).buffer(0)
+                inter = mp.intersection(op).area
+                if inter > 0.7 * max(op.area, 1e-9) and \
+                        inter > 0.5 * max(mp.area, 1e-9):
+                    m["pts"] = clean
+            PJ.apply_man_shafts(doc)
+        except Exception:  # noqa: BLE001
+            pass
+        a0, a1 = _area(d["pts"]), _area(clean)
+        self.panel.commit(doc, f"Slab opening reshaped ({a0:.2f} → "
+                               f"{a1:.2f} m²)")
+        try:
+            self.panel._reselect(("slab", s_["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- door / window handles on a wall ----------------------------------
+    def _op_handles(self, info):
+        """{(edge, opening id): (x, y, z)} — the jambs «l» «r» at mid
+        height, the head «t» and the sill «b» at the middle, on the wall's
+        centre line."""
+        from .engine import walls as W
+        w = info["rec"]
+        out = {}
+        if not info.get("ops"):
+            return out
+        seg = W.centre(w)
+        z0 = info.get("z0", 0.0)
+        for o in info["ops"]:
+            try:
+                s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
+                zb = z0 + float(o.get("sill", 0.0))
+                zt = zb + float(o["h"])
+                zm = (zb + zt) / 2
+                for k, s_, zz in (("l", s0, zm), ("r", s1, zm),
+                                  ("t", o["pos"], zt), ("b", o["pos"], zb)):
+                    out[(k, o["id"])] = (seg.p0[0] + seg.u[0] * s_,
+                                         seg.p0[1] + seg.u[1] * s_, zz)
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _op_press(self, ev, info) -> bool:
+        pos = ev.position()
+        best = None
+        for k, (x, y, zz) in self._op_handles(info).items():
+            p = self._px(x, y, zz)
+            if p is None:
+                continue
+            dd = math.hypot(p[0] - pos.x(), p[1] - pos.y())
+            if dd <= GRAB_PX and (best is None or dd < best[0]):
+                best = (dd, k)
+        if best is None:
+            return False
+        o = next(o for o in info["ops"] if o["id"] == best[1][1])
+        self.drag = {"op": True, "which": best[1][0], "info": info,
+                     "o": dict(o), "new": dict(o)}
+        return True
+
+    def _wall_point(self, ev, info, zz):
+        """(s along the wall, z) under the cursor: on the wall's vertical
+        plane — or, looking straight down, on the floor at ``zz``."""
+        from PySide6.QtGui import QVector3D
+
+        from .engine import walls as W
+        seg = W.centre(info["rec"])
+        u = seg.u
+        o_, d_ = self.vp._pixel_to_ray(ev.position().x(), ev.position().y())
+        if o_ is None:
+            return None
+        nrm = QVector3D(-u[1], u[0], 0.0)
+        den = QVector3D.dotProduct(d_, nrm)
+        if abs(den) > 0.05:
+            p0 = QVector3D(seg.p0[0], seg.p0[1], 0.0)
+            t = QVector3D.dotProduct(p0 - o_, nrm) / den
+            P = o_ + d_ * t
+            xy, z = (P.x(), P.y()), P.z()
+        else:
+            xy = self._world(ev.position(), zz)
+            if xy is None:
+                return None
+            z = None
+        return seg, xy, z
+
+    def _op_move(self, ev):
+        d = self.drag
+        info, o, k = d["info"], d["o"], d["which"]
+        z0 = info.get("z0", 0.0)
+        zb = z0 + float(o.get("sill", 0.0))
+        zt = zb + float(o["h"])
+        got = self._wall_point(ev, info, (zb + zt) / 2)
+        if got is None:
+            return
+        seg, xy, z = got
+        u = seg.u
+        new = dict(o)
+        L = seg.L
+        if k in ("l", "r"):
+            q = self._osnap(xy, dict(info, z=(zb + zt) / 2), ev,
+                            skip=(info["rec"]["id"],))
+            s_ = (q[0] - seg.p0[0]) * u[0] + (q[1] - seg.p0[1]) * u[1]
+            if self._mark is None:
+                s_ = round(s_, 2)
+            s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
+            if k == "l":
+                s0 = max(0.0, min(s_, s1 - 0.3))
+            else:
+                s1 = min(L, max(s_, s0 + 0.3))
+            new["pos"] = round((s0 + s1) / 2, 4)
+            new["w"] = round(s1 - s0, 4)
+        elif z is not None:
+            zz = round(z, 2)
+            if k == "t":
+                new["h"] = round(max(zz - zb, 0.3), 4)
+            else:
+                sill = min(max(zz - z0, 0.0), zt - z0 - 0.3)
+                new["sill"] = round(sill, 4)
+                new["h"] = round(zt - z0 - sill, 4)
+        d["new"] = new
+        self.vp.update()
+
+    def _op_release(self):
+        d, self.drag = self.drag, None
+        self._mark = None
+        if d is None or d["new"] == d["o"]:
+            self.vp.update()
+            return
+        from . import project as PJ
+        from .host import len_txt
+        doc = PJ.load(self._raw())
+        o = PJ.find_record(doc, "opening", d["o"]["id"])
+        if o is None:
+            return
+        for f in ("pos", "w", "h", "sill"):
+            if f in d["new"]:
+                o[f] = d["new"][f]
+        self.panel.commit(doc, f"{o.get('name') or 'Opening'} resized: "
+                               f"{len_txt(o['w'])} × {len_txt(o['h'])}, "
+                               f"sill {len_txt(o.get('sill', 0.0))}")
+        try:
+            self.panel._reselect(("wall", d["info"]["rec"]["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _draw_ops(self, painter, info):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QColor, QPen, QPolygonF
+        from .engine import walls as W
+        dr = self.drag if (self.drag or {}).get("op") else None
+        if dr is not None:
+            info = dr["info"]
+        hs = self._op_handles(info)
+        if not hs:
+            return
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        if dr is not None:                 # the opening as it will be
+            o = dr["new"]
+            seg = W.centre(info["rec"])
+            z0 = info.get("z0", 0.0)
+            s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
+            zb = z0 + float(o.get("sill", 0.0))
+            zt = zb + float(o["h"])
+            pts = [self._px(seg.p0[0] + seg.u[0] * s_,
+                            seg.p0[1] + seg.u[1] * s_, zz)
+                   for s_, zz in ((s0, zb), (s1, zb), (s1, zt), (s0, zt))]
+            if all(pts):
+                painter.setPen(QPen(QColor(150, 60, 220), 2.0))
+                painter.setBrush(QColor(150, 60, 220, 40))
+                painter.drawPolygon(QPolygonF([QPointF(p[0], p[1])
+                                               for p in pts]))
+                from .host import len_txt
+                painter.setPen(QColor(110, 30, 180))
+                painter.drawText(QPointF(pts[2][0] + 8, pts[2][1] - 6),
+                                 f"{len_txt(o['w'])} × {len_txt(o['h'])}"
+                                 f"  sill {len_txt(o.get('sill', 0.0))}")
+            hs = {}
+        for (k, _oid), (x, y, zz) in hs.items():
+            p = self._px(x, y, zz)
+            if p is None:
+                continue
+            r = HANDLE_PX
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(QColor(150, 60, 220))
+            painter.drawPolygon(QPolygonF([QPointF(p[0], p[1] - r),
+                                           QPointF(p[0] + r, p[1]),
+                                           QPointF(p[0], p[1] + r),
+                                           QPointF(p[0] - r, p[1])]))
+        painter.restore()
+
     # ---- section box handles -------------------------------------------------
     def _move(self, ev):
         from PySide6.QtCore import Qt
@@ -518,6 +836,9 @@ class PlanEdit:
             return
         if d.get("slab"):
             self._slab_move(ev)
+            return
+        if d.get("op"):
+            self._op_move(ev)
             return
         info = d["info"]
         p = self._world(ev.position(), info["z"])
@@ -539,13 +860,17 @@ class PlanEdit:
             d["nb"] = (b[0] + dx, b[1] + dy)
         else:
             fixed = b if d["which"] == "a" else a
+            sp = self._osnap(p, info, ev, base=fixed,
+                             skip=(info["rec"]["id"],))
             if mods & Qt.ControlModifier:        # anywhere
-                q = (round(p[0], 2), round(p[1], 2))
+                q = sp if self._mark else (round(p[0], 2), round(p[1], 2))
             else:                                 # along its own line
-                s = (p[0] - fixed[0]) * (u[0]) + (p[1] - fixed[1]) * u[1]
-                s = round(s, 2)
+                s = (sp[0] - fixed[0]) * (u[0]) + (sp[1] - fixed[1]) * u[1]
+                if self._mark is None:
+                    s = round(s, 2)
                 q = (fixed[0] + u[0] * s, fixed[1] + u[1] * s)
-            q = self._snap_end(q, info)
+                if self._mark is None:
+                    q = self._snap_end(q, info)
             if math.dist(q, fixed) >= 0.1:
                 if d["which"] == "a":
                     d["na"] = q
@@ -576,7 +901,12 @@ class PlanEdit:
             return
         if self.drag is not None and self.drag.get("slab"):
             self._slab_release()
+            self._mark = None
             return
+        if self.drag is not None and self.drag.get("op"):
+            self._op_release()
+            return
+        self._mark = None
         d, self.drag = self.drag, None
         if d is None or (d["na"] == d["a"] and d["nb"] == d["b"]):
             self.vp.update()
@@ -678,11 +1008,14 @@ class PlanEdit:
         dr = self.drag
         if dr is not None and dr.get("slab"):
             info, pts = dr["info"], dr["new"]
+            rings = [(r, pl) for r, pl in self._slab_rings(info["rec"])
+                     if r != dr.get("ring", 0)] + [(dr.get("ring", 0), pts)]
         else:
             info = self._slab()
             if info is None:
                 return
-            pts = [tuple(q) for q in info["rec"]["corners"]]
+            rings = self._slab_rings(info["rec"])
+            pts = rings[0][1]
         z = info["z"]
         pp = [self._px(q[0], q[1], z) for q in pts]
         painter.save()
@@ -694,7 +1027,7 @@ class PlanEdit:
                 painter.drawLine(QPointF(a[0], a[1]), QPointF(b[0], b[1]))
             from .host import len_txt
             k = dr["which"]
-            i = int(k[1:])
+            i = int(k[1:].split(".")[1])
             n = len(pts)
             painter.setPen(QColor(230, 90, 20))
             for j in ((i - 1) % n, i) if k[0] == "v" else \
@@ -706,14 +1039,19 @@ class PlanEdit:
                                  len_txt(math.dist(a, b)))
             painter.drawText(QPointF(pp[i][0] + 10, pp[i][1] + 18),
                              f"{_area(pts):.2f} m²")
-        for k, (x, y) in self._slab_handles(pts).items():
+        for k, (x, y) in self._slab_handles(rings).items():
             p = self._px(x, y, z)
             if p is None:
                 continue
-            r = HANDLE_PX - (1 if k[0] == "e" else 0)
+            hole = not k[1:].startswith("0.")
+            r = HANDLE_PX - (1 if k[0] == "e" else 0) - (1 if hole else 0)
             painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-            painter.setBrush(QColor(20, 150, 90) if k[0] == "v"
-                             else QColor(230, 140, 20))
+            if hole:                         # an opening's handles: blue
+                painter.setBrush(QColor(30, 120, 220) if k[0] == "v"
+                                 else QColor(90, 170, 240))
+            else:
+                painter.setBrush(QColor(20, 150, 90) if k[0] == "v"
+                                 else QColor(230, 140, 20))
             if k[0] == "e":
                 painter.drawEllipse(QPointF(p[0], p[1]), r, r)
             else:
@@ -756,7 +1094,24 @@ class PlanEdit:
             self._draw_slab(painter)
         except Exception:  # noqa: BLE001
             pass
+        mk = getattr(self, "_mark", None)
+        if mk is not None and self.drag is not None:
+            try:
+                from . import osnap as OS
+                OS.draw_marker(painter, self._px(mk[0][0], mk[0][1], mk[2]),
+                               mk[1])
+            except Exception:  # noqa: BLE001
+                pass
         if self.drag is not None and self.drag.get("slab"):
+            return
+        try:
+            wi = self._wall() if self.drag is None else \
+                self.drag.get("info")
+            if wi is not None and wi.get("kind", "wall") == "wall":
+                self._draw_ops(painter, wi)
+        except Exception:  # noqa: BLE001
+            pass
+        if self.drag is not None and self.drag.get("op"):
             return
         info = self._wall() if self.drag is None else self.drag.get("info")
         if info is None:

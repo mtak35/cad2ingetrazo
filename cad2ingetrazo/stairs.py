@@ -258,7 +258,11 @@ def auto(doc, cad=None, flip=False) -> dict:
             m = _mid(flights[0]["lines"][0])
             room = next((r["poly"] for r in rooms
                          if r["poly"].buffer(0.3).contains(Point(m))), None)
-            fl, lands = complete(flights, n_need, room)
+            # the plan's own risers when they climb the storey at a
+            # riser of 8" at most: no return flight invented beside them
+            have = sum(len(f["lines"]) for f in flights)
+            n_use = have if have and H / have <= 0.2032 else n_need
+            fl, lands = complete(flights, n_use, room)
             n = sum(len(f["lines"]) for f in fl)
             st = {"traced": True, "flights": [
                 {"lines": [[list(a), list(b)] for a, b in f["lines"]],

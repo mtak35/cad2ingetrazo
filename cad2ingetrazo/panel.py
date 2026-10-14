@@ -368,6 +368,69 @@ def remove_old_guards(app=None):
     return n
 
 
+def _flat_shape(vs):
+    """("h", z) for a horizontal shape, ("v", None) for a vertical one,
+    None for a tilted one."""
+    zs = [v[2] for v in vs]
+    if max(zs) - min(zs) < 0.005:
+        return ("h", sum(zs) / len(zs))
+    # vertical: every point on one vertical plane
+    import numpy as np
+    P = np.asarray([v[:2] for v in vs])
+    c = P.mean(axis=0)
+    _u, sv, _vt = np.linalg.svd(P - c)
+    if len(sv) > 1 and sv[1] < 0.005 * max(sv[0], 1e-9) + 1e-4:
+        return ("v", None)
+    return None
+
+
+def _is_circle(vs) -> bool:
+    """A circle drawn: many points, all as far from their middle."""
+    if len(vs) < 10:
+        return False
+    cx = sum(v[0] for v in vs) / len(vs)
+    cy = sum(v[1] for v in vs) / len(vs)
+    cz = sum(v[2] for v in vs) / len(vs)
+    ds = [math.dist(v, (cx, cy, cz)) for v in vs]
+    m = sum(ds) / len(ds)
+    return m > 0.02 and max(ds) - min(ds) < 0.06 * m
+
+
+def _wall_hit(arch, vs, zof, info=None):
+    """The straight wall whose face the vertical shape ``vs`` lies on:
+    (wall, its centre seg, s0, s1, z bottom, z top) or None."""
+    from .engine import walls as W
+    best = None
+    for w in arch["walls"]:
+        if w.get("kind", "line") != "line" or "a" not in w or w.get("rail"):
+            continue
+        try:
+            seg = W.centre(w)
+        except Exception:  # noqa: BLE001
+            continue
+        u = seg.u
+        nv = (-u[1], u[0])
+        T2 = float(w["t"]) / 2
+        cs = [(v[0] - seg.p0[0]) * nv[0] + (v[1] - seg.p0[1]) * nv[1]
+              for v in vs]
+        if not all(abs(abs(c) - T2) < 0.02 for c in cs) or \
+                (max(cs) > 0) != (min(cs) > 0):
+            continue
+        ss = [(v[0] - seg.p0[0]) * u[0] + (v[1] - seg.p0[1]) * u[1]
+              for v in vs]
+        if min(ss) < -0.01 or max(ss) > seg.L + 0.01:
+            continue
+        z0 = zof.get(w["level"], 0.0)
+        zs = [v[2] for v in vs]
+        if min(zs) < z0 - 0.05 or max(zs) > z0 + 12.0:
+            continue
+        d = max(abs(abs(c) - T2) for c in cs)
+        if best is None or d < best[0]:
+            best = (d, (w, seg, max(min(ss), 0.0), min(max(ss), seg.L),
+                        min(zs), max(zs)))
+    return best[1] if best else None
+
+
 def _walk_world(groups, parent=None):
     """(group, its world matrix | None) through the groups inside groups."""
     for g in groups or []:
@@ -603,8 +666,20 @@ class Panel(QWidget):
         self.c_prof.setChecked(bool(getattr(st_, "profiles", False)))
         self.c_prof.toggled.connect(lambda on: self._edge_style("profiles",
                                                                 on))
+        self.c_autoop = QCheckBox("Shapes → openings")
+        self.c_autoop.setToolTip(
+            "A rectangle, circle or closed shape drawn on the face of a "
+            "wall becomes an opening there (round for a circle); drawn on a "
+            "slab's top, a shaft through it — at once")
+        self.c_autoop.setChecked(True)
+        self.c_autoop.toggled.connect(self._auto_op_toggle)
         row.addWidget(self.c_edges)
         row.addWidget(self.c_prof)
+        row.addWidget(self.c_autoop)
+        row.addWidget(_btn("Snaps…", self._snap_dialog,
+                           "Object snap for the handles, as AutoCAD's "
+                           "OSNAP: endpoint, midpoint, intersection, "
+                           "centre, perpendicular, nearest"))
         row.addWidget(self.c_lvgroups)
         row.addStretch(1)
         self.lay.addLayout(row)
@@ -612,6 +687,62 @@ class Panel(QWidget):
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color: #8a94a3;")
         self.lay.addWidget(self.status)
+
+    def _cad_furniture(self):
+        from . import furnish as FU
+        doc = self.doc()
+        if not doc.get("imports"):
+            self.flash("Import a CAD plan first")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            got = FU.furnish(doc)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._cad_furniture")
+            self.flash(f"Furniture not read — {e}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        from collections import Counter
+        tot = Counter()
+        for v_ in got.values():
+            tot.update(v_)
+        if not tot:
+            self.flash("No furniture or fixture blocks recognised in the "
+                       "CAD plan", 8000)
+            return
+        doc["settings"]["cad_furniture"] = True
+        self.commit(doc, "Furniture from the CAD: " + ", ".join(
+            f"{n} {k}" for k, n in tot.most_common()))
+
+    def _cad_furniture_off(self):
+        doc = self.doc()
+        n = sum(1 for f in doc.get("furniture") or [] if f.get("cad"))
+        if not n:
+            self.flash("No furniture from the CAD to remove")
+            return
+        doc["furniture"] = [f for f in doc["furniture"] if not f.get("cad")]
+        doc["settings"]["cad_furniture"] = False
+        self.commit(doc, f"{n} pieces of CAD furniture removed")
+
+    def _auto_op_toggle(self, on):
+        if self._building:
+            return
+        doc = self.doc()
+        if bool(doc["settings"].get("auto_openings", True)) == bool(on):
+            return
+        doc["settings"]["auto_openings"] = bool(on)
+        PJ.store_only(self.vp, doc)
+        self.flash("Drawn shapes become openings" if on else
+                   "Drawn shapes stay as drawn")
+
+    def _snap_dialog(self):
+        from . import osnap as OS
+        if OS.dialog(self):
+            st = OS.settings()
+            on = [n for k, n, _d in OS.MODES if st.get(k)]
+            self.flash(("Object snap: " + ", ".join(on)) if st["on"] and on
+                       else "Object snap off")
 
     def _edge_style(self, name, on):
         """The 3D view's style: its edges / profiles on or off (the host's
@@ -3484,6 +3615,20 @@ class Panel(QWidget):
         row.addWidget(self.r_fin_t)
         v.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(_btn("Furniture & fixtures from the CAD",
+                           self._cad_furniture,
+                           "The CAD plan's blocks — beds, WCs, basins, "
+                           "showers, sofas, chairs, tables, wardrobes, "
+                           "kitchen sinks, stoves, fridges, plants, trees — "
+                           "as IngeTrazo library models at the same place, "
+                           "turned and sized as drawn (every imported floor; "
+                           "made again, it replaces only its own)",
+                           primary=True))
+        row.addWidget(_btn("Remove", self._cad_furniture_off,
+                           "The furniture taken from the CAD out (the "
+                           "pieces you placed by hand stay)"))
+        v.addLayout(row)
+        row = QHBoxLayout()
         self.r_curt = QCheckBox("Curtains at windows")
         self.r_curt.setToolTip("A rod over each window and two pleated "
                                "curtains drawn open, on the room side (the "
@@ -3674,6 +3819,10 @@ class Panel(QWidget):
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
         self.r_curt.setChecked(bool(st.get("curtains")))
         self.r_plaster.setValue(float(st.get("plaster_t", 0.0127) or 0.0))
+        if hasattr(self, "c_autoop"):
+            self.c_autoop.blockSignals(True)
+            self.c_autoop.setChecked(bool(st.get("auto_openings", True)))
+            self.c_autoop.blockSignals(False)
         st_ = getattr(self.vp.scene, "display_style", None)
         for cb, nm in ((getattr(self, "c_edges", None), "edges"),
                        (getattr(self, "c_prof", None), "profiles")):
@@ -5208,6 +5357,138 @@ class Panel(QWidget):
         self.commit(doc, f"{n} shaft(s) / opening(s) closed — the drawn "
                          "rectangle can be deleted")
 
+    def _auto_openings(self, doc) -> bool:
+        """A rectangle, circle or any closed shape drawn (Rectangle / Circle
+        / Line tools) flat on the face of a CAD2IngeTrazo wall or on a
+        slab's top: made an opening there at once — a hole through the
+        wall (round for a circle), a shaft through the slab — and the
+        drawn shape taken away. True when the model was rebuilt."""
+        if not doc["settings"].get("auto_openings", True):
+            return False
+        sc = self.vp.scene
+        if getattr(sc, "edit_group", None) is not None:
+            return False
+        mesh = getattr(sc, "loose_mesh", None) or getattr(sc, "mesh", None)
+        faces = list(getattr(mesh, "faces", []) or [])
+        if not faces:
+            if getattr(self, "_auto_seen", None) is None:
+                self._auto_seen = set()
+            return False
+        seen = getattr(self, "_auto_seen", None)
+        first = seen is None
+        if first:                 # what was there before: left alone
+            seen = self._auto_seen = set()
+        todo = []
+        for f in faces:
+            vs = []
+            for v in f.vertices:
+                q = getattr(v, "position", v)
+                if callable(q):
+                    q = q()
+                vs.append((float(q.x()), float(q.y()), float(q.z())))
+            if len(vs) < 3:
+                continue
+            key = tuple(sorted((round(a, 3), round(b, 3), round(c, 3))
+                               for a, b, c in vs))
+            if key in seen:
+                continue
+            seen.add(key)
+            todo.append((f, vs))
+        if not todo or first:
+            return False
+        made, used = [], []
+        arch = doc["arch"]
+        el = PJ.elevations(arch)
+        zof = {lv["id"]: el[i] for i, lv in enumerate(arch["levels"])}
+        info = None
+        for f, vs in todo:
+            kind = _flat_shape(vs)
+            if kind is None:
+                continue
+            if kind[0] == "h":                    # on a slab's top
+                if self._shape_shaft(doc, vs):
+                    made.append("shaft")
+                    used.append(f)
+                continue
+            got = _wall_hit(arch, vs, zof, info)
+            if got is None:
+                continue
+            w, seg, s0, s1, zb, zt = got
+            z0 = zof.get(w["level"], 0.0)
+            rnd = _is_circle(vs)
+            if rnd:
+                d_ = max(s1 - s0, zt - zb)
+                sc_, zc = (s0 + s1) / 2, (zb + zt) / 2
+                s0, s1 = sc_ - d_ / 2, sc_ + d_ / 2
+                zb, zt = zc - d_ / 2, zc + d_ / 2
+            if s1 - s0 < 0.05 or zt - zb < 0.05:
+                continue
+            rec = {"kind": "void", "wall": w["id"],
+                   "pos": round((s0 + s1) / 2, 4),
+                   "w": round(s1 - s0, 4), "h": round(zt - zb, 4),
+                   "sill": round(max(zb - z0, 0.0), 4), "style": "",
+                   "swing": "left", "leaves": 1, "face": 1, "head": "flat",
+                   "frame": "auto"}
+            if rnd:
+                rec["shape"] = "round"
+            arch["openings"] += M.new_openings(arch["openings"], [rec])
+            made.append("round hole" if rnd else "opening")
+            used.append(f)
+        if not made:
+            return False
+        try:                                   # the drawn shapes away
+            from core.history import CompoundCommand, DeleteEdgesCommand
+            m = mesh
+            edges = []
+            for f in used:
+                vv = list(f.vertices)
+                for i in range(len(vv)):
+                    a = m.vertex_at(getattr(vv[i], "position", vv[i]))
+                    b = m.vertex_at(getattr(vv[(i + 1) % len(vv)],
+                                            "position",
+                                            vv[(i + 1) % len(vv)]))
+                    e = m.find_edge(a, b) if a is not None and \
+                        b is not None else None
+                    if e is not None and e not in edges:
+                        edges.append(e)
+            if edges:
+                self.vp.history.execute(CompoundCommand(
+                    [DeleteEdgesCommand(edges)]))
+        except Exception:  # noqa: BLE001
+            log_error("panel._auto_openings delete")
+        from collections import Counter
+        what = ", ".join(f"{n} {k}{'s' if n > 1 else ''}"
+                         for k, n in Counter(made).items())
+        self.commit(doc, f"Drawn shape → {what}")
+        return True
+
+    def _shape_shaft(self, doc, vs) -> bool:
+        """A flat shape on a slab's top face: a shaft cut through it."""
+        from shapely.geometry import Point, Polygon
+
+        from . import slabedges as SE
+        z = sum(v[2] for v in vs) / len(vs)
+        poly = Polygon([v[:2] for v in vs]).buffer(0)
+        if poly.is_empty or poly.area < 0.04:
+            return False
+        c = poly.representative_point()
+        for s_ in doc["arch"]["structure"]:
+            if s_["type"] != "slab" or not s_.get("corners"):
+                continue
+            try:
+                if not Polygon(s_["corners"]).buffer(0).contains(
+                        Point(c.x, c.y)):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            top = self._group_top_z("slab", s_["id"])
+            if top is None or abs(top - z) > 0.03:
+                continue
+            lid = SE.floor_level_of(doc, s_)
+            pts = [list(q) for q in list(poly.exterior.coords)[:-1]]
+            return bool(PJ.add_man_shaft(doc, lid, pts, False))
+        return False
+
     def _drawn_outlines(self) -> list:
         """Flat faces selected in the model that are not CAD2IngeTrazo's
         (a rectangle drawn with the Rectangle tool): their corners."""
@@ -6306,6 +6587,11 @@ class Panel(QWidget):
             return
         if self._follow_moves(doc):
             return                     # rebuilt: refresh runs again
+        try:                           # a shape drawn on a wall / slab face
+            if self._auto_openings(doc):
+                return                 # rebuilt: refresh runs again
+        except Exception:  # noqa: BLE001
+            log_error("panel._auto_openings")
         self._building = True
         try:
             for cb, key in ((self.c_marks, "marks_on"),

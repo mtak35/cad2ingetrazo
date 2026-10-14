@@ -617,6 +617,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["panel"] = o["panel"]
         if o.get("handle") in HANDLE_KEYS and o.get("handle") != "auto":
             rec["handle"] = o["handle"]
+        if o.get("shape") == "round":       # a round hole (drawn circle)
+            rec["shape"] = "round"
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)
