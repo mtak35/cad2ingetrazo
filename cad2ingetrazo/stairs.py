@@ -221,6 +221,13 @@ def auto(doc, cad=None, flip=False) -> dict:
             kept[(s0["level"], round(sum(p[0] for p in cs0) / len(cs0), 1),
                   round(sum(p[1] for p in cs0) / len(cs0), 1))] = \
                 {k: s0[k] for k in OWN if s0.get(k)}
+    relaid = []                 # flights turned by hand: by the stair's foot
+    for s0 in doc.get("stairs") or []:
+        if s0.get("foot0") and (s0.get("turns") is not None or
+                                s0.get("rot")):
+            relaid.append((s0["level"], tuple(s0["foot0"]),
+                           s0.get("turns"), s0.get("rot", 0.0),
+                           s0.get("counts")))
     doc["stairs"] = []
     levels = arch["levels"]
     info = S.levels_info(arch, M.elevations)
@@ -297,6 +304,16 @@ def auto(doc, cad=None, flip=False) -> dict:
                 r.update(kept.get((lv["id"], round(sum(
                     p[0] for p in cs1) / len(cs1), 1), round(sum(
                         p[1] for p in cs1) / len(cs1), 1)), {}))
+            if relaid:
+                ft = foot_of(r)
+                hit = next((x for x in relaid if x[0] == lv["id"] and ft
+                            and math.dist(ft, x[1]) < 0.6), None)
+                if hit is not None:
+                    try:
+                        r = relay(r, hit[2], hit[3], hit[4])
+                        r["foot0"] = list(hit[1])
+                    except Exception:  # noqa: BLE001
+                        pass
             doc["stairs"].append(r)
             made += 1
             # the well: only over the steps that need it — 7'-0" clear
@@ -358,6 +375,69 @@ def _cut(arch, lid, corners) -> int:
 HEADROOM = 2.1336            # 7'-0" clear over every step
 
 
+def cut_well(doc, r) -> int:
+    """The well of stair ``r`` cut in the slab over it (as «Stairs» does)."""
+    from . import project as PJ
+    from .engine import model as M
+    from .engine import structure as S
+    arch = doc["arch"]
+    stt0 = doc.get("settings") or {}
+    info = S.levels_info(arch, M.elevations)
+    lv = next((x for x in arch["levels"] if x["id"] == r["level"]), None)
+    if lv is None:
+        return 0
+    up = next((x for x in arch["levels"] if x["id"] == r.get("to")), None)
+    if up is not None:
+        H = info[up["id"]]["z0"] - info[lv["id"]]["z0"]
+    else:
+        H = float(lv.get("height") or 3.0)
+    well = r["corners"]
+    wm = stt0.get("stair_well", "railing")
+    if wm != "outline" and stt0.get("stair_headroom_cut", True):
+        hc = headroom_cut(r, H, float(stt0.get("slab_t", 0.15)),
+                          float(stt0.get("stair_head", HEADROOM)), wm)
+        if hc:
+            well = hc
+    if PJ.slab_on_top(doc):
+        return _cut(arch, lv["id"], well)
+    if up is not None:
+        return _cut(arch, up["id"], well)
+    return 0
+
+
+def restair(doc, sid, turns, rot, counts) -> dict:
+    """Stair ``sid`` laid again by hand: ``counts`` risers in each flight
+    (their number the number of flights), ``turns`` how each flight leaves
+    the landing before it, the whole stair turned to ``rot`` degrees round
+    its foot. The landings follow the turns; the slab's well is cut again.
+    Kept through «Stairs» (made again from the CAD) by the stair's foot."""
+    st = next((x for x in doc.get("stairs") or [] if x.get("id") == sid),
+              None)
+    if st is None:
+        raise ValueError("stair not found")
+    foot0 = st.get("foot0") or foot_of(st)
+    d_rot = float(rot or 0.0) - float(st.get("rot") or 0.0)
+    new = relay(st, turns, d_rot, counts)
+    new["rot"] = float(rot or 0.0)
+    new["foot0"] = [round(foot0[0], 4), round(foot0[1], 4)]
+    _uncut(doc, [st])
+    i = doc["stairs"].index(st)
+    doc["stairs"][i] = new
+    cut_well(doc, new)
+    return new
+
+
+def unstair(doc, sid) -> bool:
+    """The hand turns of stair ``sid`` forgotten (back to the CAD's)."""
+    st = next((x for x in doc.get("stairs") or [] if x.get("id") == sid),
+              None)
+    if st is None:
+        return False
+    for k in ("turns", "rot", "counts", "foot0"):
+        st.pop(k, None)
+    return True
+
+
 WELL_MODES = [("railing", "Following the railing (whole flights that "
                          "need headroom, their landings)"),
               ("headroom", "Only over the steps short of 7'-0\" headroom"),
@@ -417,11 +497,13 @@ def headroom_cut(st, H, slab_t, head=HEADROOM, mode="headroom"):
         return None
 
 
-def _uncut(doc) -> None:
-    """The wells the stairs before cut, closed again."""
+def _uncut(doc, only=None) -> None:
+    """The wells the stairs before cut (``only`` those), closed again."""
     from shapely.geometry import Polygon
     arch = doc["arch"]
-    olds = [Polygon(st["corners"]) for st in doc.get("stairs") or []]
+    olds = [Polygon(st["corners"]) for st in (
+        only if only is not None else doc.get("stairs") or [])
+        if len(st.get("corners") or []) >= 3]
     for s in arch["structure"]:
         if s["type"] != "slab" or not olds:
             continue
@@ -1626,3 +1708,199 @@ def _smooth(path):
 
 def _at(o, d, r, s, t):
     return (o[0] + d[0] * s + r[0] * t, o[1] + d[1] * s + r[1] * t)
+
+
+# ---- flights turned by hand: the landings follow ---------------------------------------
+TURNS = [("straight", "Straight on"), ("left", "Turn left 90°"),
+         ("right", "Turn right 90°"), ("uleft", "U-turn left (180°)"),
+         ("uright", "U-turn right (180°)")]
+U_GAP = 0.10                 # m between the two flights of a U
+
+
+def _nrm(v):
+    n = math.hypot(v[0], v[1]) or 1.0
+    return (v[0] / n, v[1] / n)
+
+
+def _frame(f):
+    """A flight's first riser line as (a, r across, w width, d up, g)."""
+    (a, b) = f["lines"][0]
+    a, b = (float(a[0]), float(a[1])), (float(b[0]), float(b[1]))
+    w = math.dist(a, b) or float(f.get("w") or 1.0)
+    r = ((b[0] - a[0]) / w, (b[1] - a[1]) / w)
+    d = _nrm(f["d"])
+    return a, r, w, d, float(f.get("g") or GOING_MIN)
+
+
+def _left_of(d):
+    return (-d[1], d[0])
+
+
+def flight_turns(st) -> list:
+    """How each flight after the first leaves the landing before it:
+    "straight", "left", "right", "uleft", "uright" (seen climbing)."""
+    flights, _l = as_flights(st)
+    out = []
+    for f0, f1 in zip(flights, flights[1:]):
+        d0, d1 = _nrm(f0["d"]), _nrm(f1["d"])
+        dot = d0[0] * d1[0] + d0[1] * d1[1]
+        cr = d0[0] * d1[1] - d0[1] * d1[0]
+        if dot > 0.7:
+            out.append("straight")
+        elif dot < -0.7:
+            m0 = _mid(f0["lines"][-1])
+            m1 = _mid(f1["lines"][0])
+            lf = _left_of(d0)
+            side = (m1[0] - m0[0]) * lf[0] + (m1[1] - m0[1]) * lf[1]
+            out.append("uleft" if side > 0 else "uright")
+        else:
+            out.append("left" if cr > 0 else "right")
+    return out
+
+
+def relay(st, turns=None, rot=0.0, counts=None, gap=U_GAP) -> dict:
+    """The stair laid again flight by flight: each flight keeps its width
+    and tread, ``counts`` its risers, ``turns`` how it leaves the landing
+    before it, the whole stair turned ``rot`` degrees round its foot (the
+    first riser's middle). Every landing is made again to fit its turn —
+    a square for a 90° turn, both flights' width for a U, a flight's width
+    on a straight run — and the arrival landing past the last riser. The
+    storey height stays (the riser height follows the risers' number)."""
+    flights, _lands = as_flights(st)
+    if not flights:
+        return dict(st)
+    turns0 = list(turns or flight_turns(st))
+    if counts:                     # flights added (like the last) / dropped
+        flights = list(flights[:len(counts)])
+        while len(flights) < len(counts):
+            flights.append(dict(flights[-1]))
+    nf = len(flights)
+    turns = turns0[:nf - 1]
+    turns += ["right"] * (nf - 1 - len(turns))
+    cnt = [len(f["lines"]) for f in flights]
+    if counts and len(counts) == nf:
+        cnt = [max(2, int(c)) for c in counts]
+    a, r, w, d, g = _frame(flights[0])
+    foot = (a[0] + r[0] * w / 2, a[1] + r[1] * w / 2)
+    if rot:
+        c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+
+        def R(v):
+            return (v[0] * c - v[1] * s, v[0] * s + v[1] * c)
+        r, d = R(r), R(d)
+        a = (foot[0] - r[0] * w / 2, foot[1] - r[1] * w / 2)
+
+    def P(o, v, k):
+        return (o[0] + v[0] * k, o[1] + v[1] * k)
+
+    def L(p):
+        return [round(p[0], 4), round(p[1], 4)]
+    new_f, new_l = [], []
+    climbed = 0
+    for k in range(nf):
+        m = cnt[k]
+        lines = []
+        for j in range(m):
+            p = P(a, d, j * g)
+            lines.append([L(p), L(P(p, r, w))])
+        new_f.append({"lines": lines, "d": [round(d[0], 6), round(d[1], 6)],
+                      "w": round(w, 4), "g": round(g, 4)})
+        climbed += m
+        A = P(a, d, (m - 1) * g)          # the last riser's a end
+        if k == nf - 1:
+            pts = [A, P(A, r, w), P(P(A, r, w), d, w), P(A, d, w)]
+            new_l.append({"corners": [L(p) for p in pts],
+                          "after": climbed, "arrival": True})
+            break
+        _a2, _r2, w2, _d2, g2 = _frame(flights[k + 1])
+        t = turns[k]
+        lf = _left_of(d)
+        r_left = (r[0] * lf[0] + r[1] * lf[1]) > 0   # r points left
+        if t in ("left", "right"):
+            to_r = (t == "left") == r_left           # leaves on r's side
+            pts = [A, P(A, r, w), P(P(A, r, w), d, w2), P(A, d, w2)]
+            if to_r:
+                na = P(P(A, r, w), d, w2)
+                nr, nd = (-d[0], -d[1]), r
+            else:
+                na = A
+                nr, nd = d, (-r[0], -r[1])
+        elif t in ("uleft", "uright"):
+            to_r = (t == "uleft") == r_left
+            D = max(w, w2)
+            if to_r:
+                lo, hi = 0.0, w + gap + w2
+                na = P(A, r, w + gap + w2)
+            else:
+                lo, hi = -(gap + w2), w
+                na = P(A, r, -gap)
+            nr, nd = (-r[0], -r[1]), (-d[0], -d[1])
+            p0, p1 = P(A, r, lo), P(A, r, hi)
+            pts = [p0, p1, P(p1, d, D), P(p0, d, D)]
+        else:                                        # straight on
+            D = max(w, 0.9)
+            pts = [A, P(A, r, w), P(P(A, r, w), d, D), P(A, d, D)]
+            na, nr, nd = P(A, d, D), r, d
+            if abs(w2 - w) > 1e-3:                   # centred on the run
+                na = P(na, r, (w - w2) / 2)
+        new_l.append({"corners": [L(p) for p in pts], "after": climbed})
+        a, r, w, d, g = na, nr, w2, nd, g2
+    H = float(st.get("rise", RISER)) * int(st.get("risers", sum(
+        len(f["lines"]) for f in flights)) or 1)
+    n = sum(len(f["lines"]) for f in new_f)
+    out = dict(st, traced=True, kind="traced", flights=new_f,
+               landings=new_l, risers=n, rise=round(H / n, 4),
+               going=new_f[0]["g"], turns=turns, rot=float(rot or 0.0),
+               counts=[len(f["lines"]) for f in new_f])
+    out.pop("flip", None)
+    out["corners"] = outline_of(out)
+    return out
+
+
+def foot_of(st):
+    """The middle of a stair's first riser line."""
+    flights, _l = as_flights(st)
+    if not flights:
+        return None
+    return _mid(flights[0]["lines"][0])
+
+
+def well_of(doc, st):
+    """The well a stair cuts (as the import cuts it)."""
+    stt = doc.get("settings") or {}
+    H = float(st.get("rise", RISER)) * int(st.get("risers", 18))
+    well = st["corners"]
+    wm = stt.get("stair_well", "railing")
+    if wm != "outline" and stt.get("stair_headroom_cut", True):
+        hc = headroom_cut(st, H, float(stt.get("slab_t", 0.15)),
+                          float(stt.get("stair_head", HEADROOM)), wm)
+        if hc:
+            well = hc
+    return well
+
+
+def recut(doc, old, new) -> int:
+    """The well of stair ``old`` closed, ``new``'s cut instead."""
+    from shapely.geometry import Polygon
+
+    from . import project as PJ
+    arch = doc["arch"]
+    o = Polygon(old.get("corners") or [])
+    if o.is_valid and o.area > 0:
+        for s in arch["structure"]:
+            if s["type"] != "slab":
+                continue
+            keep = []
+            for h in s.get("holes") or []:
+                hp = Polygon(h)
+                if hp.is_valid and hp.area >= 0.5 and \
+                        hp.intersection(o).area >= 0.9 * hp.area:
+                    continue
+                keep.append(h)
+            s["holes"] = keep
+    well = well_of(doc, new)
+    if PJ.slab_on_top(doc):
+        return _cut(arch, new["level"], well)
+    if new.get("to"):
+        return _cut(arch, new["to"], well)
+    return 0

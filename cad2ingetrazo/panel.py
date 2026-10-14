@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSlider,
                                QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QScrollArea,
+                               QMessageBox, QPushButton, QScrollArea, QSpinBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
@@ -3976,6 +3976,17 @@ class Panel(QWidget):
         self.sel_form_host = QWidget()
         self.sel_form = QFormLayout(self.sel_form_host)
         v.addWidget(self.sel_form_host)
+        self.stf_box = QGroupBox("Flights and landings (this stair)")
+        self.stf_box.setToolTip(
+            "Lay the stair out by hand where the CAD plan was read wrong: "
+            "how many flights, the risers in each, the way each flight "
+            "turns off the landing before it, and the whole stair turned "
+            "round its first step. The landings are made again to fit "
+            "each turn and the well in the slab is cut again. Kept when "
+            "the stairs are made again from the CAD.")
+        self.stf_lay = QVBoxLayout(self.stf_box)
+        self.stf_box.setVisible(False)
+        v.addWidget(self.stf_box)
         row = QHBoxLayout()
         self.sel_apply = _btn("Apply", self._apply_selected, primary=True)
         self.sel_flip = _btn("Flip hinge", self._flip)
@@ -4201,6 +4212,163 @@ class Panel(QWidget):
             rec.setdefault("frame_w", round(fw_, 4))
             rec.setdefault("frame_d", round(fd_, 4))
         self._sel_widgets = self._build_fields(self.sel_form, sel[0], rec)
+        try:
+            self._fill_stair_flights(rec if sel[0] in ("stair", "stairrail")
+                                     else None)
+        except Exception:  # noqa: BLE001
+            log_error("panel._fill_stair_flights")
+
+    # ---- a stair's flights, turns and landings by hand ------------------------
+    def _fill_stair_flights(self, st, counts=None, turns=None, rot=None):
+        lay = self.stf_lay
+        while lay.count():
+            it = lay.takeAt(0)
+            w_ = it.widget()
+            if w_ is not None:
+                w_.deleteLater()
+            elif it.layout() is not None:
+                l_ = it.layout()
+                while l_.count():
+                    i2 = l_.takeAt(0)
+                    if i2.widget() is not None:
+                        i2.widget().deleteLater()
+        if st is None:
+            self.stf_box.setVisible(False)
+            self._stf = None
+            return
+        from . import stairs as ST
+        flights, _l = ST.as_flights(st)
+        if not flights:
+            self.stf_box.setVisible(False)
+            self._stf = None
+            return
+        if counts is None:
+            counts = [len(f["lines"]) for f in flights]
+        if turns is None:
+            turns = list(st.get("turns") or ST.flight_turns(st))
+        turns = (list(turns) + ["right"] * len(counts))[:len(counts) - 1]
+        if rot is None:
+            rot = float(st.get("rot") or 0.0)
+        self._stf = {"id": st["id"]}
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Flights"))
+        nf = QSpinBox()
+        nf.setRange(1, 6)
+        nf.setValue(len(counts))
+        nf.setToolTip("The number of flights; the risers shared out again "
+                      "(the storey height stays)")
+        row.addWidget(nf)
+        row.addWidget(QLabel(f"  risers in all: {sum(counts)}"))
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        def renum(n):
+            tot = sum(c.value() for c in self._stf["counts"])
+            n = max(1, int(n))
+            base = [tot // n + (1 if i < tot % n else 0) for i in range(n)]
+            cur_t = [c.currentData() for c in self._stf["turns"]]
+            self._fill_stair_flights(
+                PJ.find_record(self.doc(), "stair", st["id"]), base,
+                cur_t, self._stf["rot"].value())
+        nf.valueChanged.connect(renum)
+        cs, ts = [], []
+        for i, n in enumerate(counts):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"Flight {i + 1}"))
+            sp = QSpinBox()
+            sp.setRange(2, 40)
+            sp.setValue(int(n))
+            sp.setSuffix(" risers")
+            row.addWidget(sp)
+            cs.append(sp)
+            if i > 0:
+                cb = QComboBox()
+                for k, lab in ST.TURNS:
+                    cb.addItem(lab, k)
+                cb.setCurrentIndex(max(cb.findData(turns[i - 1]), 0))
+                cb.setToolTip("How this flight leaves the landing before it "
+                              "(seen walking up); the landing is made to fit")
+                row.addWidget(cb)
+                ts.append(cb)
+            else:
+                row.addWidget(QLabel("from the floor"))
+            row.addStretch(1)
+            lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Turn the whole stair"))
+        rs = QDoubleSpinBox()
+        rs.setRange(-360.0, 360.0)
+        rs.setDecimals(1)
+        rs.setSingleStep(15.0)
+        rs.setSuffix(" °")
+        rs.setValue(float(rot))
+        rs.setToolTip("Degrees, anticlockwise, round the middle of the first "
+                      "step")
+        row.addWidget(rs)
+        row.addWidget(_btn("⟲ 90°", lambda: (rs.setValue(rs.value() + 90.0),
+                                             self._stair_relay())))
+        row.addWidget(_btn("⟳ 90°", lambda: (rs.setValue(rs.value() - 90.0),
+                                             self._stair_relay())))
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Apply flights", self._stair_relay,
+                           "Lay the stair out as set above: the landings "
+                           "follow the turns, the slab's well is cut again",
+                           primary=True))
+        row.addWidget(_btn("Mirror turns", self._stair_mirror,
+                           "Every left turn made right and every right "
+                           "turn left"))
+        row.addWidget(_btn("Back to the CAD", self._stair_unrelay,
+                           "Forget the turns set by hand: the stair read "
+                           "from the CAD plan again"))
+        lay.addLayout(row)
+        self._stf.update(counts=cs, turns=ts, rot=rs)
+        self.stf_box.setVisible(True)
+
+    def _stair_relay(self):
+        from . import stairs as ST
+        f = getattr(self, "_stf", None)
+        if not f:
+            return
+        doc = self.doc()
+        counts = [c.value() for c in f["counts"]]
+        turns = [c.currentData() for c in f["turns"]]
+        try:
+            new = ST.restair(doc, f["id"], turns, f["rot"].value(), counts)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._stair_relay")
+            self.flash(f"Stair not laid out — {e}", 8000)
+            return
+        names = dict(ST.TURNS)
+        what = ", ".join(names.get(t, t).split(" (")[0].lower()
+                         for t in turns) or "one flight"
+        if self.commit(doc, f"Stair laid out: {len(counts)} flight"
+                       f"{'s' if len(counts) > 1 else ''} ({what}), "
+                       f"{new['risers']} risers of "
+                       f"{new['rise'] * 1000:.0f} mm"):
+            self._reselect(("stair", f["id"]))
+
+    def _stair_mirror(self):
+        f = getattr(self, "_stf", None)
+        if not f:
+            return
+        sw = {"left": "right", "right": "left", "uleft": "uright",
+              "uright": "uleft"}
+        for cb in f["turns"]:
+            k = cb.currentData()
+            cb.setCurrentIndex(max(cb.findData(sw.get(k, k)), 0))
+        self._stair_relay()
+
+    def _stair_unrelay(self):
+        from . import stairs as ST
+        f = getattr(self, "_stf", None)
+        if not f:
+            return
+        doc = self.doc()
+        ST.unstair(doc, f["id"])
+        PJ.store_only(self.vp, doc)
+        self._stairs()
 
     def _build_fields(self, form, kind, rec) -> dict:
         """The element's fields into ``form``: {key: (type, widget)}."""
