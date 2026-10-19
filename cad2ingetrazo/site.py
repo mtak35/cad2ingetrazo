@@ -91,6 +91,15 @@ def side_frame(corners, i):
     return a, u, (-u[1], u[0]), L
 
 
+def gate_frame(corners, g, t):
+    """The gate's (p0, p1, u, nv) — its two jambs on the wall's outer face,
+    along the side, into the plot — or None."""
+    try:
+        return gate_box(corners, g, t)[1]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def gate_box(corners, g, t):
     """The gate's opening across the wall: 4 corners (a little deeper than
     the wall, so the cut goes clean through)."""
@@ -146,18 +155,25 @@ def build(corners, site, z0):
                 _pt(b))) if not inner.is_empty else None
             mid = ((b[0] + p.x) / 2, (b[1] + p.y) / 2) if p else b
             spots.append((mid, _angle(b, c)))
-        for g, (p0, p1, u, nv) in gates:          # the gate's jambs
+        n_c = len(spots)
+        gi_of = {}
+        for gi_, (g, (p0, p1, u, nv)) in enumerate(gates):   # the jambs
             for p in (p0, p1):
                 q = (p[0] + nv[0] * t / 2 - u[0] * s / 2 * (1 if p is p0
                                                             else -1),
                      p[1] + nv[1] * t / 2 - u[1] * s / 2 * (1 if p is p0
                                                             else -1))
+                gi_of[len(spots)] = site["gates"].index(g)
                 spots.append((q, math.degrees(math.atan2(u[1], u[0]))))
         for k, (c, ang) in enumerate(spots):
             sq = _square(c, s, ang)
-            out.append((f"Pillar {k + 1}", "pillar",
-                        W.solid({"outer": _ccw(sq), "holes": []}, z0,
-                                z0 + h + 0.15), PILLAR_COLOR))
+            fs_ = W.solid({"outer": _ccw(sq), "holes": []}, z0,
+                          z0 + h + 0.15)
+            if k >= n_c:                         # a gate's pillar: its block
+                out.append((f"Gate pillar {k - n_c + 1}", "gatepillar", fs_,
+                            PILLAR_COLOR, gi_of[k]))
+            else:
+                out.append((f"Pillar {k + 1}", "pillar", fs_, PILLAR_COLOR))
     for k, (g, (p0, p1, u, nv)) in enumerate(gates):
         wv = math.dist(p0, p1)
         mid_d = t / 2
@@ -173,7 +189,8 @@ def build(corners, site, z0):
             out.append((f"Gate {k + 1}" + (f" leaf {j + 1}" if len(leaves) > 1
                                            else ""), "gate",
                         W.solid({"outer": _ccw(leaf), "holes": []},
-                                z0 + 0.05, z0 + 0.05 + gh), GATE_COLOR))
+                                z0 + 0.05, z0 + 0.05 + gh), GATE_COLOR,
+                        site["gates"].index(g)))
         # plan symbol: swings opening inwards, or the sliding track
         if g["kind"] == "sliding":
             e = (p1[0] + u[0] * wv + nv[0] * (t + 0.15),

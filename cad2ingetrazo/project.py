@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.0, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -478,7 +478,70 @@ def _corner_windows(doc, lid, pl, P, how, made) -> int:
         seen_[n_] = seen_.get(n_, 0) + 1
         w_["name"] = f"{n_} · leg {seen_[n_]}"
     arch["walls"] += made_c
+    try:                  # glazing that is the wall, a door drawn in it
+        _doors_on_glass(doc, lid, pl, P, made_c)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._doors_on_glass")
     return len(set(nm))
+
+
+def _doors_on_glass(doc, lid, pl, P, legs) -> int:
+    """The window layer drawn as the wall (glazing from wall to wall, no
+    wall lines): where the plan draws a door in it (a swing / a door block
+    across it) that glass leg is made a curtain wall and the door set into
+    its grid there, as wide as drawn. The number of doors placed."""
+    from shapely.geometry import LineString, box
+    from shapely.ops import unary_union
+    if not legs:
+        return 0
+    lay = pl["layers"]
+    dl = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+          if _match(lay[s_[4]], P["doors"]) and
+          math.hypot(s_[2] - s_[0], s_[3] - s_[1]) > 1e-4]
+    marks = []
+    if dl:
+        u = unary_union([ln.buffer(0.03) for ln in dl])
+        marks += [g for g in getattr(u, "geoms", [u])
+                  if g.geom_type == "Polygon"]
+    for ins in pl.get("inserts") or []:
+        if _match(ins.get("layer", ""), P["doors"]) or \
+                "DOOR" in str(ins.get("name", "")).upper():
+            cs = ins.get("corners") or []
+            if len(cs) >= 3:
+                xs = [c[0] for c in cs]
+                ys = [c[1] for c in cs]
+                marks.append(box(min(xs), min(ys), max(xs), max(ys)))
+    if not marks:
+        return 0
+    n = 0
+    for w in legs:
+        c_ = W.centre(w)
+        a, b = tuple(c_.p0), tuple(c_.p1)
+        L = math.dist(a, b)
+        if L < 1.2:
+            continue
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        line = LineString([a, b])
+        hits = []
+        for m in marks:
+            if m.distance(line) > 0.15:
+                continue
+            xs = [(q[0] - a[0]) * ux + (q[1] - a[1]) * uy
+                  for q in m.exterior.coords]
+            t0, t1 = max(min(xs), 0.0), min(max(xs), L)
+            wd = t1 - t0
+            if 0.6 <= wd <= 2.6:
+                hits.append(((t0 + t1) / 2, wd))
+        if not hits:
+            continue
+        if w.get("type") != "curtain":
+            to_curtain(doc, [w["id"]])
+        for pos, wd in hits:
+            rec, _why = add_cw_door(doc, w["id"], width=wd, pos=pos)
+            if rec is not None:
+                n += 1
+    return n
 
 
 def cover_corner_windows(doc, lid) -> int:
@@ -639,7 +702,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
         str(w.get("name", "")).startswith("Terrace railing"))]
     lv_ = level_by_id(arch, lid) or {}
     if not slab_on_top(doc) and lv_.get("kind") == "ground" and \
-            not st.get("ground_slab", False):
+            not ground_slab_on(doc):
         return out            # the ground floor on the ground: no terrace
     walls = [w for w in arch["walls"] if w["level"] == lid
              and not w.get("rail") and W.why_not(w) is None]
@@ -2305,6 +2368,24 @@ def _ramp_level_below(arch, lid):
     return ids[i - 1] if i > 0 else None
 
 
+def ground_slab_on(doc) -> bool:
+    """The ground floor on a concrete slab: asked for («Ground floor
+    slab»), or a basement under it — the foundation platform turned to a
+    slab like the other floors'."""
+    st = doc.get("settings") or {}
+    if st.get("ground_slab", False):
+        return True
+    return any(lv.get("kind") == "basement"
+               for lv in (doc.get("arch") or {}).get("levels") or [])
+
+
+def platform_on(doc) -> bool:
+    """The foundation platform under the ground floor: slabs as floors, the
+    ground floor on the ground (no slab, no basement), the option on."""
+    return (not slab_on_top(doc) and not ground_slab_on(doc)
+            and bool((doc.get("settings") or {}).get("platform", True)))
+
+
 def slab_on_top(doc) -> bool:
     """Each floor's slab cast OVER it, on its walls (the default) — not
     under it at its floor level."""
@@ -2709,8 +2790,7 @@ def apply_slab_pos(doc) -> None:
     on_top = slab_on_top(doc)
     ground = {lv["id"] for lv in doc["arch"]["levels"]
               if lv.get("kind") == "ground"}
-    grade = not on_top and not (doc.get("settings") or {}).get(
-        "ground_slab", False)
+    grade = not on_top and not ground_slab_on(doc)
     for s in doc["arch"]["structure"]:
         if s["type"] != "slab" or s.get("zone") or s.get("user") \
                 or s.get("roof"):
@@ -5210,7 +5290,7 @@ def _finish_groups(doc):
                 for s_, q in whole:        # «Over the whole slab»
                     pieces += [g for g in getattr(q, "geoms", [q])
                                if g.geom_type == "Polygon" and g.area >= 0.3]
-                drop_ = float(st.get("ext_finish_drop", 0.0) or 0.0) \
+                drop_ = float(st.get("ext_finish_drop", 0.3048) or 0.0) \
                     if lv.get("kind") == "ground" else 0.0
                 for k_, p_ in enumerate(pieces, 1):
                     c0 = p_.representative_point()
@@ -5481,6 +5561,37 @@ def _bike_groups(doc, lid, pk, z, lname):
     return out, labels, lines
 
 
+def floor_top_at(doc, lid, pt) -> float:
+    """The walking surface at ``pt`` on ``lid``: the floor level, its part
+    sunk / raised, the finish laid on it (a room's; out past the rooms the
+    slab-edge finish — on the ground floor lower by the outside drop; a
+    parking floor bare)."""
+    from shapely.geometry import Point
+    arch = doc["arch"]
+    st = doc["settings"]
+    lv = level_by_id(arch, lid) or {}
+    i = arch["levels"].index(lv) if lv in arch["levels"] else 0
+    z = elevations(arch)[i] + floor_offset_at(doc, lid, pt)
+    fin = float(st.get("finish_t", 0.0508) or 0.0) \
+        if st.get("finish_on", True) else 0.0
+    try:
+        inside = any(r["poly"].contains(Point(pt))
+                     for r in spaces.of_level(arch, lid))
+    except Exception:  # noqa: BLE001
+        inside = False
+    if inside:
+        return z + fin
+    if not st.get("finish_to_edge", True):
+        return z
+    if lv.get("kind") == "ground":
+        if slab_on_top(doc) or ground_slab_on(doc):
+            return z + fin
+        return z - float(st.get("ext_finish_drop", 0.3048) or 0.0) + fin
+    if lid in (doc.get("parking") or {}):
+        return z
+    return z + fin
+
+
 def _parking_groups(doc):
     """Parking (paint + cars), each ramp (a sloped RC slab) and their plan
     symbols, with the level marks — (groups, labels)."""
@@ -5502,6 +5613,16 @@ def _parking_groups(doc):
         if lid not in z_of:
             continue
         z = z_of[lid] + open_offset(doc, lid)
+        try:                       # the marks on the finished floor
+            mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                    for a, b in pk.get("bays") or []]
+            if mids:
+                z = floor_top_at(doc, lid, (
+                    sum(m[0] for m in mids) / len(mids),
+                    sum(m[1] for m in mids) / len(mids)))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project parking floor top")
         faces = []
         # the bay lines painted as one clean, joined shape
         faces += PK.paint_union(pk.get("bays") or [], z + 0.004)
@@ -5620,13 +5741,316 @@ def _parking_groups(doc):
     return out, labels
 
 
+def _gate_lib(doc, w, h):
+    """The IngeTrazo library's gate model for an opening ``w`` × ``h``
+    (the one nearest in proportion, the tallest first), or None."""
+    if not doc["settings"].get("gate_lib", True):
+        return None
+    try:
+        from . import library as LB
+        ents = LB.list_entries()
+    except Exception:  # noqa: BLE001
+        return None
+    best = None
+    for e in ents or []:
+        nm = str(e.get("name", "")).lower()
+        if "gate" not in nm or "fence" in nm:
+            continue
+        cm = ((e.get("entry") or {}).get("cm")) or e.get("cm") or []
+        try:
+            ew, _ed, eh = (float(v) / 100.0 for v in cm[:3])
+        except Exception:  # noqa: BLE001
+            ew = eh = 0.0
+        score = (abs((ew / eh if eh else 1.0) - (w / h if h else 1.0))
+                 if ew and eh else 9.0) + (0.0 if eh >= 1.5 else 1.0)
+        if best is None or score < best[0]:
+            best = (score, e)
+    if best is None:
+        return None
+    e = best[1]
+    return {"key": e["key"], "entry": e.get("entry"), "fit": "stretch",
+            "name": e.get("name")}
+
+
+PLATFORM_COLOR = (0.66, 0.64, 0.60)
+
+
+def _prism(poly, z0, z1):
+    """Faces (dicts) of a shapely polygon stood from ``z0`` to ``z1``."""
+    out = []
+    for pg in getattr(poly, "geoms", [poly]):
+        if pg.geom_type != "Polygon" or pg.area < 0.02 or z1 - z0 < 0.005:
+            continue
+        piece = {"outer": S._ccw([tuple(q) for q in
+                                  list(pg.exterior.coords)[:-1]]),
+                 "holes": [list(reversed(S._ccw(
+                     [tuple(q) for q in list(h.coords)[:-1]])))
+                     for h in pg.interiors]}
+        out += [f if isinstance(f, dict) else {"loop": f, "holes": []}
+                for f in (W.solid(piece, z0, z1) or [])]
+    return out
+
+
+def _wedge(a, b, d, z_top, z_bot):
+    """A ramp: its top edge ``a``-``b`` at ``z_top``, running ``d`` (a
+    vector, the run) down to ``z_bot`` — the faces, outward."""
+    a2 = (a[0] + d[0], a[1] + d[1])
+    b2 = (b[0] + d[0], b[1] + d[1])
+    A, B = (a[0], a[1], z_top), (b[0], b[1], z_top)
+    A0, B0 = (a[0], a[1], z_bot), (b[0], b[1], z_bot)
+    A2, B2 = (a2[0], a2[1], z_bot), (b2[0], b2[1], z_bot)
+    faces = [[A, A2, B2, B], [A0, B0, B2, A2], [A, B, B0, A0],
+             [A, A0, A2], [B, B2, B0]]
+    # outward winding: the top's normal up
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    if ux * d[1] - uy * d[0] > 0:
+        faces = [list(reversed(f)) for f in faces]
+    return [{"loop": f, "holes": []} for f in faces]
+
+
+def platform_parts(doc) -> dict:
+    """The foundation platform under the ground floor (slabs as floors, no
+    ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
+    N.G.L. up under the floor finishes — the rooms at the floor level, the
+    verandah / lobby / porch lower by the outside drop — the ``steps``
+    [(name, [(poly, top z)])] at the doors out (main and side entrances)
+    down to N.G.L., and the car porch's ``ramps`` [(name, faces)]."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    from .host import len_txt
+    out = {"pieces": [], "steps": [], "ramps": []}
+    if not platform_on(doc):
+        return out
+    arch = doc["arch"]
+    st = doc["settings"]
+    gi = next((i for i, lv in enumerate(arch["levels"])
+               if lv.get("kind") == "ground"), None)
+    if gi is None:
+        return out
+    lv = arch["levels"][gi]
+    lid = lv["id"]
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and W.why_not(w) is None]
+    if not walls:
+        return out
+    elev = elevations(arch)[gi]
+    zg = plot_top(doc)
+    drop = float(st.get("ext_finish_drop", 0.3048) or 0.0)
+    fin = float(st.get("finish_t", 0.0508) or 0.0) \
+        if st.get("finish_on", True) else 0.0
+    rooms_ = spaces.of_level(arch, lid)
+    R = unary_union([r["poly"] for r in rooms_]) if rooms_ else Polygon()
+    gs = []
+    for s_ in _floor_slabs(doc, lid):
+        try:
+            gs.append(_poly_of(s_))
+        except Exception:  # noqa: BLE001
+            continue
+    G = unary_union(gs) if gs else R
+    WP = unary_union(SE.wall_polys(walls) + [
+        SE._poly(e["corners"]) for e in arch["structure"]
+        if e["type"] in ("column", "core") and e["level"] == lid
+        and e.get("corners")])
+    if G.is_empty:
+        return out
+    inner = G.intersection(R).difference(WP)
+    outer = G.difference(R).difference(WP)
+    for part, dz in ((inner, 0.0), (outer, drop)):
+        for pg in getattr(part, "geoms", [part]):
+            if pg.geom_type != "Polygon" or pg.area < 0.05:
+                continue
+            c = pg.representative_point()
+            top = elev + floor_offset_at(doc, lid, (c.x, c.y)) - dz
+            if top - zg > 0.01:
+                out["pieces"].append((pg, top))
+    if not st.get("entry_steps", True):
+        return out
+    rmax = max(float(st.get("riser_max", 0.1778) or 0.1778), 0.10)
+    tread = max(float(st.get("tread_ext", 0.2794) or 0.2794), 0.22)
+    solid = unary_union([G, WP])
+    byid = {w["id"]: w for w in walls}
+    made = []                                 # (edge point, direction)
+    n_ = 0
+    for o in arch["openings"]:
+        w = byid.get(o.get("wall"))
+        if w is None or o.get("kind") != "door" or \
+                w.get("kind", "line") != "line":
+            continue
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 1e-6:
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        nrm = (-u[1], u[0])
+        pos = float(o["pos"])
+        c = (a[0] + u[0] * pos, a[1] + u[1] * pos)
+        t = float(w["t"])
+        sides = []
+        for sg in (1, -1):
+            q = Point(c[0] + nrm[0] * sg * (t / 2 + 0.25),
+                      c[1] + nrm[1] * sg * (t / 2 + 0.25))
+            sides.append((sg, R.buffer(-0.02).contains(q)))
+        outs = [sg for sg, inside in sides if not inside]
+        if len(outs) != 1:
+            continue                       # room to room, or nowhere
+        sg = outs[0]
+        dx, dy = nrm[0] * sg, nrm[1] * sg
+        edge = None
+        dd = t / 2
+        while dd < 30.0:
+            q = Point(c[0] + dx * dd, c[1] + dy * dd)
+            if not solid.buffer(0.005).contains(q):
+                edge = dd
+                break
+            dd += 0.05
+        if edge is None:
+            continue
+        ep = (c[0] + dx * edge, c[1] + dy * edge)
+        if any(math.dist(ep, e_) < 1.0 and d_[0] * dx + d_[1] * dy > 0.9
+               for e_, d_ in made):
+            continue
+        made.append((ep, (dx, dy)))
+        back = Point(c[0] + dx * (edge - 0.1), c[1] + dy * (edge - 0.1))
+        indoor = R.buffer(0.01).contains(back)
+        surf = elev + floor_offset_at(doc, lid, (back.x, back.y)) - \
+            (0.0 if indoor else drop) + fin
+        H = surf - zg
+        if H < 0.05:
+            continue
+        nr = max(1, math.ceil(H / rmax - 1e-6))
+        r_ = H / nr
+        wd = min(float(o["w"]) + 0.6, 4.0)
+        pieces = []
+        for k in range(1, nr):              # the treads (the floor: the top)
+            z_top = surf - k * r_
+            p0 = (ep[0] + dx * (k - 1) * tread, ep[1] + dy * (k - 1) * tread)
+            ln = LineString([p0, (p0[0] + dx * tread, p0[1] + dy * tread)])
+            pc = ln.buffer(wd / 2, cap_style=2)
+            pieces.append((pc, z_top))
+        if not pieces:                # one riser: the platform's edge is it
+            continue
+        n_ += 1
+        out["steps"].append((f"Entrance steps {n_} ({nr} risers)",
+                             [(pc, zt) for pc, zt in pieces
+                              if zt - zg > 0.01]))
+    # the car porch: a ramp from its open edge (towards the gate / road)
+    try:
+        words = [t_ for t_ in doc.get("texts") or [] if t_.get("level") == lid
+                 and re.search(r"PORCH|GARAGE|PARKING|DRIVE", str(
+                     t_.get("text", "")).upper())]
+        target = None
+        site = doc.get("site") or {}
+        plot = arch.get("plot")
+        if plot:
+            from .engine import plotgeo
+            cn = plotgeo.clean(plot["corners"])
+            if site.get("wall") and site.get("gates"):
+                fr_ = SITE_.gate_frame(cn, site["gates"][0],
+                                       float(site.get("t", 0.23)))
+                if fr_:
+                    target = ((fr_[0][0] + fr_[1][0]) / 2,
+                              (fr_[0][1] + fr_[1][1]) / 2)
+            if target is None:
+                fl = plot.get("sb_front") or []
+                k_ = next((i for i, f_ in enumerate(fl) if f_), None)
+                if k_ is not None:
+                    p_, q_ = cn[k_], cn[(k_ + 1) % len(cn)]
+                    target = ((p_[0] + q_[0]) / 2, (p_[1] + q_[1]) / 2)
+        for pg in getattr(outer, "geoms", [outer]):
+            if pg.geom_type != "Polygon" or pg.area < 8.0:
+                continue
+            if not any(pg.buffer(0.3).contains(Point(t_["x"], t_["y"]))
+                       for t_ in words):
+                continue
+            cs = list(pg.exterior.coords)
+            cands = []
+            for p_, q_ in zip(cs, cs[1:]):
+                Ls = math.dist(p_, q_)
+                if Ls < 2.0:
+                    continue
+                m_ = Point((p_[0] + q_[0]) / 2, (p_[1] + q_[1]) / 2)
+                if m_.distance(WP) < 0.2 or m_.distance(R) < 0.2:
+                    continue
+                d0 = m_.distance(Point(target)) if target else -Ls
+                cands.append((d0, p_, q_))
+            if not cands:
+                continue
+            _d, p_, q_ = min(cands)
+            ux, uy = q_[0] - p_[0], q_[1] - p_[1]
+            Ls = math.hypot(ux, uy)
+            nx, ny = -uy / Ls, ux / Ls
+            mx, my = (p_[0] + q_[0]) / 2, (p_[1] + q_[1]) / 2
+            if pg.contains(Point(mx + nx * 0.1, my + ny * 0.1)):
+                nx, ny = -nx, -ny
+            c_ = pg.representative_point()
+            top = elev + floor_offset_at(doc, lid, (c_.x, c_.y)) - drop + fin
+            H = top - zg
+            if H < 0.03:
+                continue
+            run = max(H * float(st.get("porch_ramp", 6.0) or 6.0), 0.6)
+            out["ramps"].append((f"Car porch ramp ({len_txt(H)} over "
+                                 f"{len_txt(run)})",
+                                 _wedge(p_, q_, (nx * run, ny * run),
+                                        top, zg)))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.platform_parts porch")
+    return out
+
+
+def _platform_groups(doc):
+    """The foundation platform, its entrance steps and the porch ramp (on
+    the ground floor's layer)."""
+    from core.group import Group
+    parts = platform_parts(doc)
+    if not (parts["pieces"] or parts["steps"] or parts["ramps"]):
+        return []
+    arch = doc["arch"]
+    lv = next(lv for lv in arch["levels"] if lv.get("kind") == "ground")
+    lid = lv["id"]
+    zg = plot_top(doc)
+    out = []
+
+    def grp(name, faces, kind, k):
+        g = Group(_mesh_of(faces), name=f"{name} · {lv['name']}")
+        g.component = False
+        g.material = {"color": PLATFORM_COLOR, "opacity": 1.0}
+        g.layer = level_layer(lv["name"])
+        g.ifc = {"class": "IfcSlab" if kind == "platform" else
+                 "IfcStair" if kind == "steps" else "IfcRamp", "name": name}
+        g.ext = {KEY: {"type": "platform", "id": f"{kind}-{k}",
+                       "level": lid}}
+        return g
+    faces = []
+    for pg, top in parts["pieces"]:
+        faces += _prism(pg, zg, top)
+    if faces:
+        out.append(grp("Foundation platform (fill, PCC)", faces,
+                       "platform", 0))
+    for k, (name, pcs) in enumerate(parts["steps"], 1):
+        f_ = []
+        for pc, zt in pcs:
+            f_ += _prism(pc, zg, zt)
+        if f_:
+            out.append(grp(name, f_, "steps", k))
+    for k, (name, f_) in enumerate(parts["ramps"], 1):
+        out.append(grp(name, f_, "ramp", k))
+    return out
+
+
 def _site_groups(doc):
-    """Boundary wall, pillars, gates (their own layer) and the gates'
-    swings (the site plan's notes)."""
+    """Boundary wall, pillars and gates (their own layer) and the gates'
+    swings (the site plan's notes). Each gate with its two pillars is ONE
+    block («Gate n»): moved with the Move tool, it slides along its wall
+    (the wall's opening follows); the gate itself the IngeTrazo library's
+    gate model where there is one."""
     from PySide6.QtGui import QVector3D
 
     from core.group import Group
     from core.mesh import Mesh
+    from . import components as CP
     arch = doc["arch"]
     plot = arch.get("plot")
     if not plot or not doc["site"]["wall"]:
@@ -5637,24 +6061,106 @@ def _site_groups(doc):
     parts, sym = SITE_.build(corners, doc["site"], z0)
     low = arch["levels"][0]["id"]
     out = []
-    for k, (name, kind, faces, color) in enumerate(parts):
+    blocks = {}                               # gate index -> [groups]
+
+    def mesh_of_(faces):
         mesh = Mesh()
         for f in faces:
             if isinstance(f, dict):
                 _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
-                              [[QVector3D(*q) for q in hh] for hh in f["holes"]])
+                          [[QVector3D(*q) for q in hh] for hh in f["holes"]])
             else:
                 _safe_add(mesh, [QVector3D(*q) for q in f])
         _soften(mesh)
-        g = Group(mesh, name=name)
+        return mesh
+    lib_done = set()
+    for k, part in enumerate(parts):
+        name, kind, faces, color = part[:4]
+        gi = part[4] if len(part) > 4 else None
+        if kind == "gate" and gi is not None and gi not in lib_done:
+            gk = doc["site"]["gates"][gi]
+            fr_ = SITE_.gate_frame(corners, gk, float(doc["site"]["t"]))
+            if fr_ is not None:
+                p0, p1, u, nv = fr_
+                gh = max(float(doc["site"]["h"]) - 0.15, 0.6)
+                wd = math.dist(p0, p1)
+                two = gk.get("kind") == "double" or wd > 2.4
+                lib = _gate_lib(doc, wd / 2 if two else wd, gh)
+                if lib is not None:
+                    t_ = float(doc["site"]["t"])
+                    mid = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+                    # each leaf in its own frame — x along the wall, y
+                    # across it; the second leaf mirrored (a pair)
+                    legs = [(p0, mid, False), (mid, p1, True)] if two \
+                        else [(p0, p1, False)]
+                    lg = []
+                    for li_, (a_, b_, mir) in enumerate(legs):
+                        uu = (b_[0] - a_[0], b_[1] - a_[1])
+                        ln = math.hypot(*uu) or 1.0
+                        uu = (uu[0] / ln, uu[1] / ln)
+                        nn = (-uu[1], uu[0])
+                        c0 = (a_[0] + nv[0] * (t_ / 2) - nn[0] * 0.06,
+                              a_[1] + nv[1] * (t_ / 2) - nn[1] * 0.06)
+                        box = [c0, (c0[0] + uu[0] * ln, c0[1] + uu[1] * ln),
+                               (c0[0] + uu[0] * ln + nn[0] * 0.12,
+                                c0[1] + uu[1] * ln + nn[1] * 0.12),
+                               (c0[0] + nn[0] * 0.12, c0[1] + nn[1] * 0.12)]
+                        bf = W.solid({"outer": S._ccw(box), "holes": []},
+                                     z0 + 0.02, z0 + 0.02 + gh)
+                        ang = math.degrees(math.atan2(uu[1], uu[0]))
+                        fr = (box[0][0], box[0][1], z0, ang)
+                        try:
+                            from . import library as LB
+                            lf = CP.local_faces([f if isinstance(f, dict) else
+                                                 {"loop": f, "holes": []}
+                                                 for f in bf], fr)
+                            lg += LB.groups_for(
+                                lib, fr, lf,
+                                f"Gate {gi + 1} · {lib.get('name')}"
+                                + (f" ({li_ + 1})" if two else ""),
+                                BOUNDARY_LAYER,
+                                {KEY: {"type": "gate", "id": f"gate-{gi}",
+                                       "level": low}},
+                                ifc={"class": "IfcDoor",
+                                     "name": f"Gate {gi + 1}"},
+                                mirror=(mir, False)) or []
+                        except Exception:  # noqa: BLE001
+                            from .host import log_error
+                            log_error("project gate library")
+                            lg = []
+                            break
+                    if lg:
+                        blocks.setdefault(gi, []).extend(lg)
+                        lib_done.add(gi)
+                        continue
+        if kind == "gate" and gi in lib_done:
+            continue
+        g = Group(mesh_of_(faces), name=name)
         g.component = False
         g.material = {"color": color, "opacity": 1.0}
         g.layer = BOUNDARY_LAYER
         g.ifc = {"class": "IfcWall" if kind == "boundary" else
-                 "IfcColumn" if kind == "pillar" else "IfcDoor",
-                 "name": name}
+                 "IfcColumn" if kind in ("pillar", "gatepillar") else
+                 "IfcDoor", "name": name}
+        if gi is not None:
+            g.ext = {KEY: {"type": "gate", "id": f"gate-{gi}", "level": low}}
+            blocks.setdefault(gi, []).append(g)
+            continue
         g.ext = {KEY: {"type": "site", "id": f"site-{k}", "level": low}}
         out.append(g)
+    for gi, kids in sorted(blocks.items()):
+        gk = doc["site"]["gates"][gi]
+        fr_ = SITE_.gate_frame(corners, gk, float(doc["site"]["t"]))
+        at = [round((fr_[0][0] + fr_[1][0]) / 2, 4),
+              round((fr_[0][1] + fr_[1][1]) / 2, 4), round(z0, 4)] \
+            if fr_ else [0.0, 0.0, z0]
+        blk = Group(Mesh(), name=f"Gate {gi + 1} (with its pillars)")
+        blk.adopt(kids)
+        blk.component = False
+        blk.layer = BOUNDARY_LAYER
+        blk.ext = {KEY: {"type": "gate", "id": f"gate-{gi}", "level": low,
+                         "at": at}}
+        out.append(blk)
     if sym:
         mesh = Mesh()
         for a, b in sym:
@@ -5668,6 +6174,45 @@ def _site_groups(doc):
         g.layer = ann_layer(SITE)
         g.ext = {KEY: {"type": "symbols", "id": "gates", "level": low}}
         out.append(g)
+    return out
+
+
+def moved_gates(scene, doc, seen: dict) -> list:
+    """Gate blocks moved with the Move tool: [(gate index, new pos)] — the
+    move taken along the gate's wall side."""
+    from PySide6.QtGui import QVector3D
+
+    from .engine import plotgeo
+    plot = doc["arch"].get("plot")
+    if not plot:
+        return []
+    corners = plotgeo.clean(plot["corners"])
+    out = []
+    for g in list(scene.groups):
+        tag = tag_of(g)
+        if not tag or tag.get("type") != "gate" or "at" not in tag:
+            continue
+        xf = getattr(g, "xform", None)
+        if xf is None:
+            continue
+        at = tag["at"]
+        q = xf.map(QVector3D(float(at[0]), float(at[1]), float(at[2])))
+        dx, dy = q.x() - at[0], q.y() - at[1]
+        if math.hypot(dx, dy) < 0.005:
+            continue
+        key = (getattr(g, "uid", id(g)), round(q.x(), 3), round(q.y(), 3))
+        if key in seen:
+            continue
+        seen[key] = True
+        try:
+            gi = int(str(tag["id"]).split("-")[1])
+            gk = doc["site"]["gates"][gi]
+        except Exception:  # noqa: BLE001
+            continue
+        _a, u, _nv, L = SITE_.side_frame(corners, gk["side"])
+        pos = float(gk["pos"]) + dx * u[0] + dy * u[1]
+        pos = min(max(pos, gk["w"] / 2 + 0.05), L - gk["w"] / 2 - 0.05)
+        out.append((gi, round(pos, 4)))
     return out
 
 
@@ -6446,6 +6991,12 @@ def commit(viewport, doc, opts=None) -> None:
     arch["levels"] = M.fix_levels(arch["levels"])
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     arch["_walls_down"] = not slab_on_top(doc)
+    arch["_ground_down"] = (float(doc["settings"].get(
+        "ext_finish_drop", 0.3048) or 0.0) if not slab_on_top(doc)
+        and not ground_slab_on(doc) else 0.0)
+    if platform_on(doc):          # on the platform: the walls down to N.G.L.
+        arch["_ground_down"] = max(arch["_ground_down"], float(
+            doc["settings"].get("plinth", 0.6096) or 0.0))
     apply_ground_ffl(doc)
     apply_slab_pos(doc)
     try:                       # slabs as floors: the roof over the top floor
@@ -6478,6 +7029,11 @@ def commit(viewport, doc, opts=None) -> None:
         new_groups += _plot_groups(doc)
         new_groups += _site_groups(doc)
         new_groups += _dig_groups(doc)
+    except Exception:  # noqa: BLE001 — the plot never blocks the building
+        from .host import log_error
+        log_error("project._plot_groups")
+    try:
+        new_groups += _platform_groups(doc)
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")
@@ -6564,6 +7120,7 @@ def commit(viewport, doc, opts=None) -> None:
             log_error("project.group_by_level")
     arch.pop("_plaster", None)
     arch.pop("_walls_down", None)
+    arch.pop("_ground_down", None)
     data = copy.deepcopy(doc)
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     arch["_walls_down"] = not slab_on_top(doc)

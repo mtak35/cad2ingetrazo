@@ -32,6 +32,18 @@ class Canvas(QWidget):
         self.poly = []                          # plot corners (drawing)
         self.closed = False
         self.lines = [QLineF(s[0], s[1], s[2], s[3]) for s in drawing["segs"]]
+        # the drawing as AutoCAD shows it: each line's colour, line weight
+        # and line type (by entity, layer or block)
+        self.styles = drawing.get("styles") or []
+        sty = drawing.get("seg_style") or []
+        hidden = set(drawing.get("hidden_layers") or ())
+        self.sets = {}
+        if len(sty) == len(self.lines) and self.styles:
+            for ln, k, sg in zip(self.lines, sty, drawing["segs"]):
+                if sg[4] in hidden:
+                    continue
+                self.sets.setdefault(k if 0 <= k < len(self.styles) else -1,
+                                     []).append(ln)
         self.view = None                        # QTransform drawing → px
         self._drag = None                       # box start (drawing)
         self._pan = None
@@ -208,11 +220,29 @@ class Canvas(QWidget):
             return
         p.setRenderHint(QPainter.Antialiasing, False)
         p.setTransform(self.view)
-        pen = QPen(QColor("#c9d1d9"))
-        pen.setCosmetic(True)
-        pen.setWidthF(1.0)
-        p.setPen(pen)
-        if self.lines:
+        if self.sets:
+            k = abs(self.view.m11()) or 1.0          # px per drawing unit
+            for i, lines in self.sets.items():
+                w_mm, pat, col = (list(self.styles[i]) + [None, None, None]
+                                  )[:3] if i >= 0 else (0.25, [], None)
+                c = QColor(*col) if col else QColor("#c9d1d9")
+                if c.lightness() < 70:          # dark on the dark ground
+                    c = c.lighter(260)
+                width = max(1.0, round(float(w_mm or 0.25) / 0.25))
+                pen = QPen(c)
+                pen.setCosmetic(True)
+                pen.setWidthF(width)
+                pen.setCapStyle(Qt.FlatCap)
+                dp = _dash(pat, k, width)
+                if dp:
+                    pen.setDashPattern(dp)
+                p.setPen(pen)
+                p.drawLines(lines)
+        elif self.lines:
+            pen = QPen(QColor("#c9d1d9"))
+            pen.setCosmetic(True)
+            pen.setWidthF(1.0)
+            p.setPen(pen)
             p.drawLines(self.lines)
         p.resetTransform()
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -277,6 +307,16 @@ class Canvas(QWidget):
         p.drawLine(QPointF(c.x(), c.y() - s), QPointF(c.x(), c.y() + s))
         p.setBrush(Qt.NoBrush)
         p.drawEllipse(c, s * 0.6, s * 0.6)
+
+
+def _dash(pat, ppu, width):
+    """A Qt dash pattern from a CAD line type's (drawing units), or None
+    (solid, or too fine to see at this zoom)."""
+    try:
+        from .linework import _pattern
+        return _pattern(pat, ppu, width)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _chain_from(d, p, tol):

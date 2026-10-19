@@ -40,11 +40,16 @@ def _settings():
     return QSettings("ingetrazo", SET)
 
 
+_FOLDS: list = []                  # the panel's sections (the language swap)
+
+
 def _fold(title, key, open_=True):
     """A section that folds (the host's), or a plain group box."""
     try:
         from views.fold_section import FoldSection
-        f = FoldSection(title, f"{SET}/fold/{key}", default_open=open_)
+        f = FoldSection(title, f"{SET}/fold/{key}", default_open=False)
+        f.set_open(False)          # every launch: all the sections closed
+        _FOLDS.append(f)
         return f, f.body
     except Exception:  # noqa: BLE001
         g = QGroupBox(title)
@@ -530,9 +535,69 @@ class Panel(QWidget):
         self._load_prefs()
         self.refresh()
         self.retune_units()
+        self._apply_lang()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._watch_selection)
         self._timer.start(400)
+
+    # ---- the language, the updates ------------------------------------------
+    def _lang(self):
+        box = getattr(self, "lang_box", None)
+        return (box.currentData() if box is not None else None) or "en"
+
+    def _apply_lang(self):
+        try:
+            from . import lang as LG
+            LG.apply(self, self._lang())
+        except Exception:  # noqa: BLE001
+            log_error("panel._apply_lang")
+
+    def _set_lang(self, _i=None):
+        _settings().setValue("lang", self._lang())
+        self._apply_lang()
+
+    def check_update(self):
+        """The newest version on GitHub: told, and put in place when asked
+        (it loads at IngeTrazo's next start)."""
+        from PySide6.QtWidgets import QMessageBox
+        from . import updater as UP
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            remote = UP.latest_version()
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "CAD2IngeTrazo",
+                                f"Could not reach GitHub ({e}).\n"
+                                f"{UP.PAGE}")
+            return
+        QApplication.restoreOverrideCursor()
+        here = getattr(self, "_ver", "") or "0"
+        if not UP.newer(remote, here):
+            QMessageBox.information(
+                self, "CAD2IngeTrazo",
+                f"CAD2IngeTrazo {here} is the newest version.\n{UP.PAGE}")
+            return
+        if QMessageBox.question(
+                self, "CAD2IngeTrazo",
+                f"Version {remote} is out (this one: {here}).\n\nDownload "
+                f"it from {UP.PAGE} and install it now? It loads when "
+                "IngeTrazo starts again; the current version is kept as a "
+                "backup.") != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            bak = UP.install()
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            log_error("panel.check_update")
+            QMessageBox.warning(self, "CAD2IngeTrazo",
+                                f"The update failed: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+        QMessageBox.information(
+            self, "CAD2IngeTrazo",
+            f"CAD2IngeTrazo {remote} is installed — restart IngeTrazo to use "
+            f"it.\n(The previous version is kept in {bak}.)")
 
     # ---- the document ---------------------------------------------------------
     def doc(self):
@@ -619,7 +684,27 @@ class Panel(QWidget):
         t = QLabel("<b style='font-size:14px'>CAD2<span style='color:"
                    f"{BLUE}'>IngeTrazo</span></b> <span style='color:gray'>"
                    f"{ver}</span>")
-        self.lay.addWidget(t)
+        self._ver = ver
+        trow = QHBoxLayout()
+        trow.addWidget(t, 1)
+        from . import lang as LG
+        self.lang_box = QComboBox()
+        self.lang_box.setProperty("c2i_notr", True)
+        for code_, name_ in LG.LANGS:
+            self.lang_box.addItem("🌐 " + name_, code_)
+        self.lang_box.setToolTip("Language of the panel")
+        code0 = str(_settings().value("lang", "en") or "en")
+        k0 = self.lang_box.findData(code0)
+        self.lang_box.setCurrentIndex(max(k0, 0))
+        self.lang_box.currentIndexChanged.connect(self._set_lang)
+        trow.addWidget(self.lang_box)
+        b_up = _btn("⟳", self.check_update,
+                    "Update the extension — the newest CAD2IngeTrazo from "
+                    "github.com/mtak35/cad2ingetrazo")
+        b_up.setProperty("c2i_notr", True)
+        b_up.setMaximumWidth(34)
+        trow.addWidget(b_up)
+        self.lay.addLayout(trow)
         row = QHBoxLayout()
         self.level_box = QComboBox()
         self.level_box.setToolTip("The level the buttons below work on")
@@ -1245,7 +1330,7 @@ class Panel(QWidget):
                       "was imported with — after the CAD file changed"))
         # the import settings fold under the import (as the layers):
         # «Import to …» stays right under «Select floor on drawing…»
-        sbox, sbody = _fold("Import settings (units, base point, insert, "
+        sbox, sbody = _fold("1.1  Import settings (units, base point, insert, "
                             "levels…)", "importset", False)
         sf = _form(sbody)
         self.i_unit = QComboBox()
@@ -1291,7 +1376,7 @@ class Panel(QWidget):
         row.addWidget(self.i_tmin)
         row.addWidget(self.i_tmax)
         sf.addRow("Wall thickness min/max", row)
-        lbox, lbody = _fold("Layers (wildcards, comma separated)",
+        lbox, lbody = _fold("1.2  Layers (wildcards, comma separated)",
                             "layers", False)
         lf = _form(lbody)
         self.i_layers = {}
@@ -2852,6 +2937,37 @@ class Panel(QWidget):
             "the entrance lobby, the car porch. On: a slab under it too.")
         self.s_gslab.toggled.connect(self._ground_slab)
         f.addRow(self.s_gslab)
+        self.s_ext_drop = _spin(0.0, 0.6096, 0.3048, 0.0127, 3)
+        self.s_ext_drop.setToolTip(
+            "Without a ground floor slab: the ground floor's finishes outside "
+            "its rooms — the verandah, the entrance lobby, the car porch — "
+            "set this much lower than the rooms' (default 1'-0\"; 0 = level). "
+            "The ground floor's walls go down to the lower finish.")
+        self.s_ext_drop.editingFinished.connect(
+            lambda: self._ext_drop(self.s_ext_drop))
+        f.addRow("Ground floor outside finishes drop", self.s_ext_drop)
+        self.s_platform = QCheckBox("Foundation platform under the ground "
+                                    "floor (N.G.L. up to the floor)")
+        self.s_platform.setToolTip(
+            "Without a ground floor slab: a filled platform (PCC) from the "
+            "natural ground up under the floor finishes — the height of the "
+            "ground F.F.L. (default 2'-0\" with the 2\" finish) — the walls "
+            "down to the ground. With a basement it becomes a slab like the "
+            "other floors'.")
+        self.s_platform.toggled.connect(
+            lambda on: self._flag_commit("platform", on,
+                                         "Foundation platform"))
+        f.addRow(self.s_platform)
+        self.s_steps = QCheckBox("Steps at the entrance doors (down to "
+                                 "N.G.L.), a ramp at the car porch")
+        self.s_steps.setToolTip(
+            "Each door out of the ground floor gets steps from the platform's "
+            "edge down to the ground (risers ≤ 7\", treads 11\"); the car "
+            "porch a ramp towards the gate / road.")
+        self.s_steps.toggled.connect(
+            lambda on: self._flag_commit("entry_steps", on,
+                                         "Entrance steps"))
+        f.addRow(self.s_steps)
         f.addRow(QLabel("<i>Sunk / raised floor — select rooms' floor "
                         "finishes, or draw a rectangle (Rectangle tool) on "
                         "the floor and select it:</i>"))
@@ -3017,12 +3133,40 @@ class Panel(QWidget):
             self.flash("There's no basement — shoring is for a basement dig")
         self.commit(doc, "Shoring " + ("on" if st["shoring"] else "off"))
 
-    def _ext_drop(self):
+    def fit_kitchens(self, all_levels=False):
+        from . import kitchen as KT
+        try:
+            lid = None if all_levels else self.level()[0]
+            n, c = KT.fit(self.vp, self.doc(), lid)
+        except ValueError as e:
+            self.flash(str(e), 9000)
+            return
+        except Exception as e:  # noqa: BLE001
+            log_error("panel.fit_kitchens")
+            self.flash(f"Kitchens not fitted — {e}", 9000)
+            return
+        self.flash(f"{c} Kitchen Maker cabinets in {n} kitchen(s) — select "
+                   "one to edit it with Kitchen Maker · Ctrl+Z undoes", 9000)
+
+    def _flag_commit(self, key, on, what):
         if getattr(self, "_building", False):
             return
         doc = self.doc()
-        v = round(float(self.r_ext_drop.value()), 4)
-        if abs(float(doc["settings"].get("ext_finish_drop", 0.0) or 0.0)
+        if bool(doc["settings"].get(key, True)) == bool(on):
+            return
+        doc["settings"][key] = bool(on)
+        self.commit(doc, what + (" on" if on else " off"))
+
+    def _ext_drop(self, w=None):
+        if getattr(self, "_building", False):
+            return
+        doc = self.doc()
+        v = round(float((w or self.r_ext_drop).value()), 4)
+        for o in (getattr(self, "r_ext_drop", None),
+                  getattr(self, "s_ext_drop", None)):
+            if o is not None and o is not w:
+                o.blockSignals(True); o.setValue(v); o.blockSignals(False)
+        if abs(float(doc["settings"].get("ext_finish_drop", 0.3048) or 0.0)
                - v) < 1e-4:
             return
         doc["settings"]["ext_finish_drop"] = v
@@ -3808,14 +3952,28 @@ class Panel(QWidget):
         v.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(QLabel("Ground floor outside finishes lower by"))
-        self.r_ext_drop = _spin(0.0, 0.6096, 0.0, 0.0127, 3)
+        self.r_ext_drop = _spin(0.0, 0.6096, 0.3048, 0.0127, 3)
         self.r_ext_drop.setToolTip(
             "The ground floor's finishes outside its rooms — the verandah, "
             "the entrance lobby, the car porch — set this much lower than "
             "the rooms' (a step down at the doors; 0 = level)")
-        self.r_ext_drop.editingFinished.connect(self._ext_drop)
+        self.r_ext_drop.editingFinished.connect(
+            lambda: self._ext_drop(self.r_ext_drop))
         row.addWidget(self.r_ext_drop)
         row.addStretch(1)
+        v.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(_btn(
+            "Kitchen cabinets (Kitchen Maker) — this level",
+            lambda: self.fit_kitchens(False),
+            "Each room named KITCHEN on this level fitted with the «IngeTrazo "
+            "Kitchen Maker» extension's cabinets: base run with worktop "
+            "along the longest free wall (and the wall turning off it), sink "
+            "under the window, hob, tall fridge unit, wall cabinets — fronts "
+            "to the room, backs to the walls, doors kept clear. Edit them "
+            "with Kitchen Maker; made again, they are replaced."))
+        row.addWidget(_btn("All levels", lambda: self.fit_kitchens(True),
+                           "Every kitchen on every level"))
         v.addLayout(row)
         row = QHBoxLayout()
         self.r_curt = QCheckBox("Curtains at windows")
@@ -3870,7 +4028,7 @@ class Panel(QWidget):
         self.lay.addWidget(box)
 
     def _materials_part(self):
-        box, body = _fold("Layers and materials (finishes)", "materials",
+        box, body = _fold("10  Layers and materials (finishes)", "materials",
                           False)
         v = QVBoxLayout(body)
         v.addWidget(QLabel("<i>The CAD plan's layers and what each one makes "
@@ -4006,9 +4164,12 @@ class Panel(QWidget):
         self.r_fin_on.setChecked(bool(st.get("finish_on", True)))
         self.r_fin_on.blockSignals(False)
         self.r_fin_t.setValue(float(st.get("finish_t", 0.0508)))
-        self.r_ext_drop.blockSignals(True)
-        self.r_ext_drop.setValue(float(st.get("ext_finish_drop", 0.0) or 0.0))
-        self.r_ext_drop.blockSignals(False)
+        for o in (self.r_ext_drop, getattr(self, "s_ext_drop", None)):
+            if o is None:
+                continue
+            o.blockSignals(True)
+            o.setValue(float(st.get("ext_finish_drop", 0.3048) or 0.0))
+            o.blockSignals(False)
         self.r_curt.setChecked(bool(st.get("curtains")))
         self.r_plaster.setValue(float(st.get("plaster_t", 0.0127) or 0.0))
         if hasattr(self, "c_autoop"):
@@ -4136,7 +4297,7 @@ class Panel(QWidget):
 
     # ---- 7. the selected element ------------------------------------------------
     def _selected_part(self):
-        box, body = _fold("10  Selected element", "selected")
+        box, body = _fold("11  Selected element", "selected")
         self.sel_box = body
         v = QVBoxLayout(body)
         self.sel_title = QLabel("<i>Click a wall, door, window, column, beam, "
@@ -4919,6 +5080,16 @@ class Panel(QWidget):
                 PJ.store_only(self.vp, doc)
         except Exception:  # noqa: BLE001
             log_error("panel._follow_moves furniture")
+        try:                           # a gate block moved: along its wall
+            gm = PJ.moved_gates(self.vp.scene, doc, seen)
+        except Exception:  # noqa: BLE001
+            log_error("panel._follow_moves gates")
+            gm = []
+        if gm:
+            for gi, pos in gm:
+                doc["site"]["gates"][gi]["pos"] = pos
+            self.commit(doc, "Gate moved with its pillars")
+            return True
         try:
             moves = PJ.moved_openings(self.vp.scene, doc, seen)
         except Exception:  # noqa: BLE001
@@ -6817,7 +6988,7 @@ class Panel(QWidget):
 
     # ---- 8. sheets & export -------------------------------------------------------
     def _sheets_part(self):
-        box, body = _fold("11  Plans, sheets and export", "sheets")
+        box, body = _fold("13  Plans, sheets and export", "sheets")
         f = _form(body)
         self.c_dims = QCheckBox("Dimensions")
         self.c_roomlbl = QCheckBox("Room names + areas")
@@ -7044,6 +7215,17 @@ class Panel(QWidget):
         doc["arch"]["_plaster"] = float(doc["settings"].get("plaster_t",
                                                             0.0127) or 0.0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        if doc["settings"].get("cad_lines", True) and \
+                doc["settings"].get("sheet_cad_lines", True):
+            from . import linework as _LW
+
+            def _lines(lid, _d=doc):
+                try:
+                    return _LW.lines_of(_d, lid)
+                except Exception:  # noqa: BLE001
+                    log_error("panel sheet cad lines")
+                    return []
+            sheets.CAD_LINES[0] = _lines
         try:
             planes, views, sh = sheets.make(doc["arch"], M.elevations,
                                             self._sheet_opts())
@@ -7057,6 +7239,7 @@ class Panel(QWidget):
             self.flash(f"Sheets not made — {e}", 9000)
             return
         finally:
+            sheets.CAD_LINES[0] = None
             QApplication.restoreOverrideCursor()
         self.flash(f"{made} sheets made" + (f" (in place of {replaced})"
                                             if replaced else "")
@@ -7218,6 +7401,13 @@ class Panel(QWidget):
     def refresh(self):
         """Read the document again (an edit, Ctrl+Z, New, Open)."""
         try:
+            self._refresh()
+        finally:
+            if self._lang() != "en":
+                self._apply_lang()
+
+    def _refresh(self):
+        try:
             doc = self.doc()
         except Exception:  # noqa: BLE001
             log_error("panel.refresh")
@@ -7357,6 +7547,12 @@ class Panel(QWidget):
         self.s_slab_pos.setCurrentIndex(max(self.s_slab_pos.findData(
             doc["settings"].get("slab_pos", "bottom")), 0))
         self.s_slab_pos.blockSignals(False)
+        for cb_, k_ in ((getattr(self, "s_platform", None), "platform"),
+                        (getattr(self, "s_steps", None), "entry_steps")):
+            if cb_ is not None:
+                cb_.blockSignals(True)
+                cb_.setChecked(bool(doc["settings"].get(k_, True)))
+                cb_.blockSignals(False)
         self.s_gslab.blockSignals(True)
         self.s_gslab.setChecked(bool(doc["settings"].get("ground_slab",
                                                          False)))

@@ -282,7 +282,8 @@ def _style_ctx(doc, out) -> None:
         try:
             name = L.dxf.name
             lays[name] = (int(L.dxf.get("lineweight", -3)),
-                          str(L.dxf.get("linetype", "CONTINUOUS")).upper())
+                          str(L.dxf.get("linetype", "CONTINUOUS")).upper(),
+                          _rgb_of(L, None))
             if (hasattr(L, "is_off") and L.is_off()) or \
                     (hasattr(L, "is_frozen") and L.is_frozen()):
                 hidden.append(name)
@@ -306,6 +307,24 @@ def _style_ctx(doc, out) -> None:
                    "index": {}}
 
 
+def _rgb_of(e, fallback):
+    """An entity's / a layer's colour as (r, g, b) 0-255 — true colour,
+    else its AutoCAD colour index; ``fallback`` for BYLAYER / BYBLOCK."""
+    try:
+        tc = e.dxf.get("true_color", None)
+        if tc is not None:
+            return ((tc >> 16) & 255, (tc >> 8) & 255, tc & 255)
+        aci = int(e.dxf.get("color", 256))
+        if aci in (0, 256):
+            return fallback
+        aci = abs(aci)                     # a layer turned off: negative
+        from ezdxf.colors import aci2rgb
+        c = aci2rgb(aci)
+        return (int(c[0]), int(c[1]), int(c[2]))
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def _style_of(e, lay, out) -> int:
     """The index (in ``out["styles"]``) of the entity's (weight mm, dash
     pattern in drawing units) — BYLAYER / BYBLOCK resolved."""
@@ -314,8 +333,17 @@ def _style_of(e, lay, out) -> int:
         return -1
     lw = int(e.dxf.get("lineweight", -1))
     lt = str(e.dxf.get("linetype", "BYLAYER")).upper()
-    blk = ctx["block"][-1] if ctx["block"] else (25, "CONTINUOUS")
-    lay_lw, lay_lt = ctx["layers"].get(lay, (-3, "CONTINUOUS"))
+    blk = ctx["block"][-1] if ctx["block"] else (25, "CONTINUOUS",
+                                                  (255, 255, 255))
+    lay_lw, lay_lt, lay_c = (tuple(ctx["layers"].get(
+        lay, (-3, "CONTINUOUS", None))) + (None,))[:3]
+    col = _rgb_of(e, None)
+    if col is None:
+        aci_ = int(e.dxf.get("color", 256) or 256) \
+            if e.dxf.get("true_color", None) is None else 256
+        col = (blk[2] if len(blk) > 2 else None) if aci_ == 0 else lay_c
+    if col is None:
+        col = (255, 255, 255)
     if lw == -1:
         lw = lay_lw
     elif lw == -2:
@@ -331,11 +359,11 @@ def _style_of(e, lay, out) -> int:
                 ) if lt not in ("CONTINUOUS", "") else ()
     if pat and not any(abs(v) > 1e-9 for v in pat):
         pat = ()
-    key = (lw, pat)
+    key = (lw, pat, tuple(col))
     i = ctx["index"].get(key)
     if i is None:
         i = ctx["index"][key] = len(out["styles"])
-        out["styles"].append([lw / 100.0, list(pat)])
+        out["styles"].append([lw / 100.0, list(pat), list(col)])
     return i
 
 
@@ -363,11 +391,12 @@ def _emit(e, inherit, depth, sag, out) -> None:
             ctx = out.get("_ctx")
             if ctx is not None:            # BYBLOCK inside: the insert's
                 i_ = _style_of(e, lay, out)
-                w_, p_ = out["styles"][i_]
+                w_, p_, c_ = (list(out["styles"][i_]) + [None])[:3]
                 lt_ = str(e.dxf.get("linetype", "BYLAYER")).upper()
                 if lt_ == "BYLAYER":
                     lt_ = ctx["layers"].get(lay, (-3, "CONTINUOUS"))[1]
-                ctx["block"].append((int(round(w_ * 100)), lt_))
+                ctx["block"].append((int(round(w_ * 100)), lt_,
+                                     tuple(c_ or (255, 255, 255))))
             try:
                 for v in e.virtual_entities():
                     _safe(_emit, v, lay, depth + 1, sag, out)

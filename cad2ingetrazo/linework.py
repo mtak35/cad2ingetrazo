@@ -67,7 +67,8 @@ def lines_of(doc, lid):
     bx2, by2 = T(segs[:, 2], segs[:, 3])
     pts = np.stack([ax, ay, bx2, by2], axis=1)
     out = []
-    for i, (w, pat) in enumerate(raw["styles"]):
+    for i, st_ in enumerate(raw["styles"]):
+        w, pat = st_[0], st_[1]
         m = sty == i
         if m.any():
             out.append((float(w), [float(v) * k for v in pat], pts[m]))

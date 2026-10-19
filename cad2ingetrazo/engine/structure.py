@@ -64,6 +64,9 @@ def _down(doc, w, li) -> float:
         return 0.0
     if w.get("rail") or abs(float(w.get("base", 0.0) or 0.0)) > 1e-6:
         return 0.0
+    gd = float(doc.get("_ground_down", 0.0) or 0.0)
+    if gd > 0 and li.get("ground"):       # on the ground: down to the
+        return gd                         # outside finish's level
     return max(float(li.get("slab", 0.0) or 0.0), 0.0)
 
 
@@ -253,6 +256,7 @@ def levels_info(doc: dict, elevations) -> dict:
         above = levels[i + 1]["id"] if i + 1 < len(levels) else None
         below_top = slab_t.get(above, 0.0) if above else 0.0
         out[lv["id"]] = {"z0": elev[i], "height": float(lv["height"]),
+                         "ground": lv.get("kind") == "ground",
                          "slab": slab_t.get(lv["id"], 0.0),
                          "under": top - max(below_top,
                                             roof_t.get(lv["id"], 0.0))}

@@ -607,7 +607,7 @@ def make(doc: dict, elevations, opts: dict):
         fy = zy0 + (zh - TITLE_H - fh) / 2
         frame = {"view": vname, "scale": n_plan, "rect": (fx, fy, fw, fh),
                  "title": f"Plan — {lv['name']}", "kind": "plan",
-                 "number": str(k)}
+                 "number": str(k), "level": lv["id"], "z": li["z0"]}
         sheet = {"name": f"{prefix}1{k:02d} Plan {lv['name']}",
                  "number": f"{prefix}1{k:02d}", "paper": paper,
                  "title": f"Plan — {lv['name']}", "scale": n_plan,
@@ -904,6 +904,66 @@ def _projector(view: dict, frame):
     return to_page
 
 
+#: () set while sheets are made: level id → the CAD's linework there
+#: [(weight mm, dash pattern m, N×4 array)] (linework.lines_of)
+CAD_LINES: list = [None]
+CAD_DPI = 300
+
+
+def _cad_overlay(fr, f, to_page):
+    """The level's CAD linework over a plan frame, as the CAD plots it —
+    each line's weight on paper, its line type — a transparent picture
+    (300 dpi) laid on the frame. Its path, or None."""
+    fn = CAD_LINES[0]
+    if fn is None or f.get("kind") != "plan" or not f.get("level"):
+        return None
+    sets = fn(f["level"])
+    if not sets:
+        return None
+    import numpy as np
+    from pathlib import Path
+
+    from PySide6.QtCore import QLineF, Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+
+    from .linework import INK, _pattern
+    z = float(f.get("z", 0.0)) + 0.03
+    o = to_page((0.0, 0.0, z))            # the plan is a parallel view:
+    ex = to_page((1.0, 0.0, z))           # world → page is affine
+    ey = to_page((0.0, 1.0, z))
+    A = np.array([[ex[0] - o[0], ey[0] - o[0]], [ex[1] - o[1], ey[1] - o[1]]])
+    k = CAD_DPI / 25.4                    # px per paper mm
+    W_ = max(1, int(fr.w_mm * k))
+    H_ = max(1, int(fr.h_mm * k))
+    img = QImage(W_, H_, QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    ppm = k * float(np.hypot(A[0, 0], A[1, 0]))     # px per model metre
+    for w_mm, pat, arr in sets:
+        if not len(arr):
+            continue
+        P0 = arr[:, 0:2] @ A.T + np.array(o)
+        P1 = arr[:, 2:4] @ A.T + np.array(o)
+        X0, Y0 = (P0[:, 0] - fr.x_mm) * k, (P0[:, 1] - fr.y_mm) * k
+        X1, Y1 = (P1[:, 0] - fr.x_mm) * k, (P1[:, 1] - fr.y_mm) * k
+        width = max(1.0, float(w_mm) * k)
+        pen = QPen(QColor(*INK), width)
+        pen.setCapStyle(Qt.FlatCap)
+        dp = _pattern(pat, ppm, width)
+        if dp:
+            pen.setDashPattern(dp)
+        p.setPen(pen)
+        p.drawLines([QLineF(float(a), float(b), float(c), float(d))
+                     for a, b, c, d in zip(X0, Y0, X1, Y1)])
+    p.end()
+    folder = Path(__file__).resolve().parent.parent / "cad2ingetrazo_sheets"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"cad_{f['level']}_{uuid.uuid4().hex[:8]}.png"
+    img.save(str(path), "PNG")
+    return str(path)
+
+
 def _build_sheet(s: dict, views: dict):
     """A Composicion from a sheet's data (frames, labels, cotas, levels,
     title block, the room schedule)."""
@@ -931,6 +991,17 @@ def _build_sheet(s: dict, views: dict):
         _set_pens(fr, pens)
         comp.frames.append(fr)
         proj.append((fr, _projector(views[f["view"]], fr)))
+        try:                     # the CAD's own linework on the plan
+            png = _cad_overlay(fr, f, proj[-1][1])
+            if png:
+                from core.composition import ImagenItem
+                comp.images.append(ImagenItem(
+                    x_mm=fr.x_mm, y_mm=fr.y_mm, w_mm=fr.w_mm, h_mm=fr.h_mm,
+                    path=png, fit="stretch", z=1.0, locked=True,
+                    list_name=f"CAD linework · {f.get('title', '')}"))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("sheets._cad_overlay")
     # rooms: name over area, at the room's label point
     for fi, p, name, area in s["rooms"]:
         fr, to_page = proj[fi]

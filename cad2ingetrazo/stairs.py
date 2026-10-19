@@ -259,8 +259,13 @@ def auto(doc, cad=None, flip=False) -> dict:
             rooms = spaces.of_level(arch, lv["id"])
         except Exception:  # noqa: BLE001
             rooms = []
+        dn_only = 0
         for flights in chains:
             if sum(len(f["lines"]) for f in flights) < 3:
+                continue
+            if flights and flights[0].get("_dn_only") and i > 0 and \
+                    stt0.get("stair_dn_skip", True):
+                dn_only += 1          # the stair from below, going DN
                 continue
             m = _mid(flights[0]["lines"][0])
             room = next((r["poly"] for r in rooms
@@ -288,6 +293,9 @@ def auto(doc, cad=None, flip=False) -> dict:
             st["corners"] = outline_of(st)
             recs.append(st)
             traced_n += 1
+        if not recs and dn_only:      # only the stair from below: none
+            carried = []              # climbs on from this floor
+            continue
         if not recs:
             wells = list(cad.get(lv["id"]) or []) or \
                 from_rooms(arch, lv["id"])
@@ -1252,6 +1260,15 @@ def _chain(fl, words):
         d = f["d"]
         f["lines"] = [(a, b) if (b[0] - a[0]) * d[1] - (b[1] - a[1]) * d[0]
                       > 0 else (b, a) for a, b in f["lines"]]
+    # marked DN only (no UP by it): the stair from the floor below, seen
+    # going down on this plan — not a stair climbing from this floor
+    mids = [_mid(ln) for f in fl for ln in f["lines"]]
+
+    def by(pts):
+        return [p for p in pts if mids and
+                min(math.dist(p, m) for m in mids) < 3.0]
+    if order and by(dns) and not by(ups):
+        order[0]["_dn_only"] = True
     return order
 
 
@@ -1573,6 +1590,13 @@ def _prism(profile, o, d, r, t0, t1):
             continue
         faces.append([P(s0, t0, z0), P(s0, t1, z0), P(s1, t1, z1),
                       P(s1, t0, z1)])
+    # outward, however ``d``, ``r`` and the profile turn: the end face at
+    # t0 must look away from the t1 end (else every face turned round)
+    area = sum(profile[i][0] * profile[(i + 1) % n][1] -
+               profile[(i + 1) % n][0] * profile[i][1] for i in range(n))
+    look = (d[1] * r[0] - d[0] * r[1]) * area * (t1 - t0)
+    if look > 0:
+        faces = [list(reversed(f)) for f in faces]
     return faces
 
 
