@@ -763,6 +763,13 @@ class Panel(QWidget):
         self.c_edges.setChecked(bool(getattr(st_, "edges", True)))
         self.c_edges.toggled.connect(lambda on: self._edge_style("edges",
                                                                  on))
+        self.c_hipoly = QCheckBox("High poly (render)")
+        self.c_hipoly.setToolTip(
+            "Off (default): furniture, fixtures and cars as light low-poly "
+            "models — a fast model to work in. On: the library's full "
+            "models, for rendering.")
+        self.c_hipoly.toggled.connect(
+            lambda on: self._flag_commit("hi_poly", on, "High poly models"))
         self.c_prof = QCheckBox("Profiles")
         self.c_prof.setToolTip("The outline of each shape drawn thicker")
         self.c_prof.setChecked(bool(getattr(st_, "profiles", False)))
@@ -777,6 +784,7 @@ class Panel(QWidget):
         self.c_autoop.toggled.connect(self._auto_op_toggle)
         row.addWidget(self.c_edges)
         row.addWidget(self.c_prof)
+        row.addWidget(self.c_hipoly)
         row.addWidget(self.c_autoop)
         row.addWidget(_btn("Snaps…", self._snap_dialog,
                            "Object snap for the handles, as AutoCAD's "
@@ -3152,7 +3160,7 @@ class Panel(QWidget):
         if getattr(self, "_building", False):
             return
         doc = self.doc()
-        if bool(doc["settings"].get(key, True)) == bool(on):
+        if bool(doc["settings"].get(key, key != "hi_poly")) == bool(on):
             return
         doc["settings"][key] = bool(on)
         self.commit(doc, what + (" on" if on else " off"))
@@ -7215,8 +7223,7 @@ class Panel(QWidget):
         doc["arch"]["_plaster"] = float(doc["settings"].get("plaster_t",
                                                             0.0127) or 0.0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        if doc["settings"].get("cad_lines", True) and \
-                doc["settings"].get("sheet_cad_lines", True):
+        if doc["settings"].get("sheet_cad_lines", True):
             from . import linework as _LW
 
             def _lines(lid, _d=doc):
@@ -7548,10 +7555,11 @@ class Panel(QWidget):
             doc["settings"].get("slab_pos", "bottom")), 0))
         self.s_slab_pos.blockSignals(False)
         for cb_, k_ in ((getattr(self, "s_platform", None), "platform"),
-                        (getattr(self, "s_steps", None), "entry_steps")):
+                        (getattr(self, "s_steps", None), "entry_steps"),
+                        (getattr(self, "c_hipoly", None), "hi_poly")):
             if cb_ is not None:
                 cb_.blockSignals(True)
-                cb_.setChecked(bool(doc["settings"].get(k_, True)))
+                cb_.setChecked(bool(doc["settings"].get(k_, k_ != "hi_poly")))
                 cb_.blockSignals(False)
         self.s_gslab.blockSignals(True)
         self.s_gslab.setChecked(bool(doc["settings"].get("ground_slab",

@@ -222,13 +222,21 @@ class Canvas(QWidget):
         p.setTransform(self.view)
         if self.sets:
             k = abs(self.view.m11()) or 1.0          # px per drawing unit
+            unit = float(self.d.get("unit") or 1.0)  # m per drawing unit
+            p.setRenderHint(QPainter.Antialiasing, True)
             for i, lines in self.sets.items():
                 w_mm, pat, col = (list(self.styles[i]) + [None, None, None]
                                   )[:3] if i >= 0 else (0.25, [], None)
                 c = QColor(*col) if col else QColor("#c9d1d9")
                 if c.lightness() < 70:          # dark on the dark ground
                     c = c.lighter(260)
-                width = max(1.0, round(float(w_mm or 0.25) / 0.25))
+                # AutoCAD's lineweight display (≤0.25 mm one pixel, two
+                # to 0.50, then three…), growing as plotted at 1:100 when
+                # zoomed in
+                wm = float(w_mm or 0.0)
+                scr = 1.0 if wm <= 0.25 else 2.0 if wm <= 0.5 else 3.0
+                paper = max(wm, 0.05) * k * 100.0 / (1000.0 * unit)
+                width = max(scr, paper)
                 pen = QPen(c)
                 pen.setCosmetic(True)
                 pen.setWidthF(width)

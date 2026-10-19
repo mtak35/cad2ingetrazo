@@ -14,8 +14,16 @@ _PROTO: dict = {}
 def proto(key: str):
     """(mesh, (cx, cy, z0), length, width) of a library car, its length
     along +Y as the library has it; None when the file is missing."""
-    if key in _PROTO:
-        return _PROTO[key]
+    from . import library as LB
+    ck = (key, bool(LB.LOWPOLY[0]))
+    if ck in _PROTO:
+        return _PROTO[ck]
+    rec = _proto(key)
+    _PROTO[ck] = rec
+    return rec
+
+
+def _proto(key: str):
     try:
         from pathlib import Path
 
@@ -24,27 +32,27 @@ def proto(key: str):
         from formats import igz
         path = Path(app_root()) / "resources" / "components" / f"{key}.igz"
         if not path.exists():
-            _PROTO[key] = None
             return None
         tmp = Scene()
         igz.load_into(tmp, path)
         if not tmp.groups:
-            _PROTO[key] = None
             return None
         mesh = tmp.groups[0].mesh
+        from . import library as LB
+        if LB.LOWPOLY[0] and len(mesh.faces) > 400:   # light while modelling
+            low = LB.decimate([(mesh, None)], cells=20)
+            if low is not None:
+                mesh = low
         vs = list(mesh.vertices)
         xs = [v.position.x() for v in vs]
         ys = [v.position.y() for v in vs]
         zs = [v.position.z() for v in vs]
         L, W = max(ys) - min(ys), max(xs) - min(xs)
-        rec = (mesh, ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2,
-                      min(zs)), max(L, W), min(L, W), L >= W)
-        _PROTO[key] = rec
-        return rec
+        return (mesh, ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2,
+                       min(zs)), max(L, W), min(L, W), L >= W)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("cars.proto")
-        _PROTO[key] = None
         return None
 
 

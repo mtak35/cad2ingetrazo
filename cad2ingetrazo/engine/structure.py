@@ -740,8 +740,7 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
         if zt - zs > 0.01:
             sp = (o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2, zs, zt)
             spans.append(sp)
-            if (o.get("head") or "flat") == "arch" and o["kind"] != "void" \
-                    and zt < top - 0.02:
+            if (o.get("head") or "flat") == "arch" and zt < top - 0.02:
                 r = min(head_size(o), zt - zs - 0.05)
                 if r > 0.02:
                     rises[sp] = r

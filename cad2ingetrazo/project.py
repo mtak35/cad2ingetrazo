@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1311,6 +1311,192 @@ def revise_empty_openings(doc, lids=None) -> dict:
     return out
 
 
+HIDDEN_SKIP = re.compile(r"CEIL|GRID|GIRD|AXIS|FURN|PIPE|DIM|TEXT|SECTION|"
+                         r"HATCH|SPLIT|FIXT|EQUIP|TREE|LANDSC|SYMB|ARROW|"
+                         r"LIGHT|ELEC|PLUMB|SANIT|SEWER|PLOT|SITE|BOUND|"
+                         r"SETBACK|ROAD|STAIR|STEP", re.I)
+HI_SILL, HI_H = 1.8288, 0.6096          # a high window: 6'-0" sill, 2'-0"
+
+
+def apply_hidden_lines(doc, lids=None) -> dict:
+    """What the plan's hidden (dashed) lines say, as drafted:
+
+    - across an opening in an inner wall, with no door drawn: a plain
+      opening (no door); crossing it (an X): an arch, no door;
+    - in a window's opening: a high window (a ventilator over 6'-0");
+    - outside an outer wall by a window: its sun shade (chajja), as deep
+      as drawn (a longer run: the slab's projection — the slab follows it
+      already);
+    - in the stair: the flight going up (left as drawn);
+    - crossing in open floor: the slab cut there (made at import).
+
+    {level id: {"voids": n, "arches": n, "high": n, "shades": n}}."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    from . import detect
+    from . import slabedges as SE
+    from .engine import walldetect
+    arch = doc["arch"]
+    st = doc["settings"]
+    out = {}
+    walls = {w["id"]: w for w in arch["walls"]}
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file") or \
+                lid not in {lv["id"] for lv in arch["levels"]}:
+            continue
+        try:
+            raw = cadread.read(how["file"], how.get("unit"))
+        except Exception:  # noqa: BLE001
+            continue
+        drawing = cadread.crop(raw, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base,
+                           (how.get("ix", 0.0), how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        dsh = pl.get("dashed") or []
+        if len(dsh) != len(pl["segs"]) or not any(dsh):
+            out[lid] = {}
+            continue
+        P, _found = layer_patterns(drawing, how, st)
+        lay = pl["layers"]
+        glz = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+               for s_, d_ in zip(pl["segs"], dsh)
+               if not d_ and _match(lay[s_[4]], P["windows"])
+               and math.hypot(s_[2] - s_[0], s_[3] - s_[1]) > 0.05]
+        hid = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+               for s_, d_ in zip(pl["segs"], dsh)
+               if d_ and not HIDDEN_SKIP.search(lay[s_[4]])
+               and not _match(lay[s_[4]], P["stairs"])
+               and math.hypot(s_[2] - s_[0], s_[3] - s_[1]) > 0.05]
+        if not hid:
+            out[lid] = {}
+            continue
+        blocks = []
+        for ins in pl.get("inserts", ()):
+            k_ = detect.block_kind(ins["name"])
+            if k_ is None and _match(ins["layer"], P["doors"]):
+                k_ = "door"
+            if k_ == "door" and ins.get("corners"):
+                blocks.append(ins["corners"])
+        mine = [w for w in arch["walls"] if w["level"] == lid]
+        fp = SE._footprint(mine)
+        wp = unary_union(SE.wall_polys(mine)) if mine else None
+        n = {"voids": 0, "arches": 0, "high": 0, "shades": 0}
+        for o in arch["openings"]:
+            w = walls.get(o["wall"])
+            if w is None or w["level"] != lid or \
+                    w.get("kind", "line") != "line":
+                continue
+            seg = W.centre(w)
+            u = seg.u
+            nv = (-u[1], u[0])
+            t2 = float(w["t"]) / 2
+            mid = (seg.p0[0] + u[0] * o["pos"], seg.p0[1] + u[1] * o["pos"])
+            hw = float(o["w"]) / 2
+            span = LineString([(mid[0] - u[0] * hw, mid[1] - u[1] * hw),
+                               (mid[0] + u[0] * hw, mid[1] + u[1] * hw)])
+            band = span.buffer(t2 + 0.05, cap_style=2)
+            par = cross = 0.0
+            for ln in hid:
+                if not ln.intersects(band):
+                    continue
+                piece = ln.intersection(band)
+                (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+                L_ = math.hypot(x1 - x0, y1 - y0)
+                c_ = abs((x1 - x0) * u[0] + (y1 - y0) * u[1]) / L_
+                if c_ > 0.95:
+                    par += piece.length
+                elif 0.2 < c_ < 0.9:
+                    cross += piece.length
+            glass = 0.0                   # the window's glazing drawn
+            for ln in glz:
+                if not ln.intersects(band):
+                    continue
+                (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+                L_ = math.hypot(x1 - x0, y1 - y0)
+                if abs((x1 - x0) * u[0] + (y1 - y0) * u[1]) / L_ > 0.95:
+                    glass = max(glass, ln.intersection(band).length)
+            hasglass = glass >= 0.5 * float(o["w"])
+            # the inside / outside of the wall
+            if fp is not None:
+                a_in = fp.contains(Point(mid[0] + nv[0] * (t2 + 0.4),
+                                         mid[1] + nv[1] * (t2 + 0.4)))
+                b_in = fp.contains(Point(mid[0] - nv[0] * (t2 + 0.4),
+                                         mid[1] - nv[1] * (t2 + 0.4)))
+            else:
+                a_in = b_in = True
+            outer = a_in != b_in
+            if o["kind"] == "window" and hasglass and \
+                    par >= 0.5 * float(o["w"]) and \
+                    float(o.get("sill", 0.0) or 0.0) < HI_SILL - 0.05:
+                o.update(sill=HI_SILL, h=HI_H)      # a ventilator, up high
+                n["high"] += 1
+            elif o["kind"] == "window" and not hasglass and \
+                    (par >= 0.5 * float(o["w"]) or
+                     cross >= 0.5 * float(o["w"])):
+                # no glazing, only the hidden line: an opening (no window)
+                o.update(kind="void", style="", sill=0.0,
+                         h=float(st.get("door_h", 2.1336)))
+                for k_ in ("leaves", "frame", "glass", "shade_d"):
+                    o.pop(k_, None)
+                if cross >= 0.5 * float(o["w"]):
+                    o["head"] = "arch"
+                    n["arches"] += 1
+                else:
+                    o.pop("head", None)
+                    n["voids"] += 1
+            elif o["kind"] in ("door", "void") and (par or cross):
+                empty = walldetect._gap_kind(
+                    mid, float(o["w"]), u, float(w["t"]),
+                    pl["segs"]) is None and not any(
+                    min(abs((c[0] - mid[0]) * u[0] + (c[1] - mid[1]) * u[1])
+                        for c in cs) < hw + 0.1 and
+                    min(abs(-(c[0] - mid[0]) * u[1] + (c[1] - mid[1]) * u[0])
+                        for c in cs) < 1.5 for cs in blocks)
+                if empty and (o["kind"] == "void" or
+                              o.get("style") in ("sliding", "", None)):
+                    arched = cross >= 0.5 * float(o["w"])
+                    o.update(kind="void", style="", sill=0.0,
+                             h=float(st.get("door_h", 2.1336)))
+                    for k_ in ("leaves", "frame", "glass"):
+                        o.pop(k_, None)
+                    if arched:
+                        o["head"] = "arch"
+                        n["arches"] += 1
+                    else:
+                        o.pop("head", None)
+                        n["voids"] += 1
+            # a sun shade drawn over an outer window
+            if o["kind"] == "window" and outer:
+                side = 1 if not a_in else -1     # toward the outside
+                best = None
+                for ln in hid:
+                    if wp is not None and ln.intersects(wp):
+                        continue
+                    (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+                    L_ = math.hypot(x1 - x0, y1 - y0)
+                    if L_ > float(o["w"]) + 1.6 or abs(
+                            (x1 - x0) * u[0] + (y1 - y0) * u[1]) / L_ < 0.95:
+                        continue
+                    m_ = ln.interpolate(0.5, normalized=True)
+                    off = ((m_.x - mid[0]) * nv[0] + (m_.y - mid[1]) * nv[1]) \
+                        * side - t2
+                    along = abs((m_.x - mid[0]) * u[0] + (m_.y - mid[1]) * u[1])
+                    if 0.1 <= off <= 1.5 and along <= hw + 0.3 and \
+                            L_ >= 0.6 * float(o["w"]):
+                        if best is None or off < best:
+                            best = off
+                if best is not None:
+                    o["shade_d"] = round(best, 4)
+                    n["shades"] += 1
+        out[lid] = n
+    return out
+
+
 def redetect_columns(doc, lids=None) -> dict:
     """The columns of levels ``lids`` (all imported ones by default) read
     again from their CAD plans — nothing else on the level changes (walls,
@@ -2136,6 +2322,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             log_error("project.basement_walls")
     # openings the wall can't hold (too tall, at an end…) are left out
     rep["skipped"] += validate_openings(arch)
+    if st.get("hidden_rules", True):        # what the hidden lines say
+        try:
+            rep["hidden"] = apply_hidden_lines(doc, [lid]).get(lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.apply_hidden_lines")
     rep["openings"] = sum(1 for o in arch["openings"]
                           if o["wall"] in {w["id"] for w in made})
     try:
@@ -5292,12 +5484,27 @@ def _finish_groups(doc):
                                if g.geom_type == "Polygon" and g.area >= 0.3]
                 drop_ = float(st.get("ext_finish_drop", 0.3048) or 0.0) \
                     if lv.get("kind") == "ground" else 0.0
+                ez_ = entrance_zone(doc, lid) if drop_ else None
+                if ez_ is not None and not ez_.is_empty:
+                    sp_ = []
+                    for p_ in pieces:
+                        if p_.intersects(ez_):
+                            sp_ += [g for q_ in (p_.intersection(ez_),
+                                                 p_.difference(ez_))
+                                    for g in getattr(q_, "geoms", [q_])
+                                    if g.geom_type == "Polygon"
+                                    and g.area >= 0.1]
+                        else:
+                            sp_.append(p_)
+                    pieces = sp_
                 for k_, p_ in enumerate(pieces, 1):
                     c0 = p_.representative_point()
                     f = _finish_t_at(doc, None, thick, (c0.x, c0.y))
                     c_ = p_.representative_point()
+                    d2_ = 0.0 if ez_ is not None and p_.intersection(
+                        ez_).area > 0.5 * p_.area else drop_
                     z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y)) \
-                        - drop_          # outside, a step down (ground)
+                        - d2_            # outside, a step down (ground)
                     piece = {"outer": S._ccw([tuple(q) for q in
                                               list(p_.exterior.coords)[:-1]]),
                              "holes": [list(reversed(S._ccw(
@@ -5586,6 +5793,9 @@ def floor_top_at(doc, lid, pt) -> float:
     if lv.get("kind") == "ground":
         if slab_on_top(doc) or ground_slab_on(doc):
             return z + fin
+        ez = entrance_zone(doc, lid)
+        if ez is not None and ez.buffer(0.02).contains(Point(pt)):
+            return z + fin
         return z - float(st.get("ext_finish_drop", 0.3048) or 0.0) + fin
     if lid in (doc.get("parking") or {}):
         return z
@@ -5808,6 +6018,175 @@ def _wedge(a, b, d, z_top, z_bot):
     return [{"loop": f, "holes": []} for f in faces]
 
 
+_STEPS_MEMO: dict = {}
+
+
+def cad_steps(doc, lid) -> list:
+    """The entrance steps the CAD draws on a floor's stair layers, outside
+    its rooms (short runs — too few to be a stair): [{"strips": [(polygon,
+    rank)], "n": risers, "lines": [LineString], "zone": the landing at
+    their top (shapely)}] — rank 0 = the top step's edge (the landing's
+    edge), counting down to the ground."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    how = doc["imports"].get(lid)
+    if not how or not how.get("file"):
+        return []
+    key = (lid, str(how.get("file")), str(how.get("region")),
+           how.get("bx"), how.get("by"), how.get("ix"), how.get("iy"),
+           how.get("rot"), how.get("mtime"), len(doc["arch"]["walls"]))
+    if key in _STEPS_MEMO:
+        return _STEPS_MEMO[key]
+    out = []
+    try:
+        raw_ = cadread.read(how["file"], how.get("unit"))
+    except Exception:  # noqa: BLE001 — the file moved: no steps from it
+        _STEPS_MEMO[key] = []
+        return []
+    try:
+        st = doc["settings"]
+        drawing = cadread.crop(raw_, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base, (how.get("ix", 0.0),
+                                           how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _f = layer_patterns(drawing, how, st)
+        lay = pl["layers"]
+        pat = list(P.get("stairs") or []) + ["*STEP*"]
+        segs = [((s_[0], s_[1]), (s_[2], s_[3])) for s_ in pl["segs"]
+                if _match(lay[s_[4]], pat) and
+                0.4 <= math.dist((s_[0], s_[1]), (s_[2], s_[3])) <= 12.0]
+        arch = doc["arch"]
+        rooms_ = spaces.of_level(arch, lid)
+        walls = [w for w in arch["walls"] if w["level"] == lid
+                 and not w.get("rail") and W.why_not(w) is None]
+        bld = unary_union([r["poly"] for r in rooms_] +
+                          SE.wall_polys(walls)).buffer(0.05)
+        # the traced stairs' own lines are not steps
+        used = []
+        for ch in stair_trace(doc, lid):
+            for f in ch:
+                for a, b in f["lines"]:
+                    used.append(LineString([a, b]).buffer(0.05))
+        usedu = unary_union(used) if used else Polygon()
+        lines = []
+        for a, b in segs:
+            ln = LineString([a, b])
+            if bld.contains(ln.interpolate(0.5, normalized=True)):
+                continue
+            if not usedu.is_empty and usedu.contains(ln):
+                continue
+            lines.append(ln)
+        # sets: lines within 0.8 m of one another
+        grp = list(range(len(lines)))
+
+        def root(k):
+            while grp[k] != k:
+                grp[k] = grp[grp[k]]
+                k = grp[k]
+            return k
+        for i in range(len(lines)):
+            for j in range(i + 1, len(lines)):
+                if lines[i].distance(lines[j]) < 0.8:
+                    grp[root(j)] = root(i)
+        sets = {}
+        for i, ln in enumerate(lines):
+            sets.setdefault(root(i), []).append(ln)
+        for ls in sets.values():
+            if len(ls) < 2:
+                continue
+            fams = []                       # by direction
+            for ln in ls:
+                (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+                ang = math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0
+                fam = next((f for f in fams if min(abs(f[0] - ang),
+                            180 - abs(f[0] - ang)) < 8.0), None)
+                if fam is None:
+                    fams.append([ang, [ln]])
+                else:
+                    fam[1].append(ln)
+            strips, n_, reach = [], 0, []
+            for ang, fl in fams:
+                if len(fl) < 2:
+                    continue
+                u = (math.cos(math.radians(ang)), math.sin(math.radians(ang)))
+                nv = (-u[1], u[0])
+                offs = []
+                for ln in fl:
+                    m = ln.interpolate(0.5, normalized=True)
+                    offs.append((m.x * nv[0] + m.y * nv[1], ln))
+                offs.sort(key=lambda t: t[0])
+                # the spacing (the tread), each line swept toward the
+                # building by it: that step's tread
+                gaps = [abs(offs[k + 1][0] - offs[k][0])
+                        for k in range(len(offs) - 1)]
+                tread = sorted(gaps)[len(gaps) // 2] if gaps else 0.3
+                tread = min(max(tread, 0.2), 0.6)
+                # ordered from the building outwards (rank 0: the top step)
+                if offs[0][1].distance(bld) > offs[-1][1].distance(bld):
+                    offs.reverse()
+                tow = None                  # sweep direction to building
+                m0 = offs[0][1].interpolate(0.5, normalized=True)
+                for sg in (1, -1):
+                    q = Point(m0.x + nv[0] * sg * tread,
+                              m0.y + nv[1] * sg * tread)
+                    if tow is None or q.distance(bld) < tow[1]:
+                        tow = ((nv[0] * sg, nv[1] * sg), q.distance(bld))
+                dv = tow[0]
+                for rank, (_o, ln) in enumerate(offs):
+                    (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+                    poly = Polygon([(x0, y0), (x1, y1),
+                                    (x1 + dv[0] * tread, y1 + dv[1] * tread),
+                                    (x0 + dv[0] * tread, y0 + dv[1] * tread)])
+                    strips.append((poly, rank))
+                    if rank == 0:            # the landing: on from the top
+                        R_ = 8.0             # step toward the building
+                        reach.append(Polygon([
+                            (x0, y0), (x1, y1),
+                            (x1 + dv[0] * R_, y1 + dv[1] * R_),
+                            (x0 + dv[0] * R_, y0 + dv[1] * R_)]))
+                n_ = max(n_, len(offs))
+            if not strips or n_ < 2:
+                continue
+            top = [p_ for p_, r_ in strips if r_ == 0]   # the landing's edge
+            out.append({"strips": strips, "n": n_, "lines": ls,
+                        "zone": unary_union(top),
+                        "reach": unary_union(reach).difference(bld)})
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.cad_steps")
+        out = []
+    if len(_STEPS_MEMO) > 16:
+        _STEPS_MEMO.clear()
+    _STEPS_MEMO[key] = out
+    return out
+
+
+def entrance_zone(doc, lid):
+    """Where the CAD's entrance steps land: the outside parts of the floor
+    (lobby, porch…) their top step touches — at the rooms' floor level,
+    not the outside drop. A shapely shape, or None."""
+    from shapely.ops import unary_union
+    sets = cad_steps(doc, lid)
+    if not sets:
+        return None
+    reach = unary_union([s_["reach"] for s_ in sets])
+    tops = unary_union([s_["zone"] for s_ in sets]).buffer(0.35)
+    from . import slabedges as SE
+    try:
+        rooms_ = spaces.of_level(doc["arch"], lid)
+        pcs = SE.edge_finish_polys(doc, lid, rooms_)
+    except Exception:  # noqa: BLE001
+        pcs = []
+    # the outside part the top step reaches, as far as the steps run (a
+    # porch beside the lobby keeps its own lower level)
+    hit = [p_.intersection(reach) for p_ in pcs if p_.intersects(tops)]
+    return unary_union(hit + [s_["zone"] for s_ in sets])
+
+
 def platform_parts(doc) -> dict:
     """The foundation platform under the ground floor (slabs as floors, no
     ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
@@ -5857,14 +6236,37 @@ def platform_parts(doc) -> dict:
         return out
     inner = G.intersection(R).difference(WP)
     outer = G.difference(R).difference(WP)
+    zone = entrance_zone(doc, lid)        # the CAD steps' landing: level
     for part, dz in ((inner, 0.0), (outer, drop)):
         for pg in getattr(part, "geoms", [part]):
             if pg.geom_type != "Polygon" or pg.area < 0.05:
                 continue
-            c = pg.representative_point()
-            top = elev + floor_offset_at(doc, lid, (c.x, c.y)) - dz
-            if top - zg > 0.01:
-                out["pieces"].append((pg, top))
+            parts_ = [(pg, dz)]
+            if dz and zone is not None and pg.intersects(zone):
+                parts_ = [(pg.intersection(zone), 0.0),
+                          (pg.difference(zone), dz)]
+            for q_, dz_ in parts_:
+                for qg in getattr(q_, "geoms", [q_]):
+                    if qg.geom_type != "Polygon" or qg.area < 0.05:
+                        continue
+                    c = qg.representative_point()
+                    top = elev + floor_offset_at(doc, lid, (c.x, c.y)) - dz_
+                    if top - zg > 0.01:
+                        out["pieces"].append((qg, top))
+    # the entrance steps as the CAD draws them, from the rooms' floor
+    # (the landing) down to the ground
+    csets = cad_steps(doc, lid)
+    for k_, cs_ in enumerate(csets, 1):
+        c = cs_["zone"].representative_point()
+        surf = elev + floor_offset_at(doc, lid, (c.x, c.y)) + fin
+        H = surf - zg
+        if H < 0.05:
+            continue
+        r_ = H / cs_["n"]
+        out["steps"].append((f"Entrance steps (CAD) {k_} ({cs_['n']} risers)",
+                             [(pc, surf - rank * r_) for pc, rank in
+                              cs_["strips"] if surf - rank * r_ - zg > 0.01]))
+    cad_lines = [ln for cs_ in csets for ln in cs_["lines"]]
     if not st.get("entry_steps", True):
         return out
     rmax = max(float(st.get("riser_max", 0.1778) or 0.1778), 0.10)
@@ -5911,6 +6313,8 @@ def platform_parts(doc) -> dict:
         if any(math.dist(ep, e_) < 1.0 and d_[0] * dx + d_[1] * dy > 0.9
                for e_, d_ in made):
             continue
+        if any(ln.distance(Point(ep)) < 1.5 for ln in cad_lines):
+            continue                     # the CAD draws these steps
         made.append((ep, (dx, dy)))
         back = Point(c[0] + dx * (edge - 0.1), c[1] + dy * (edge - 0.1))
         indoor = R.buffer(0.01).contains(back)
@@ -6988,6 +7392,11 @@ def commit(viewport, doc, opts=None) -> None:
 
     opts = opts or {}
     arch = doc["arch"]
+    try:                    # furniture, fixtures, cars: light unless asked
+        from . import library as _LB
+        _LB.LOWPOLY[0] = not doc["settings"].get("hi_poly", False)
+    except Exception:  # noqa: BLE001
+        pass
     arch["levels"] = M.fix_levels(arch["levels"])
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     arch["_walls_down"] = not slab_on_top(doc)

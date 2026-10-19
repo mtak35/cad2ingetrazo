@@ -429,3 +429,16 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Stairs: faces the right way out** — finish pieces that came out inside-out (dark from outside) are turned outward; and a stair marked only DN on a floor's plan (the stair from the floor below, seen going down) no longer makes a second stair climbing from that floor.
 - **Glazing that is the wall, with a door drawn in it**: where the window layer draws the wall (a corner / bay glazing with no wall lines) and the plan draws a door in it, that glass becomes a curtain wall with the door set into its grid where drawn.
 - **Kitchen cabinets with «IngeTrazo Kitchen Maker»** (section 9, needs that extension): each room named KITCHEN gets Kitchen Maker's parametric cabinets — base run with worktop along the longest free wall and the wall turning off it, the sink under the window, the hob apart, a tall fridge unit at the end of a long run, wall cabinets where there is no window — fronts to the room, backs to the walls, doors and their swings kept clear. They stay Kitchen Maker's cabinets (select one: Edit, Add next, Finishes…); fitted again, they are replaced.
+
+## 3.19.0
+- **The main entrance at the rooms' floor level, its steps as the CAD draws them**: the entrance steps drawn on the plan's stair / step layers outside the rooms (a short run — too few to be a stair) are built where drawn, as many risers as lines, from the floor down to the ground; the lobby / landing at their top is at the internal floor level (the rest of the outside — porch, verandahs — keeps the 1'-0" drop). No steps are added by a door the CAD already draws steps for.
+- **Low-poly furniture, fixtures and cars by default** — a light model to work in (each library model reduced to a few hundred faces, its shape and colours kept); **High poly (render)** beside «Profiles» puts the full models back for rendering.
+- **Furniture facing the rooms**: beds, WCs, basins, sofas, wardrobes, cabinets, fridges, cookers, sinks, desks, TVs, showers and baths stand with their back to the nearest wall, facing into the room — the CAD block's place and size kept; the beds, wardrobes and sofas placed in empty rooms likewise.
+- **«Select floor on drawing» as AutoCAD shows it**: each line in its layer / entity colour, its line type and line weight (AutoCAD's lineweight display — thicker as you zoom in, as plotted). The plot style table the drawing names (e.g. monochrome.ctb) is read from AutoCAD's Plot Styles folder: a pen weight it sets is used. A drawing read before is read again (an old read in memory no longer stands in).
+- **Sheets**: the CAD linework over each plan at its plotted weights (made again with «Make sheets» — sheets made before 3.18 are outdated).
+- **What the hidden (dashed) lines mean**, read on import (and once on the project now):
+  - across an opening with no door or window drawn in it: a plain opening (no door, no window — door height); crossing it (an X): an arch, no door;
+  - in a window's opening, with its glazing: a high window (6'-0" sill, 2'-0" high — a ventilator);
+  - outside an outer wall by a window: its sun shade (chajja), as deep as drawn; longer runs: the slab's projection (the slab follows them, as before);
+  - in a stair: the flight going up (not built twice);
+  - crossing in open floor: the slab cut there (as before).

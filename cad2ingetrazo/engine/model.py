@@ -619,6 +619,12 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["handle"] = o["handle"]
         if o.get("shape") == "round":       # a round hole (drawn circle)
             rec["shape"] = "round"
+        try:                         # its own sun shade (as the plan draws)
+            sd_ = float(o.get("shade_d") or 0.0)
+        except (TypeError, ValueError):
+            sd_ = 0.0
+        if sd_ > 0:
+            rec["shade_d"] = min(max(sd_, 0.1), 2.0)
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

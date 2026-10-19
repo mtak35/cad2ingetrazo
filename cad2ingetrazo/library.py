@@ -189,7 +189,146 @@ def _boxed(parts):
     return {"parts": parts, "box": (*lo, *hi)}
 
 
+#: furniture, fixtures and cars light (a few hundred faces each) while
+#: modelling; the full models for rendering («High poly»)
+LOWPOLY = [True]
+_LOW: dict = {}
+
+
+_TEXCOL: dict = {}
+
+
+def _tex_colour(path):
+    """A texture's mean colour (r, g, b 0–1) — a light model's face paint
+    in place of the picture — or None."""
+    if not path:
+        return None
+    if path in _TEXCOL:
+        return _TEXCOL[path]
+    col = None
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage
+        img = QImage(str(path))
+        if not img.isNull():           # the opaque pixels only (leaves on
+            sm = img.scaled(24, 24, Qt.IgnoreAspectRatio,   # a clear ground)
+                            Qt.SmoothTransformation)
+            r = g = b = wsum = 0.0
+            for y in range(sm.height()):
+                for x in range(sm.width()):
+                    c = sm.pixelColor(x, y)
+                    a = c.alphaF()
+                    if a < 0.4:
+                        continue
+                    r += c.redF() * a
+                    g += c.greenF() * a
+                    b += c.blueF() * a
+                    wsum += a
+            if wsum > 0:
+                col = (r / wsum, g / wsum, b / wsum)
+    except Exception:  # noqa: BLE001
+        col = None
+    _TEXCOL[path] = col
+    return col
+
+
+def decimate(parts, cells: int = 16):
+    """ONE light mesh of the model ``parts`` [(mesh, xform)]: its points
+    gathered on a grid (``cells`` across its largest size), the triangles
+    left whole kept — the shape, the colours, a fraction of the faces."""
+    from PySide6.QtGui import QVector3D
+
+    from core.mesh import Mesh
+    tris = []
+    lo, hi = [1e18] * 3, [-1e18] * 3
+    for m, xf in parts:
+        for f in m.faces:
+            pts = []
+            for v in f.loop:
+                p = v.position
+                if xf is not None:
+                    p = xf.map(p)
+                pts.append((p.x(), p.y(), p.z()))
+            if len(pts) < 3:
+                continue
+            col = f.attrs.get("color")
+            if col is None and f.attrs.get("texture"):
+                col = _tex_colour((f.attrs["texture"] or {}).get("path"))
+            for i in range(1, len(pts) - 1):
+                tris.append((pts[0], pts[i], pts[i + 1], col))
+            for q in pts:
+                for i in range(3):
+                    lo[i] = min(lo[i], q[i])
+                    hi[i] = max(hi[i], q[i])
+    if not tris:
+        return None
+    size = max(hi[i] - lo[i] for i in range(3))
+    cell = max(size / float(cells), 0.015)
+    acc = {}
+
+    def key(q):
+        return (int((q[0] - lo[0]) // cell), int((q[1] - lo[1]) // cell),
+                int((q[2] - lo[2]) // cell))
+    for a, b, c, _col in tris:
+        for q in (a, b, c):
+            k = key(q)
+            s_ = acc.get(k)
+            if s_ is None:
+                acc[k] = [q[0], q[1], q[2], 1]
+            else:
+                s_[0] += q[0]
+                s_[1] += q[1]
+                s_[2] += q[2]
+                s_[3] += 1
+    rep = {k: (v[0] / v[3], v[1] / v[3], v[2] / v[3]) for k, v in acc.items()}
+    seen = set()
+    mesh = Mesh()
+    for a, b, c, col in tris:
+        ka, kb, kc = key(a), key(b), key(c)
+        if ka == kb or kb == kc or ka == kc:
+            continue
+        sk = tuple(sorted((ka, kb, kc)))
+        if sk in seen:
+            continue
+        seen.add(sk)
+        try:
+            f = mesh.add_face([QVector3D(*rep[ka]), QVector3D(*rep[kb]),
+                               QVector3D(*rep[kc])])
+        except Exception:  # noqa: BLE001
+            continue
+        if f is not None and col is not None:
+            f.attrs["color"] = col
+    if not mesh.faces:
+        return None
+    try:                         # no lines across the curved surfaces
+        from formats.fuse import soften_smooth_edges
+        soften_smooth_edges(mesh, cos_threshold=0.55)
+    except Exception:  # noqa: BLE001
+        pass
+    return mesh
+
+
 def proto(key: str, entry: dict | None = None):
+    """The model as used: light (``LOWPOLY``) or full — see ``proto_full``."""
+    full = proto_full(key, entry)
+    if full is None or not LOWPOLY[0]:
+        return full
+    hit = _LOW.get(key)
+    if hit is None:
+        try:
+            nf = sum(len(m.faces) for m, _x in full["parts"])
+            mesh = decimate(full["parts"]) if nf > 400 else None
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("library.decimate")
+            mesh = None
+        hit = {"parts": [(mesh, None)], "box": full["box"]} \
+            if mesh is not None else full
+        _LOW[key] = hit
+    return hit
+
+
+def proto_full(key: str, entry: dict | None = None):
     """{"parts": [(mesh, QMatrix4x4 | None)], "box": (x0, y0, z0, x1, y1,
     z1)} of a library model, or None (missing / unreadable / offline).
     ``online:<id>`` keys are downloaded once (IngeTrazo's own cache) and
@@ -322,3 +461,4 @@ def groups_for(lib, fr, lf, name, layer, ext, ifc=None,
 
 def clear_cache():
     _PROTO.clear()
+    _LOW.clear()

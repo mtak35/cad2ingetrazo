@@ -68,6 +68,8 @@ def _unit(doc, forced):
 
 
 _cache: dict = {}
+#: what a read holds: a read kept from an older version is read again
+READ_V = 3
 
 
 def _sibling_dxf(path: Path):
@@ -226,7 +228,7 @@ def _read(path, unit=None) -> dict:
     if not path.is_file():
         raise CadError(f"File not found: {path}")
     key = (str(path), path.stat().st_mtime, unit)
-    if key in _cache:
+    if key in _cache and _cache[key].get("v") == READ_V:
         return _cache[key]
     tmp = None
     if path.suffix.lower() == ".dwg":
@@ -244,12 +246,14 @@ def _read(path, unit=None) -> dict:
         k, note = _unit(doc, unit)
         out = {"segs": [], "loops": [], "circles": [], "texts": [],
                "inserts": [], "unit": k, "unit_note": note,
-               "seg_style": [], "styles": [], "hidden_layers": []}
+               "seg_style": [], "styles": [], "hidden_layers": [],
+               "_path": str(path), "v": READ_V}
         _style_ctx(doc, out)
         sag = SAGITTA_M / k
         for e in doc.modelspace():
             _safe(_emit, e, None, 0, sag, out)
         out.pop("_ctx", None)
+        out.pop("_path", None)
         ib = doc.header.get("$INSBASE", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
         out["insbase"] = [float(ib[0]), float(ib[1])]
     finally:
@@ -283,7 +287,8 @@ def _style_ctx(doc, out) -> None:
             name = L.dxf.name
             lays[name] = (int(L.dxf.get("lineweight", -3)),
                           str(L.dxf.get("linetype", "CONTINUOUS")).upper(),
-                          _rgb_of(L, None))
+                          _rgb_of(L, None),
+                          abs(int(L.dxf.get("color", 7) or 7)))
             if (hasattr(L, "is_off") and L.is_off()) or \
                     (hasattr(L, "is_frozen") and L.is_frozen()):
                 hidden.append(name)
@@ -303,8 +308,46 @@ def _style_ctx(doc, out) -> None:
     except Exception:  # noqa: BLE001
         lts = 1.0
     out["hidden_layers"] = hidden
+    ctb, ctb_name = _ctb_of(doc, out.get("_path"))
+    out["ctb"] = ctb_name
     out["_ctx"] = {"layers": lays, "pats": pats, "lts": lts, "block": [],
-                   "index": {}}
+                   "index": {}, "ctb": ctb}
+
+
+def _ctb_of(doc, path):
+    """The drawing's plot style table (.ctb) — the one its layouts name —
+    found beside the drawing or in AutoCAD's Plot Styles folders, loaded;
+    (table | None, its name)."""
+    name = ""
+    try:
+        for lay in doc.layouts:
+            n = str(lay.dxf_layout.dxf.get("current_style_sheet", "") or "")
+            if n.lower().endswith(".ctb"):
+                name = n
+                if lay.name == "Model":
+                    break
+    except Exception:  # noqa: BLE001
+        name = ""
+    if not name:
+        return None, ""
+    import glob
+    import os
+    cands = []
+    if path:
+        cands.append(os.path.join(os.path.dirname(str(path)), name))
+    app = os.environ.get("APPDATA", "")
+    if app:
+        for pat in ("*", os.path.join("*", "*"), os.path.join("*", "*", "*")):
+            cands += glob.glob(os.path.join(app, "Autodesk", pat, "Plotters",
+                                            "Plot Styles", name))
+    for c in cands:
+        if os.path.isfile(c):
+            try:
+                from ezdxf.addons import acadctb
+                return acadctb.load(c), name
+            except Exception:  # noqa: BLE001
+                continue
+    return None, name
 
 
 def _rgb_of(e, fallback):
@@ -334,9 +377,9 @@ def _style_of(e, lay, out) -> int:
     lw = int(e.dxf.get("lineweight", -1))
     lt = str(e.dxf.get("linetype", "BYLAYER")).upper()
     blk = ctx["block"][-1] if ctx["block"] else (25, "CONTINUOUS",
-                                                  (255, 255, 255))
-    lay_lw, lay_lt, lay_c = (tuple(ctx["layers"].get(
-        lay, (-3, "CONTINUOUS", None))) + (None,))[:3]
+                                                  (255, 255, 255), 7)
+    lay_lw, lay_lt, lay_c, lay_aci = (tuple(ctx["layers"].get(
+        lay, (-3, "CONTINUOUS", None, 7))) + (None, None))[:4]
     col = _rgb_of(e, None)
     if col is None:
         aci_ = int(e.dxf.get("color", 256) or 256) \
@@ -350,6 +393,18 @@ def _style_of(e, lay, out) -> int:
         lw = blk[0]
     if lw < 0:
         lw = 25                                  # the default, 0.25 mm
+    ctb = ctx.get("ctb")
+    if ctb is not None:          # the plot style table: its pen weights
+        try:
+            if e.dxf.get("true_color", None) is None:
+                aci = int(e.dxf.get("color", 256) or 256)
+                aci = lay_aci if aci == 256 else \
+                    (blk[3] if len(blk) > 3 else 7) if aci == 0 else abs(aci)
+                w_ = ctb.get_lineweight(int(aci or 7))
+                if w_ is not None:
+                    lw = int(round(float(w_) * 100))
+        except Exception:  # noqa: BLE001
+            pass
     if lt == "BYLAYER":
         lt = lay_lt
     elif lt == "BYBLOCK":
@@ -395,8 +450,14 @@ def _emit(e, inherit, depth, sag, out) -> None:
                 lt_ = str(e.dxf.get("linetype", "BYLAYER")).upper()
                 if lt_ == "BYLAYER":
                     lt_ = ctx["layers"].get(lay, (-3, "CONTINUOUS"))[1]
+                ac_ = int(e.dxf.get("color", 256) or 256)
+                if ac_ in (0, 256):
+                    ac_ = (tuple(ctx["layers"].get(lay, ())) + (7, 7, 7, 7)
+                           )[3] if ac_ == 256 else (
+                        ctx["block"][-1][3] if ctx["block"] else 7)
                 ctx["block"].append((int(round(w_ * 100)), lt_,
-                                     tuple(c_ or (255, 255, 255))))
+                                     tuple(c_ or (255, 255, 255)),
+                                     abs(int(ac_ or 7))))
             try:
                 for v in e.virtual_entities():
                     _safe(_emit, v, lay, depth + 1, sag, out)

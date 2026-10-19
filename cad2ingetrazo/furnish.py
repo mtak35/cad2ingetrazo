@@ -251,6 +251,51 @@ def cad_blocks(doc, lid) -> list:
     return list(pl.get("inserts", ()))
 
 
+#: kinds that stand with their back to a wall (the library's models face
+#: −Y: their back is their +Y side)
+WALL_KINDS = {"bed", "wc", "basin", "sofa", "armchair", "wardrobe", "tv",
+              "cabinet", "fridge", "stove", "ksink", "desk", "shower",
+              "bathtub"}
+
+
+def back_to(dx, dy):
+    """The turn (°) that puts a model's back (+Y) toward the world
+    direction (dx, dy)."""
+    return (math.degrees(math.atan2(dy, dx)) - 90.0) % 360.0
+
+
+def face_wall(poly, cx, cy, ex, ey, reach=0.75):
+    """For an item centred (cx, cy), ``ex`` × ``ey`` across in the world, in
+    the room ``poly``: (turn °, fit [along the wall, across it]) with its
+    back to the nearest wall — or None when no wall is near."""
+    from shapely.geometry import LineString, Point, box
+    foot = box(cx - ex / 2, cy - ey / 2, cx + ex / 2, cy + ey / 2)
+    pts = list(poly.exterior.coords)
+    best = None
+    for a, b in zip(pts, pts[1:]):
+        L = math.dist(a, b)
+        if L < 0.3:
+            continue
+        d = LineString([a, b]).distance(foot)
+        if d > reach:
+            continue
+        if best is None or d < best[0]:
+            best = (d, a, b, L)
+    if best is None:
+        return None
+    _d, a, b, L = best
+    u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+    n = (-u[1], u[0])
+    # n toward the wall: from the item to the edge
+    q = LineString([a, b]).interpolate(LineString([a, b]).project(
+        Point(cx, cy)))
+    if (q.x - cx) * n[0] + (q.y - cy) * n[1] < 0:
+        n = (-n[0], -n[1])
+    along = abs(u[0]) * ex + abs(u[1]) * ey
+    across = abs(u[1]) * ex + abs(u[0]) * ey
+    return back_to(*n), [along, across]
+
+
 def furnish(doc, lids=None, entries=None) -> dict:
     """The furniture / fixtures of the CAD blocks on levels ``lids`` (all
     imported) set as library models: the CAD-made ones of those levels
@@ -333,6 +378,10 @@ def furnish(doc, lids=None, entries=None) -> dict:
                     fit = [ly, lx]
                 else:
                     fit = [lx, ly]
+            if kind in WALL_KINDS and room is not None:
+                fw = face_wall(room["poly"], cx, cy, dx, dy)
+                if fw is not None:       # its back to the wall, facing in
+                    turn, fit = fw
             rec = {"id": __import__("uuid").uuid4().hex[:8], "level": lid,
                    "key": e["key"], "name": e["name"], "x": round(cx, 4),
                    "y": round(cy, 4), "rot": round(turn % 360.0, 3),
@@ -498,9 +547,8 @@ def room_sets(doc, lid, rooms, entries, cache) -> dict:
                 spot = _against(poly, bl, bw, doors, taken, along=False)
                 if spot is not None:
                     cen, ang, n, _m = spot
-                    # the bed's length along the inward normal
-                    rot = math.degrees(math.atan2(n[1], n[0])) - 90.0 + \
-                        _model_turn(e, False)
+                    # its head (back) to the wall: facing the room
+                    rot = back_to(-n[0], -n[1])
                     _rec(doc, lid, e, "bed", cen[0], cen[1], rot, r,
                          auto=True)
                     taken.append(cen)
@@ -513,7 +561,7 @@ def room_sets(doc, lid, rooms, entries, cache) -> dict:
                     if spot is not None:
                         cen, ang, n, _m = spot
                         _rec(doc, lid, e, "wardrobe", cen[0], cen[1],
-                             ang + _model_turn(e), r, auto=True)
+                             back_to(-n[0], -n[1]), r, auto=True)
                         taken.append(cen)
                         got["wardrobe"] = got.get("wardrobe", 0) + 1
         if use == "living" and "sofa" not in kinds:
@@ -524,7 +572,7 @@ def room_sets(doc, lid, rooms, entries, cache) -> dict:
                 if spot is not None:
                     cen, ang, n, _m = spot
                     _rec(doc, lid, e, "sofa", cen[0], cen[1],
-                         ang + _model_turn(e), r, auto=True)
+                         back_to(-n[0], -n[1]), r, auto=True)
                     taken.append(cen)
                     got["sofa"] = got.get("sofa", 0) + 1
                     t = pick("coffee", 1.1, 0.6, entries, cache)
@@ -613,7 +661,6 @@ def kitchen_runs(doc, lid, rooms, entries, cache) -> dict:
             depth = 0.6
             k = max(int(round(L / 0.6)), 1)
             w = L / k
-            ang = math.degrees(math.atan2(u[1], u[0]))
             for j in range(k):
                 t = w * (j + 0.5)
                 q = (a[0] + u[0] * t + n[0] * (depth / 2 + 0.01),
@@ -623,9 +670,9 @@ def kitchen_runs(doc, lid, rooms, entries, cache) -> dict:
                 if any(math.dist(q, (g["x"], g["y"])) < 0.45
                        for g in here):
                     continue                 # the sink / hob stands here
-                fit = [w, depth] if _model_turn(cab) == 0.0 else [depth, w]
+                # back to the wall (the model's +Y), its width along it
                 _rec(doc, lid, cab, "cabinet", q[0], q[1],
-                     ang + _model_turn(cab), r, fit=fit)
+                     back_to(-n[0], -n[1]), r, fit=[w, depth])
                 got["cabinet"] = got.get("cabinet", 0) + 1
     return got
 

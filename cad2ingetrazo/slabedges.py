@@ -670,10 +670,10 @@ def sunshade_faces(doc, lid, z0) -> list:
 
     from .engine import structure as S
     from .engine import walls as W
-    cfg = (doc.get("sunshades") or {}).get(lid)
-    if not cfg:
-        return []
+    cfg0 = (doc.get("sunshades") or {}).get(lid)
     arch = doc["arch"]
+    if not cfg0 and not any(o.get("shade_d") for o in arch["openings"]):
+        return []
     mine = [w for w in arch["walls"] if w["level"] == lid]
     fp = _footprint(mine)
     if fp is None:
@@ -684,6 +684,13 @@ def sunshade_faces(doc, lid, z0) -> list:
         w = by.get(o["wall"])
         if w is None or o["kind"] != "window" or \
                 w.get("kind", "line") != "line" or w.get("rail"):
+            continue
+        cfg = cfg0
+        if o.get("shade_d"):             # the shade the plan draws over it
+            cfg = {"d": float(o["shade_d"]),
+                   "t": float((cfg0 or {}).get("t", 0.1016)),
+                   "ext": float((cfg0 or {}).get("ext", 0.1524))}
+        if not cfg:
             continue
         seg = W.centre(w)
         p0, u = seg.p0, seg.u
