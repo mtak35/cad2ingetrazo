@@ -435,3 +435,33 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 ### Error log
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
+
+## 13. What's new since 3.11 (3.12 – 3.20)
+
+The full list, version by version, is in the README. In short:
+
+**Importing and reading the CAD**
+- DWGs that LibreDWG cannot read are converted by AutoCAD's own engine when it is installed (no window opens), else ODA, else a DXF beside the DWG.
+- «Select floor on drawing» shows the drawing as AutoCAD does: each line in its colour, line type and line weight; the plot style table the drawing names (e.g. monochrome.ctb) is read from AutoCAD's Plot Styles folder.
+- **Hidden (dashed) lines are read as drafted**: across an opening with no door / window drawn → a plain opening; crossing it (an X) → an arch; in a window's opening with its glazing → a high window (ventilator, 6'-0" sill); outside an outer wall by a window → its sun shade (chajja); longer runs → the slab's projection; in a stair → the flight going up; crossing in open floor → a slab cut.
+- Stairs follow the plan: UP / DN marks set the direction; a floor whose plan draws no stair (or only the stair from below, marked DN) gets none; a stair starting outside (a verandah, the ground) starts at that lower level.
+- Corner / bay windows, glazing that is the wall (made a curtain wall with its door where drawn), railings, motorbike bays, landscape, level notes.
+
+**Building the model**
+- Slabs as floors (4" by default): the ground floor on a **foundation platform** (2'-0" incl. the 2" finish), its walls down to the ground; outside finishes (verandah, porch) 1'-0" lower; the main entrance at the floor level with its **steps as the CAD draws them**; steps at the other doors and a porch ramp made by themselves. With a basement the platform becomes a slab.
+- Terraces over the floors below with railings on a 1'-0" × 3" upstand; roof slab with finishes, handles and openings (railed round); any face made a slab; sunk / raised parts.
+- Stairs: flights, rotation and landings editable, winders, finishes on treads and risers with six nosing types, railing locked to the flights, faces always outward.
+- Walls attached to the slab bottoms; slab edges, sun shades, thresholds; basements with RCC walls and shoring; false ceilings; partial wall edits; handles to stretch / move walls and railings in plan.
+- **Boundary wall designs** (plain, coping, plinth band + coping, low wall + MS grille, piers along it) and finishes (plaster, brick, stone, concrete); gates from the IngeTrazo library, each gate a block with its pillars that slides along the wall with the Move tool.
+- **Solid parapet designs** (plain, coping, coping + band, coping + short grille) on every terrace, roof, balcony and opening parapet.
+
+**Furniture, kitchens, parking**
+- Furniture and fixtures from the CAD blocks as IngeTrazo library models, facing the rooms (backs to the walls); empty bedrooms / living / dining rooms furnished; **low-poly by default** for speed, «High poly (render)» for rendering.
+- Kitchens fitted with the «IngeTrazo Kitchen Maker» extension's parametric cabinets (sink under the window, hob, tall fridge unit, wall cabinets).
+- Cars (library models) in every bay, on the finished floor (the porch's own level).
+
+**Sheets and export**
+- Sheets with the CAD's own linework over each plan at its plotted line weights; dimensions, room schedule, north arrow, line weights in the sheet window; PDF, DXF, a real SketchUp .skp.
+
+**The panel**
+- Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that updates the extension from GitHub.

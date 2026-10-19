@@ -625,6 +625,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             sd_ = 0.0
         if sd_ > 0:
             rec["shade_d"] = min(max(sd_, 0.1), 2.0)
+        if o.get("hl"):              # the plan's hidden lines read for it
+            rec["hl"] = 1
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

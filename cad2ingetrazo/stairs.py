@@ -296,7 +296,7 @@ def auto(doc, cad=None, flip=False) -> dict:
         if not recs and dn_only:      # only the stair from below: none
             carried = []              # climbs on from this floor
             continue
-        if not recs:
+        if not recs and up is not None:   # (the top floor: only as drawn)
             wells = list(cad.get(lv["id"]) or []) or \
                 from_rooms(arch, lv["id"])
             for corners in wells:
@@ -305,7 +305,10 @@ def auto(doc, cad=None, flip=False) -> dict:
                     float(stt0.get("stair_riser", 0.1778)),
                     float(stt0.get("stair_going", 0.2794))),
                     corners=corners))
-        if not recs and carried:                  # the floor below's stair
+        if not recs and carried and not (doc.get("imports") or {}).get(
+                lv["id"]):                        # the floor below's stair
+            # (only on a floor with no plan of its own: one imported that
+            # draws no stair has none)
             recs = [dict(r) for r in carried]
             for r in recs:
                 if r.get("traced"):
@@ -643,11 +646,21 @@ def groups(doc, z_of, layer_of):
             from .host import log_error
             log_error("stairs.floor_finishes")
             lo = hi = 0.0
-        if lo or hi:
+        drop = 0.0              # a foot outside, lower (verandah, ground)
+        try:
+            ft = foot_of(st)
+            if ft is not None:
+                from . import project as PJ
+                drop = PJ.floor_top_at(doc, st["level"], ft) - \
+                    (z_of[st["level"]] + lo)
+                drop = drop if drop < -0.03 else 0.0
+        except Exception:  # noqa: BLE001
+            drop = 0.0
+        if lo or hi or drop:
             n_ = int(st.get("risers") or 1) or 1
-            H_ = float(st["rise"]) * n_ + hi - lo
+            H_ = float(st["rise"]) * n_ + hi - lo - drop
             st = dict(st, rise=H_ / n_)
-            z0 += lo
+            z0 += lo + drop
             if hi > 0.001:
                 fin_t = hi            # treads / landings: the slab's finish
         parts = build(st, z0, e["stype"], float(stt.get("stair_waist", 0.15)),

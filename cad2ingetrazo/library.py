@@ -220,10 +220,12 @@ def _tex_colour(path):
                     a = c.alphaF()
                     if a < 0.4:
                         continue
-                    r += c.redF() * a
-                    g += c.greenF() * a
-                    b += c.blueF() * a
-                    wsum += a
+                    # coloured pixels count most (leaves on a white ground)
+                    wgt = a * (0.05 + c.hsvSaturationF() ** 2)
+                    r += c.redF() * wgt
+                    g += c.greenF() * wgt
+                    b += c.blueF() * wgt
+                    wsum += wgt
             if wsum > 0:
                 col = (r / wsum, g / wsum, b / wsum)
     except Exception:  # noqa: BLE001

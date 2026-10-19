@@ -90,7 +90,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1318,7 +1318,24 @@ HIDDEN_SKIP = re.compile(r"CEIL|GRID|GIRD|AXIS|FURN|PIPE|DIM|TEXT|SECTION|"
 HI_SILL, HI_H = 1.8288, 0.6096          # a high window: 6'-0" sill, 2'-0"
 
 
-def apply_hidden_lines(doc, lids=None) -> dict:
+def apply_hidden_lines_new(doc) -> dict:
+    """The hidden-line rules for the openings not read yet (new from an
+    import, a re-import…): each opening read once — an edit by hand
+    stays. {level id: counts}."""
+    arch = doc["arch"]
+    walls = {w["id"]: w["level"] for w in arch["walls"]}
+    lids = sorted({walls.get(o["wall"]) for o in arch["openings"]
+                   if not o.get("hl") and walls.get(o["wall"])})
+    if not lids:
+        return {}
+    out = apply_hidden_lines(doc, lids, only_new=True)
+    for o in arch["openings"]:
+        if walls.get(o["wall"]) in lids:
+            o["hl"] = 1
+    return out
+
+
+def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:
     """What the plan's hidden (dashed) lines say, as drafted:
 
     - across an opening in an inner wall, with no door drawn: a plain
@@ -1390,6 +1407,8 @@ def apply_hidden_lines(doc, lids=None) -> dict:
             w = walls.get(o["wall"])
             if w is None or w["level"] != lid or \
                     w.get("kind", "line") != "line":
+                continue
+            if only_new and o.get("hl"):
                 continue
             seg = W.centre(w)
             u = seg.u
@@ -2322,12 +2341,6 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             log_error("project.basement_walls")
     # openings the wall can't hold (too tall, at an end…) are left out
     rep["skipped"] += validate_openings(arch)
-    if st.get("hidden_rules", True):        # what the hidden lines say
-        try:
-            rep["hidden"] = apply_hidden_lines(doc, [lid]).get(lid)
-        except Exception:  # noqa: BLE001
-            from .host import log_error
-            log_error("project.apply_hidden_lines")
     rep["openings"] = sum(1 for o in arch["openings"]
                           if o["wall"] in {w["id"] for w in made})
     try:
@@ -2336,6 +2349,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         mt = 0.0
     doc["imports"][lid] = dict(how, file=str(path), mtime=mt,
                                unit_k=drawing["unit"])
+    if st.get("hidden_rules", True):        # what the hidden lines say
+        try:
+            rep["hidden"] = apply_hidden_lines_new(doc).get(lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.apply_hidden_lines")
     # the floor levels the CAD notes («LEV. +4'-0"»): the levels set so
     if st.get("levels_cad", True):
         try:
@@ -4771,6 +4790,76 @@ def _annotations(doc, opts):
 # =====================================================================================
 # The plot (site) — ArchXQ's demarcation: corners, setbacks, area
 # =====================================================================================
+PARAPET_STYLES = [("plain", "Plain (plastered)"),
+                  ("coping", "With coping (cap on top)"),
+                  ("band", "Coping + a band under it"),
+                  ("grille", "Coping + MS grille over it (1'-0\")")]
+
+
+def _parapet_groups(doc, groups):
+    """The solid parapets' design (``parapet_style``): a coping on their
+    top (a band under it, or a short grille over it) — on every solid
+    parapet: the terraces', the roof's, the balconies', the openings'."""
+    from shapely.geometry import LineString
+
+    from core.group import Group
+
+    from . import slabedges as SE
+    style = doc["settings"].get("parapet_style", "coping")
+    if style == "plain":
+        return []
+    arch = doc["arch"]
+    names = PARAPET_NAMES + AUTO_RAIL + ("Terrace railing",)
+    walls = {w["id"]: w for w in arch["walls"]
+             if str(w.get("name", "")).startswith(names)
+             and not w.get("rail") and w.get("kind", "line") == "line"}
+    if not walls:
+        return []
+    lvn = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    out = []
+    for g in groups:
+        t = tag_of(g) or {}
+        w = walls.get(t.get("id")) if t.get("type") == "wall" else None
+        if w is None or getattr(g, "mesh", None) is None:
+            continue
+        try:
+            xf = g.xform
+            zs = [(xf.map(v.position) if xf is not None else v.position).z()
+                  for v in g.mesh.vertices]
+            top = max(zs)
+            fp = SE.wall_polys([w])
+        except Exception:  # noqa: BLE001
+            continue
+        if not fp:
+            continue
+        foot = fp[0]
+        for p_ in fp[1:]:
+            foot = foot.union(p_)
+        faces = _prism(foot.buffer(0.04, join_style=2), top, top + 0.075)
+        if style == "band":
+            faces += _prism(foot.buffer(0.02, join_style=2), top - 0.20,
+                            top - 0.14)
+        if style == "grille":
+            from .engine import railings as RL
+            c_ = W.centre(w)
+            path = [(c_.p0[0], c_.p0[1], top + 0.075),
+                    (c_.p1[0], c_.p1[1], top + 0.075)]
+            if LineString(path).length > 0.3:
+                faces += RL.faces(path, 0.3048, "ms_grill", t=0.03)
+        if not faces:
+            continue
+        cg = Group(_mesh_of(faces), name=f"Coping · {w.get('name', 'parapet')}")
+        cg.component = False
+        cg.material = {"color": (0.62, 0.61, 0.59), "opacity": 1.0}
+        cg.layer = g.layer
+        cg.ext = {KEY: {"type": "coping", "id": f"cope-{w['id']}",
+                        "level": w["level"]}}
+        cg.ifc = {"class": "IfcCovering", "name": "Coping"}
+        if w["level"] in lvn:
+            out.append(cg)
+    return out
+
+
 def _stair_groups(doc):
     """Each stair and its railing: two groups named by their component
     types («ST-01 · Dog-leg stair…», «RL-03 · Stainless steel…»); the
@@ -5825,7 +5914,9 @@ def _parking_groups(doc):
         z = z_of[lid] + open_offset(doc, lid)
         try:                       # the marks on the finished floor
             mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
-                    for a, b in pk.get("bays") or []]
+                    for a, b in pk.get("bays") or []] or \
+                [(float(sl["c"][0]), float(sl["c"][1]))
+                 for sl in pk.get("stalls") or [] if sl.get("c")]
             if mids:
                 z = floor_top_at(doc, lid, (
                     sum(m[0] for m in mids) / len(mids),
@@ -7408,6 +7499,12 @@ def commit(viewport, doc, opts=None) -> None:
             doc["settings"].get("plinth", 0.6096) or 0.0))
     apply_ground_ffl(doc)
     apply_slab_pos(doc)
+    if doc["settings"].get("hidden_rules", True):   # openings not read yet
+        try:
+            apply_hidden_lines_new(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.apply_hidden_lines_new")
     try:                       # slabs as floors: the roof over the top floor
         ensure_roof(doc)
     except Exception:  # noqa: BLE001
@@ -7505,6 +7602,11 @@ def commit(viewport, doc, opts=None) -> None:
                 f"{'stair' if t_.get('type') == 'stairrail' else ''}|" \
                 f"{t_.get('id')}" not in off_
         new_groups = [g for g in new_groups if _keep(g)]
+    try:                              # the solid parapets' copings
+        new_groups += _parapet_groups(doc, new_groups)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._parapet_groups")
     _apply_materials(new_groups, doc.get("materials") or {})
     try:                             # the rooms' / terraces' materials
         from . import matlib as ML

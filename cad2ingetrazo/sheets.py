@@ -920,6 +920,15 @@ def _cad_overlay(fr, f, to_page):
     sets = fn(f["level"])
     if not sets:
         return None
+    # the walls' weight: the heaviest pen drawing many lines — the model's
+    # cut lines take it, as the CAD plots its walls
+    try:
+        heavy = sorted(((float(w), len(a)) for w, _p, a in sets),
+                       reverse=True)
+        f["_cad_cut"] = next((w for w, n in heavy if n >= 40 and w > 0.05),
+                             None)
+    except Exception:  # noqa: BLE001
+        f["_cad_cut"] = None
     import numpy as np
     from pathlib import Path
 
@@ -947,8 +956,8 @@ def _cad_overlay(fr, f, to_page):
         P1 = arr[:, 2:4] @ A.T + np.array(o)
         X0, Y0 = (P0[:, 0] - fr.x_mm) * k, (P0[:, 1] - fr.y_mm) * k
         X1, Y1 = (P1[:, 0] - fr.x_mm) * k, (P1[:, 1] - fr.y_mm) * k
-        width = max(1.0, float(w_mm) * k)
-        pen = QPen(QColor(*INK), width)
+        width = max(1.0, max(float(w_mm), 0.05) * k)
+        pen = QPen(QColor(0, 0, 0), width)
         pen.setCapStyle(Qt.FlatCap)
         dp = _pattern(pat, ppm, width)
         if dp:
@@ -993,6 +1002,9 @@ def _build_sheet(s: dict, views: dict):
         proj.append((fr, _projector(views[f["view"]], fr)))
         try:                     # the CAD's own linework on the plan
             png = _cad_overlay(fr, f, proj[-1][1])
+            if png and f.get("_cad_cut"):
+                _set_pens(fr, dict(pens, cut=max(float(f["_cad_cut"]),
+                                                 0.13)))
             if png:
                 from core.composition import ImagenItem
                 comp.images.append(ImagenItem(

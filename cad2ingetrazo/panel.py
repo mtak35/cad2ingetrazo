@@ -2060,6 +2060,29 @@ class Panel(QWidget):
         self.bw_pil = QCheckBox("Pillars at corners and gates")
         self.bw_pil.setChecked(True)
         f.addRow(self.bw_pil)
+        from . import site as _SITE
+        self.bw_style = QComboBox()
+        for k_, lab_ in _SITE.WALL_STYLES:
+            self.bw_style.addItem(lab_, k_)
+        self.bw_style.setToolTip(
+            "The boundary wall's design: plain; a coping on top; a darker "
+            "plinth band at the foot and a coping; a low wall with an MS "
+            "grille over it; piers along the sides (every «Pier spacing») "
+            "with a coping — caps on the pillars")
+        f.addRow("Wall design", self.bw_style)
+        self.bw_fin = QComboBox()
+        for k_, (lab_, _c) in _SITE.WALL_FINISHES.items():
+            self.bw_fin.addItem(lab_, k_)
+        f.addRow("Wall finish", self.bw_fin)
+        row = QHBoxLayout()
+        self.bw_gap = _spin(1.5, 12.0, 3.0)
+        self.bw_gap.setToolTip("Piers: their spacing along the sides")
+        self.bw_solid = _spin(0.3, 3.0, 0.9)
+        self.bw_solid.setToolTip("Low wall + grille: the solid wall's height "
+                                 "(the grille up to the wall height)")
+        row.addWidget(self.bw_gap)
+        row.addWidget(self.bw_solid)
+        f.addRow("Pier spacing / low wall height", row)
         self.gt_side = QComboBox()
         f.addRow("Gate on side", self.gt_side)
         row = QHBoxLayout()
@@ -2177,7 +2200,11 @@ class Panel(QWidget):
     def _site_from_ui(self, doc):
         st = doc["site"]
         st.update(wall=self.bw_on.isChecked(), h=self.bw_h.value(),
-                  t=self.bw_t.value(), pillars=self.bw_pil.isChecked())
+                  t=self.bw_t.value(), pillars=self.bw_pil.isChecked(),
+                  style=self.bw_style.currentData() or "coping",
+                  finish=self.bw_fin.currentData() or "plaster",
+                  pier_gap=self.bw_gap.value(),
+                  solid_h=self.bw_solid.value())
         return st
 
     def _boundary(self):
@@ -2217,6 +2244,16 @@ class Panel(QWidget):
         self.bw_h.setValue(st["h"])
         self.bw_t.setValue(st["t"])
         self.bw_pil.setChecked(st["pillars"])
+        for cb_, k_, dv_ in ((self.bw_style, "style", "coping"),
+                             (self.bw_fin, "finish", "plaster")):
+            cb_.blockSignals(True)
+            cb_.setCurrentIndex(max(cb_.findData(st.get(k_, dv_)), 0))
+            cb_.blockSignals(False)
+        for sp_, k_, dv_ in ((self.bw_gap, "pier_gap", 3.0),
+                             (self.bw_solid, "solid_h", 0.9)):
+            sp_.blockSignals(True)
+            sp_.setValue(float(st.get(k_, dv_)))
+            sp_.blockSignals(False)
         plot = doc["arch"].get("plot")
         self.gt_side.clear()
         if plot:
@@ -3156,6 +3193,16 @@ class Panel(QWidget):
         self.flash(f"{c} Kitchen Maker cabinets in {n} kitchen(s) — select "
                    "one to edit it with Kitchen Maker · Ctrl+Z undoes", 9000)
 
+    def _parapet_style(self, _i=None):
+        if getattr(self, "_building", False):
+            return
+        doc = self.doc()
+        v = self.pa_style.currentData() or "coping"
+        if doc["settings"].get("parapet_style", "coping") == v:
+            return
+        doc["settings"]["parapet_style"] = v
+        self.commit(doc, "Parapet design: " + self.pa_style.currentText())
+
     def _flag_commit(self, key, on, what):
         if getattr(self, "_building", False):
             return
@@ -3422,6 +3469,15 @@ class Panel(QWidget):
         f.addRow(_btn("Apply to every parapet and balcony", self._parapet_rail,
                       "Terrace and roof parapets, balcony railings — on all "
                       "levels"))
+        self.pa_style = QComboBox()
+        for k_, lab_ in PJ.PARAPET_STYLES:
+            self.pa_style.addItem(lab_, k_)
+        self.pa_style.setToolTip(
+            "The solid parapets' design (terraces, roof, balconies, openings): "
+            "plain, a coping on top, a coping with a band under it, or a "
+            "coping with a short MS grille over it")
+        self.pa_style.currentIndexChanged.connect(self._parapet_style)
+        f.addRow("Solid parapet design", self.pa_style)
         row = QHBoxLayout()
         self.t_mat = QComboBox()
         _lab = _ML.labels()
@@ -7554,6 +7610,11 @@ class Panel(QWidget):
         self.s_slab_pos.setCurrentIndex(max(self.s_slab_pos.findData(
             doc["settings"].get("slab_pos", "bottom")), 0))
         self.s_slab_pos.blockSignals(False)
+        if getattr(self, "pa_style", None) is not None:
+            self.pa_style.blockSignals(True)
+            self.pa_style.setCurrentIndex(max(self.pa_style.findData(
+                doc["settings"].get("parapet_style", "coping")), 0))
+            self.pa_style.blockSignals(False)
         for cb_, k_ in ((getattr(self, "s_platform", None), "platform"),
                         (getattr(self, "s_steps", None), "entry_steps"),
                         (getattr(self, "c_hipoly", None), "hi_poly")):

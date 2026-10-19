@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 
 SITE_DEFAULT = {"wall": False, "h": 2.10, "t": 0.23, "pillars": True,
+                "style": "coping", "finish": "plaster", "pier_gap": 3.0,
+                "solid_h": 0.9,
                 "pillar": 0.35, "gates": []}
 GRID_DEFAULT = {"on": False, "source": "columns", "xs": [], "ys": [],
                 "lines": [],
@@ -28,9 +30,34 @@ PILLAR_COLOR = (0.72, 0.70, 0.66)
 GATE_COLOR = (0.22, 0.24, 0.27)
 
 
+#: the boundary wall's designs and finishes
+WALL_STYLES = [("plain", "Plain (plastered)"),
+               ("coping", "With coping (cap on top)"),
+               ("plinth", "Plinth band + coping"),
+               ("grille", "Low wall + MS grille over it"),
+               ("piers", "Piers along it + coping")]
+WALL_FINISHES = {"plaster": ("Plaster, cream", (0.86, 0.83, 0.76)),
+                 "white": ("Plaster, white", (0.93, 0.93, 0.91)),
+                 "brick": ("Exposed brick", (0.66, 0.36, 0.27)),
+                 "stone": ("Stone cladding", (0.72, 0.67, 0.58)),
+                 "concrete": ("Fair-faced concrete", (0.70, 0.70, 0.69))}
+CAP_COLOR = (0.62, 0.61, 0.59)
+BAND_COLOR = (0.52, 0.50, 0.47)
+
+
 def load_site(raw) -> dict:
     out = dict(SITE_DEFAULT, gates=[])
     if isinstance(raw, dict):
+        if raw.get("style") in dict(WALL_STYLES):
+            out["style"] = raw["style"]
+        if raw.get("finish") in WALL_FINISHES:
+            out["finish"] = raw["finish"]
+        for k, lo, hi in (("pier_gap", 1.5, 12.0), ("solid_h", 0.3, 3.0)):
+            try:
+                if raw.get(k) is not None:
+                    out[k] = round(min(max(float(raw[k]), lo), hi), 3)
+            except (TypeError, ValueError):
+                pass
         for k in ("wall", "pillars"):
             if k in raw:
                 out[k] = bool(raw[k])
@@ -136,15 +163,53 @@ def build(corners, site, z0):
             quad, frame = gate_box(corners, g, t)
             gates.append((g, frame))
             ring = ring.difference(Polygon(quad))
+    style = site.get("style", "plain")
+    col = WALL_FINISHES.get(site.get("finish", "plaster"),
+                            ("", WALL_COLOR))[1]
+    cap_t = 0.075 if style != "plain" else 0.0
+    solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
+                      if style == "grille" else h - cap_t)
     pieces = list(getattr(ring, "geoms", [ring]))
+
+    def piece_of(pc):
+        return {"outer": _ccw(list(pc.exterior.coords)[:-1]),
+                "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
+                          for r in pc.interiors]}
     for k, pc in enumerate(pieces):
         if pc.is_empty or pc.area < 1e-4:
             continue
-        piece = {"outer": _ccw(list(pc.exterior.coords)[:-1]),
-                 "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
-                           for r in pc.interiors]}
+        zb = z0
+        if style == "plinth":            # a darker band at the foot
+            out.append((f"Boundary wall {k + 1} plinth", "boundary",
+                        W.solid(piece_of(pc.buffer(0.015, join_style=2)
+                                         .intersection(plot)),
+                                z0, z0 + 0.45), BAND_COLOR))
+            zb = z0 + 0.45
         out.append((f"Boundary wall {k + 1}", "boundary",
-                    W.solid(piece, z0, z0 + h), WALL_COLOR))
+                    W.solid(piece_of(pc), zb, solid_top), col))
+        if cap_t:                         # the coping, over both faces
+            cp = pc.buffer(0.04, join_style=2)
+            out.append((f"Boundary wall {k + 1} coping", "boundary",
+                        W.solid(piece_of(cp), solid_top, solid_top + cap_t),
+                        CAP_COLOR))
+    if style == "grille":                 # MS bars over the low wall
+        from .engine import railings as RL
+        mid = plot.buffer(-t / 2, join_style=2)
+        line = mid.exterior if not mid.is_empty else None
+        if line is not None:
+            cut = line
+            for g, (p0, p1, u, nv) in gates:
+                cut = cut.difference(Polygon(gate_box(corners, g, t)[0])
+                                     .buffer(0.05))
+            for k, ln in enumerate(getattr(cut, "geoms", [cut])):
+                cs = list(ln.coords)
+                if len(cs) < 2:
+                    continue
+                path = [(q[0], q[1], solid_top + cap_t) for q in cs]
+                fs = RL.faces(path, max(h - (solid_top + cap_t - z0), 0.3),
+                              "ms_grill", t=0.03)
+                out.append((f"Boundary grille {k + 1}", "boundary", fs,
+                            GATE_COLOR))
     if site.get("pillars"):
         s = float(site["pillar"])
         spots = []
@@ -155,6 +220,23 @@ def build(corners, site, z0):
                 _pt(b))) if not inner.is_empty else None
             mid = ((b[0] + p.x) / 2, (b[1] + p.y) / 2) if p else b
             spots.append((mid, _angle(b, c)))
+        if style == "piers":            # piers along the sides too
+            gap_ = float(site.get("pier_gap", 3.0))
+            for i in range(n):
+                b, c = corners[i], corners[(i + 1) % n]
+                L = math.dist(b, c)
+                k_ = int(L // gap_)
+                for j in range(1, k_ + (1 if L % gap_ > 0.6 else 0)):
+                    d_ = j * L / max(k_ + (1 if L % gap_ > 0.6 else 0), 1)
+                    q = (b[0] + (c[0] - b[0]) * d_ / L,
+                         b[1] + (c[1] - b[1]) * d_ / L)
+                    p = inner.exterior.interpolate(inner.exterior.project(
+                        _pt(q))) if not inner.is_empty else None
+                    m_ = ((q[0] + p.x) / 2, (q[1] + p.y) / 2) if p else q
+                    if any(Polygon(gate_box(corners, g, t)[0]).buffer(0.5)
+                           .contains(_pt(m_)) for g, _f in gates):
+                        continue
+                    spots.append((m_, _angle(b, c)))
         n_c = len(spots)
         gi_of = {}
         for gi_, (g, (p0, p1, u, nv)) in enumerate(gates):   # the jambs
@@ -169,6 +251,11 @@ def build(corners, site, z0):
             sq = _square(c, s, ang)
             fs_ = W.solid({"outer": _ccw(sq), "holes": []}, z0,
                           z0 + h + 0.15)
+            if style != "plain":          # a cap on each pillar
+                fs_ = fs_ + W.solid({"outer": _ccw(_square(c, s + 0.08,
+                                                           ang)),
+                                     "holes": []}, z0 + h + 0.15,
+                                    z0 + h + 0.25)
             if k >= n_c:                         # a gate's pillar: its block
                 out.append((f"Gate pillar {k - n_c + 1}", "gatepillar", fs_,
                             PILLAR_COLOR, gi_of[k]))

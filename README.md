@@ -442,3 +442,12 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
   - outside an outer wall by a window: its sun shade (chajja), as deep as drawn; longer runs: the slab's projection (the slab follows them, as before);
   - in a stair: the flight going up (not built twice);
   - crossing in open floor: the slab cut there (as before).
+
+## 3.20.0
+- **Hidden-line rules always applied**: every opening is read against the plan's hidden lines once — at import, on «Update from CAD», and on the next rebuild for openings not read yet (a project imported before) — so plain openings, arches and high windows no longer come back as sliding windows; an opening changed by hand stays as changed.
+- **Stairs as the plan draws them**: a floor whose plan has its own import but draws no stair gets none (no stair copied up from the floor below, none designed in a room named STAIR on the top floor); a stair whose first step is outside (a verandah, the back passage) starts at that floor's level there — its risers spread over the extra height.
+- **Cars on the porch's own floor**: placed on the finished floor where the bays are (the porch's lowered level), also when the parking has no bay lines.
+- **Sheets**: the model's cut lines on a plan take the CAD's wall line weight (its heaviest pen with many lines), and the CAD linework is drawn in black at its plotted weights (0.00 mm as the thinnest pen, 0.05 mm).
+- **Boundary wall designs** (section 4): plain, with coping, plinth band + coping, low wall + MS grille over it, piers along the sides + coping (pier spacing); finishes: plaster cream / white, exposed brick, stone cladding, fair-faced concrete; caps on the pillars.
+- **Solid parapet designs** (section 7 ▸ «Solid parapet design»): plain, coping, coping + a band under it, coping + a 1'-0" MS grille — on every solid terrace, roof, balcony and opening parapet.
+- Low-poly trees and plants keep their leaves green (the texture's colour taken from its opaque, coloured pixels).
