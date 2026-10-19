@@ -53,7 +53,7 @@ def newer(remote: str, local: str) -> bool:
 
 def install(dest: Path | None = None) -> Path:
     """The main branch's package downloaded and put in ``dest`` (this
-    package's folder); the old files moved to ``<dest>_backup``. The
+    package's folder); the old files copied to ``<dest>_backup_<time>``. The
     backup's path."""
     dest = Path(dest or Path(__file__).resolve().parent)
     data = _get(ZIP, timeout=90.0)
@@ -64,34 +64,23 @@ def install(dest: Path | None = None) -> Path:
     if root is None:
         raise RuntimeError("the download holds no cad2ingetrazo package")
     pre = root[:-len("__init__.py")]
-    tmp = dest.with_name(dest.name + "_new")
-    if tmp.exists():
-        shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    files = {}                            # read whole before writing any
     for n in names:
         if not n.startswith(pre) or n.endswith("/"):
             continue
         rel = n[len(pre):]
-        if ".." in Path(rel).parts:
+        if ".." in Path(rel).parts or Path(rel).is_absolute():
             continue
-        out = tmp / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(zf.read(n))
-    if not (tmp / "__init__.py").exists():
+        files[rel] = zf.read(n)
+    if "__init__.py" not in files:
         raise RuntimeError("the download is incomplete")
-    bak = dest.with_name(dest.name + "_backup")
-    if bak.exists():
-        shutil.rmtree(bak, ignore_errors=True)
+    # the current version kept beside it (a new folder each time: nothing
+    # is ever deleted)
+    import time
+    bak = dest.with_name(f"{dest.name}_backup_{time.strftime('%Y%m%d_%H%M%S')}")
     shutil.copytree(dest, bak, ignore=shutil.ignore_patterns("__pycache__"))
-    for p in tmp.rglob("*"):             # over the old files, in place
-        rel = p.relative_to(tmp)
+    for rel, data_ in files.items():      # over the old files, in place
         q = dest / rel
-        if p.is_dir():
-            q.mkdir(parents=True, exist_ok=True)
-        else:
-            q.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(p, q)
-    shutil.rmtree(tmp, ignore_errors=True)
-    for c in dest.rglob("__pycache__"):
-        shutil.rmtree(c, ignore_errors=True)
+        q.parent.mkdir(parents=True, exist_ok=True)
+        q.write_bytes(data_)
     return bak

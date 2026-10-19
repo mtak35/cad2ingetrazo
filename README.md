@@ -451,3 +451,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Boundary wall designs** (section 4): plain, with coping, plinth band + coping, low wall + MS grille over it, piers along the sides + coping (pier spacing); finishes: plaster cream / white, exposed brick, stone cladding, fair-faced concrete; caps on the pillars.
 - **Solid parapet designs** (section 7 ▸ «Solid parapet design»): plain, coping, coping + a band under it, coping + a 1'-0" MS grille — on every solid terrace, roof, balcony and opening parapet.
 - Low-poly trees and plants keep their leaves green (the texture's colour taken from its opaque, coloured pixels).
+
+## 3.20.1
+- The ⟳ update keeps the current version as a dated copy beside it (`cad2ingetrazo_backup_<date>_<time>`) and writes the new files over the old ones — it never deletes a folder.
