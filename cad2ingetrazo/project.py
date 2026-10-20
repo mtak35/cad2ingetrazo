@@ -197,7 +197,7 @@ def empty() -> dict:
             "off3d": [], "roof_terraces": [],
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
-            "sunshades": {}, "lowparts": {}}
+            "sunshades": {}, "lowparts": {}, "domes": []}
 
 
 def load(raw) -> dict:
@@ -285,6 +285,8 @@ def load(raw) -> dict:
     # the «line» layer's low walls and low platforms (lowparts.py)
     doc["lowparts"] = {k: v for k, v in (raw.get("lowparts") or {}).items()
                        if k in ids and isinstance(v, dict)}
+    from . import domes as DM_                 # the domes (domes.py)
+    doc["domes"] = [d for d in DM_.load(raw.get("domes")) if d["level"] in ids]
     return doc
 
 
@@ -1594,6 +1596,28 @@ def columns_from(pl, pats, lay) -> list:
                     shapes.append(f)
         except Exception:  # noqa: BLE001
             pass
+        # an outline drawn on three sides only (its fourth on another
+        # layer, or left out): closed between its ends
+        try:
+            from shapely.geometry import Polygon as _Pg
+            from shapely.ops import linemerge as _lm
+            mg = _lm(unary_union(lines))
+            for ch in getattr(mg, "geoms", [mg]):
+                if ch.geom_type != "LineString" or ch.is_closed:
+                    continue
+                cs_ = list(ch.coords)
+                if len(cs_) < 4 or math.dist(cs_[0], cs_[-1]) > 1.2:
+                    continue
+                g_ = _Pg(cs_).buffer(0)
+                if g_.geom_type != "Polygon" or not 0.05 <= g_.area <= 4.0:
+                    continue
+                if g_.area < 0.8 * g_.minimum_rotated_rectangle.area:
+                    continue
+                if not any(sh.buffer(0.01).contains(g_.representative_point())
+                           for sh in shapes):
+                    shapes.append(g_)
+        except Exception:  # noqa: BLE001
+            pass
     shapes = [g for g in shapes if 0.0025 <= g.area <= 40.0]
     shapes.sort(key=lambda g: -g.area)
     kept = []
@@ -1831,7 +1855,7 @@ def _parking_slab(walls, segs, blocks, ratio=0.4):
     return out
 
 
-def _outer_loops(pieces, gap=1.25, least=20.0):
+def _outer_loops(pieces, gap=1.25, least=20.0, extra=()):
     """Every building block's outer contour: the wall pieces closed over
     their door / window gaps (up to 2·``gap``), each block of
     ``least`` m² or more."""
@@ -1841,13 +1865,34 @@ def _outer_loops(pieces, gap=1.25, least=20.0):
     for pc in pieces:
         p = Polygon(pc["outer"], pc["holes"])
         polys.append(p if p.is_valid else p.buffer(0))
+    polys += [p for p in extra if p is not None and not p.is_empty]
     if not polys:
         return []
     u = unary_union(polys).buffer(gap, join_style=2).buffer(-gap,
                                                            join_style=2)
     out = []
+    # a block open on one side (an ablution's front, a verandah's steps):
+    # its walls running most of the way round — its convex outline
+    try:
+        raw_u = unary_union(polys)
+        closed = [Polygon(g.exterior) for g in getattr(u, "geoms", [u])
+                  if g.geom_type == "Polygon" and g.interiors]
+        for comp in getattr(raw_u.buffer(0.3), "geoms", [raw_u.buffer(0.3)]):
+            if any(c.contains(comp.representative_point()) for c in closed):
+                continue
+            hull = comp.convex_hull.buffer(-0.3, join_style=2)
+            if hull.is_empty or hull.area < least:
+                continue
+            walls_len = raw_u.intersection(comp).area / 0.2
+            if walls_len >= 0.6 * hull.length and \
+                    raw_u.intersection(comp).area <= 0.35 * hull.area:
+                u = unary_union([u, hull])
+    except Exception:  # noqa: BLE001
+        pass
     for g in sorted(getattr(u, "geoms", [u]), key=lambda p: -p.area):
-        if g.geom_type == "Polygon" and g.area >= least:
+        # the block's whole outline counts (its rooms inside, not only the
+        # walls' own area): a small ablution block closes a floor too
+        if g.geom_type == "Polygon" and Polygon(g.exterior).area >= least:
             try:                  # without the slivers of the joints
                 from . import slabedges as _SE
                 out.append([tuple(q) for q in _SE._ring_pts(g)])
@@ -2135,6 +2180,14 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             from .host import log_error
             log_error("project.bridges")
 
+    # blocks named ARCH (an arched window / opening drawn as a block): the
+    # opening under them takes an arched head
+    try:
+        rep["arched"] = arch_blocks(arch, lid, pl, st)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.arch_blocks")
+
     # columns: closed outlines, loose lines and circles on the column
     # layers — rectangles (long shear walls too), and L / T / C sections
     cols = columns_from(pl, column_layers_for(P["columns"],
@@ -2199,14 +2252,29 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         if cands:
             outlines = [max(cands, key=_poly_area)]
         else:                  # round the walls: every building block
+            from shapely.geometry import Polygon
             mine = [w for w in arch["walls"] if w["level"] == lid]
             plans = W.plan([w for w in mine if W.why_not(w) is None])
-            blocks = _outer_loops([pc for ps in plans.values() for pc in ps])
+            # the columns and piers close the walls' corners too
+            cpolys = []
+            for c_ in crecs + [e_ for e_ in arch["structure"]
+                               if e_.get("type") == "column"
+                               and e_.get("level") == lid]:
+                try:
+                    cpolys.append(Polygon(S.column_outline(c_, 0.0)).buffer(
+                        0.02))
+                except Exception:  # noqa: BLE001
+                    continue
+            blocks = _outer_loops([pc for ps in plans.values() for pc in ps],
+                                  extra=cpolys)
             # a parking floor: the drive and the ramps under the slab too —
             # a close hull round the walls, the bays and the ramps
             pk = [s_ for s_ in pl["segs"] if _match(lay[s_[4]], P["parking"])
                   or _match(lay[s_[4]], P["ramps"])]
-            if pk and mine:
+            # (bays drawn: a parking floor — ramps alone, a footpath's or
+            # a road's, do not make one)
+            if pk and mine and sum(1 for s_ in pk if _match(
+                    lay[s_[4]], P["parking"])) >= 4:
                 try:
                     blocks = _parking_slab(
                         [w for w in mine if not str(w.get("name", ""))
@@ -2250,6 +2318,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["voids"] = len(xo)
             openings_all = openings_all + xo
         rep["shafts"] = 0
+        lv_k = (level_by_id(arch, lid) or {}).get("kind")
+        if lv_k == "ground" and not any(
+                lv_.get("kind") == "basement" for lv_ in arch["levels"]):
+            # the ground floor on the ground: its dashed lines are the slab
+            # ABOVE projecting (a chajja, the porch roof) — the floor stays
+            # as the walls close it
+            edge_lines = [e_ for e_ in edge_lines if False]
         if edge_lines:            # out to the railings, the dashed edges
             try:
                 ext = [SE.extend_outline(o, edge_lines) for o in outlines]
@@ -2287,6 +2362,20 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["shafts"] += len(sh_open)
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
+    # walls that stop short of one another (across a column, an arch, a
+    # pier): closed up — the rooms close as the plan draws them
+    if st.get("close_gaps", True):
+        try:
+            from . import bridges as BR
+            cg = BR.close_gaps(arch, lid, pl,
+                               lambda n: _match(n, P["walls"]) or
+                               _match(n, P["columns"]), st)
+            arch["openings"] += M.new_openings(arch["openings"],
+                                               cg.pop("_new", []))
+            rep["gaps"] = cg
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.close_gaps")
 
     if rep.get("corner_windows"):    # the slab carried over them too
         try:
@@ -2319,19 +2408,31 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     mine = [w for w in arch["walls"] if w["level"] == lid]
     from shapely.geometry import Point
     rrecs = []
-    for room in spaces.found(mine):
+    from . import parking as PK_
+    for room in spaces.of_level(arch, lid):
         inside = [t for t in texts
                   if room["poly"].contains(Point(t["x"], t["y"]))
                   and len(t["text"]) <= 40 and not
                   t["text"].replace(".", "").replace(",", "").strip()
                   .isdigit()]
+        # a name, not a note: no level note, no UP / DN, no landing
+        names_ = [t for t in inside if not PK_.level_note(t["text"])
+                  and not re.match(r"^\s*(UP|DN|DOWN|MID LANDING|LANDING)"
+                                   r"\s*$", t["text"], re.I)
+                  and not re.search(r"LEVEL|LEV\b", t["text"], re.I)]
+        if not names_ and any(re.match(
+                r"^\s*(UP|DN|DOWN)\s*$", t["text"], re.I) for t in inside):
+            rrecs.append({"id": "", "level": lid, "x": room["at"][0],
+                          "y": room["at"][1], "name": "STAIRCASE"})
+            continue
+        inside = names_ or inside
         if inside:
             name = max(inside, key=lambda t: t["h"])["text"].split("\n")[0]
             rrecs.append({"id": "", "level": lid, "x": room["at"][0],
                           "y": room["at"][1], "name": name.strip()[:60]})
     arch["rooms"] = M._rooms(arch["rooms"] + rrecs,
                              {lv["id"] for lv in arch["levels"]})
-    rep["rooms"] = len(spaces.found(mine))
+    rep["rooms"] = len(spaces.of_level(arch, lid))
 
     # stair wells drawn on the stair layers (Stairs builds them, floor to
     # floor)
@@ -3801,6 +3902,44 @@ def add_cw_door(doc, wall_id, style="alu_glass", width=None, pos=None,
         arch["openings"] += M.new_openings(arch["openings"], [rec])
         return arch["openings"][-1], None
     return None, "No free bay wide enough for it on this curtain wall"
+
+
+def arch_blocks(arch, lid, pl, st) -> int:
+    """Openings under a block whose name says ARCH (MEHRAB / KAMAN too):
+    an arched head of the chosen shape. How many."""
+    n = 0
+    walls = {w["id"]: w for w in arch["walls"] if w["level"] == lid}
+    for b in pl.get("inserts") or ():
+        if not re.search(r"ARCH|MEHRAB|MIHRAB|KAMAN|ARCO", str(b.get("name",
+                                                                    "")).upper()):
+            continue
+        cs = b.get("corners") or []
+        if len(cs) < 4:
+            continue
+        c = (sum(p[0] for p in cs) / len(cs), sum(p[1] for p in cs) / len(cs))
+        best = None
+        for o in arch["openings"]:
+            w = walls.get(o["wall"])
+            if w is None or w.get("kind", "line") != "line":
+                continue
+            a, bb = w["a"], w["b"]
+            L = math.dist(a, bb)
+            if L < 1e-6:
+                continue
+            u = ((bb[0] - a[0]) / L, (bb[1] - a[1]) / L)
+            m = (a[0] + u[0] * o["pos"], a[1] + u[1] * o["pos"])
+            d = math.dist(m, c)
+            if d < max(0.35, float(o["w"]) / 2) and (best is None or d < best[0]):
+                best = (d, o)
+        if best is None:
+            continue
+        o = best[1]
+        if o.get("head") != "arch":
+            o["head"] = "arch"
+            o["arch"] = st.get("arch_style", "semi") or "semi"
+            fit_head(o)
+            n += 1
+    return n
 
 
 def opening_types(o, st) -> None:
@@ -6363,6 +6502,12 @@ def cad_steps(doc, lid) -> list:
             if not usedu.is_empty and usedu.contains(ln):
                 continue
             lines.append(ln)
+        if own and lines:
+            out = _own_steps(lines, bld)
+            if len(_STEPS_MEMO) > 16:
+                _STEPS_MEMO.clear()
+            _STEPS_MEMO[key] = out
+            return out
         # sets: lines within 0.8 m of one another
         grp = list(range(len(lines)))
 
@@ -6503,6 +6648,107 @@ def cad_steps(doc, lid) -> list:
     return out
 
 
+def _own_steps(lines, bld) -> list:
+    """The STEP layer's risers as whole lines (an L or a U of steps round
+    a porch one riser line, its corners joined), in sets of risers one
+    behind the other: [{"own", "plines" (top first — as far as the plan
+    tells; the levels decide), "tread", "zone", "reach", "strips",
+    "n", "lines"}]."""
+    from shapely.geometry import LineString, MultiLineString, Point
+    from shapely.ops import linemerge, unary_union
+
+    def snap(v):
+        return round(v / 0.004) * 0.004
+    segs = [LineString([(snap(x), snap(y)) for x, y in ln.coords])
+            for ln in lines]
+    segs = [g for g in segs if g.length > 0.05]
+    if not segs:
+        return []
+    merged = linemerge(unary_union(MultiLineString(segs)))
+    pls = [g for g in getattr(merged, "geoms", [merged])
+           if g.geom_type == "LineString" and g.length >= 0.4]
+    n = len(pls)
+    par = list(range(n))
+
+    def root(k):
+        while par[k] != k:
+            par[k] = par[par[k]]
+            k = par[k]
+        return k
+    for i in range(n):
+        for j in range(i + 1, n):
+            if pls[i].distance(pls[j]) < 0.75:
+                par[root(j)] = root(i)
+    sets: dict = {}
+    for i in range(n):
+        sets.setdefault(root(i), []).append(pls[i])
+    out = []
+    for ps in sets.values():
+        if len(ps) > 1:
+            # risers one behind the other: from an outermost one, by distance
+            far = max(ps, key=lambda a: sum(a.distance(b) for b in ps))
+            ps.sort(key=lambda a: far.distance(a))
+            # the end nearer the building first (rank 0: the top step)
+            if bld is not None and not bld.is_empty and \
+                    ps[0].distance(bld) > ps[-1].distance(bld) + 0.05:
+                ps.reverse()
+            gaps = [ps[k].distance(ps[k + 1]) for k in range(len(ps) - 1)]
+            tread = sorted(gaps)[len(gaps) // 2] if gaps else 0.3
+        else:
+            tread = 0.3
+        tread = min(max(tread, 0.2), 0.6)
+        out.append({"own": True, "plines": ps, "tread": tread,
+                    "n": len(ps), "lines": ps, "strips": [],
+                    "zone": ps[0].buffer(0.05),
+                    "reach": ps[0].buffer(0.05)})
+    return out
+
+
+def _samples(poly, n=9):
+    """A few points spread inside ``poly``."""
+    from shapely.geometry import Point
+    out = []
+    for g in getattr(poly, "geoms", [poly]):
+        if g.is_empty or g.geom_type != "Polygon":
+            continue
+        out.append(g.representative_point())
+        x0, y0, x1, y1 = g.bounds
+        k = 3
+        for i in range(k):
+            for j in range(k):
+                q = Point(x0 + (x1 - x0) * (i + 0.5) / k,
+                          y0 + (y1 - y0) * (j + 0.5) / k)
+                if g.contains(q):
+                    out.append(q)
+    return out[:max(n, 1) * 3]
+
+
+def step_strips(ps, tread, up_side_pt=None):
+    """Each riser line's tread, swept up-side by ``tread`` (corners
+    mitred: an L / U of steps runs on round its corners): [(tread poly,
+    side)] — side +1 / −1, shapely's single-sided buffer side of the
+    up-side. Up: away from the next riser down (the first: away from the
+    second, or toward ``up_side_pt``)."""
+    from shapely.geometry import Point
+    out = []
+    for k, pl_ in enumerate(ps):
+        cand = {sg: pl_.buffer(sg * tread, single_sided=True, join_style=2,
+                               mitre_limit=4.0) for sg in (1, -1)}
+        if k > 0:
+            ref = ps[k - 1]                       # the riser above
+            sg = min(cand, key=lambda s_: cand[s_].centroid.distance(ref))
+        elif len(ps) > 1:
+            ref = ps[1]                           # away from the one below
+            sg = max(cand, key=lambda s_: cand[s_].centroid.distance(ref))
+        elif up_side_pt is not None:
+            sg = min(cand, key=lambda s_: cand[s_].centroid.distance(
+                Point(up_side_pt)))
+        else:
+            sg = 1
+        out.append((cand[sg].buffer(0), sg))
+    return out
+
+
 def entrance_zone(doc, lid):
     """Where the CAD's entrance steps land: the outside parts of the floor
     (lobby, porch…) their top step touches — at the rooms' floor level,
@@ -6584,6 +6830,9 @@ def platform_parts(doc) -> dict:
         noted = Polygon()
     if not noted.is_empty:
         zone = noted if zone is None else unary_union([zone, noted])
+        # a floor whose levels the CAD notes: what it does not note is at
+        # the floor's level (no made-up outside drop)
+        drop = 0.0
     for part, dz in ((inner, 0.0), (outer, drop)):
         for pg in getattr(part, "geoms", [part]):
             if pg.geom_type != "Polygon" or pg.area < 0.05:
@@ -6642,49 +6891,74 @@ def platform_parts(doc) -> dict:
                 [(pc, surf - rank * r_, None, r_) for pc, rank in
                  cs_["strips"] if surf - rank * r_ - zg > 0.01]))
             continue
-        # the steps' own layer: from the level at one end to the level at
-        # the other (a mimber's: up from the floor, its top at the wall)
-        for lines_, dv, tread in cs_.get("fams") or []:
-            def mid(ln):
-                m = ln.interpolate(0.5, normalized=True)
-                return m.x, m.y
-            m0, mN = mid(lines_[0]), mid(lines_[-1])
+        # the steps' own layer: whole riser lines, from the level at one
+        # end of the run to the level at the other (a mimber's: up from
+        # the floor, its top at the wall)
+        ps = list(cs_["plines"])
+        tread = float(cs_["tread"])
+        WPc = WP.centroid
 
-            def side(m, d_, lo_):
-                """The level beside the run's end: the highest of a few
-                looks out from it (past a column, a kerb)."""
-                return max(surf_at(m[0] + d_[0] * k, m[1] + d_[1] * k)
-                           for k in (lo_, lo_ + 0.3, lo_ + 0.7, lo_ + 1.2))
-            zt = side(m0, dv, tread + 0.1)
-            zb = side(mN, (-dv[0], -dv[1]), 0.15)
-            if zb > zt + 0.02:
-                lines_, dv = list(reversed(lines_)), (-dv[0], -dv[1])
-                zt, zb = zb, zt
-                m0, mN = mid(lines_[0]), mid(lines_[-1])
-            n = len(lines_)
-            H = zt - zb
-            if H < 0.05:
-                # nothing noted: up from the floor, a riser each line, the
-                # top at the end nearer the walls
-                pt = (m0[0] + dv[0] * (tread + 0.25),
-                      m0[1] + dv[1] * (tread + 0.25))
-                pb = (mN[0] - dv[0] * 0.25, mN[1] - dv[1] * 0.25)
-                if Point(pb).distance(WP) < Point(pt).distance(WP) - 0.05:
-                    lines_, dv = list(reversed(lines_)), (-dv[0], -dv[1])
-                H = n * rmax_
-                zt = zb + H
-            r_ = H / n
-            pcs = []
-            for rank, ln in enumerate(lines_):
-                (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
-                poly = Polygon([(x0, y0), (x1, y1),
-                                (x1 + dv[0] * tread, y1 + dv[1] * tread),
-                                (x0 + dv[0] * tread, y0 + dv[1] * tread)])
-                ztop = zt - rank * r_
-                if ztop - zg > 0.01:
-                    pcs.append((poly, ztop, (-dv[0], -dv[1]), r_))
-            if pcs:
-                out["steps"].append((f"Steps {k_} ({n} risers)", pcs))
+        def ends_z(ps_):
+            st_ = step_strips(ps_, tread, (WPc.x, WPc.y))
+            top_poly = st_[0][0]
+            # the level up-side of the top riser: just past its tread
+            # (as far as the floor it climbs to: a porch between the top
+            # step and the walls is at that floor's level)
+            up = ps_[0].buffer(st_[0][1] * (tread + 3.0), single_sided=True,
+                               join_style=2).difference(
+                ps_[0].buffer(st_[0][1] * (tread + 0.05), single_sided=True,
+                              join_style=2))
+            dn = ps_[-1].buffer(-st_[-1][1] * 0.6, single_sided=True,
+                                join_style=2).difference(
+                ps_[-1].buffer(-st_[-1][1] * 0.05, single_sided=True,
+                               join_style=2))
+            zs_up = [surf_at(q.x, q.y) for q in _samples(up)] or [zg]
+            zs_dn = [surf_at(q.x, q.y) for q in _samples(dn)] or [zg]
+            return st_, max(zs_up), min(zs_dn), top_poly
+        st_, zt, zb, _tp = ends_z(ps)
+        if len(ps) > 1:
+            st2, zt2, zb2, _ = ends_z(list(reversed(ps)))
+            if zt2 - zb2 > zt - zb + 0.02:
+                ps, st_, zt, zb = list(reversed(ps)), st2, zt2, zb2
+        n = len(ps)
+        H = zt - zb
+        if H < 0.05:
+            # nothing noted: up from the floor, a riser a line, the top at
+            # the end nearer the walls
+            if len(ps) > 1 and ps[-1].distance(WP) < ps[0].distance(WP) - 0.05:
+                ps = list(reversed(ps))
+                st_ = step_strips(ps, tread)
+            H = n * rmax_
+            zt = zb + H
+        r_ = H / n
+        # the landing between the top step and the floor it climbs to (a
+        # porch round the columns): at the top level
+        try:
+            sg0 = st_[0][1]
+            gap = ps[0].distance(G)
+            if 0.05 < gap < 3.0:
+                land = ps[0].buffer(sg0 * (gap + 0.3), single_sided=True,
+                                    join_style=2, mitre_limit=4.0)
+                land = land.difference(G).difference(WP).difference(
+                    st_[0][0].buffer(-0.001))
+                land = unary_union([land, st_[0][0]])
+                for lg in getattr(land, "geoms", [land]):
+                    if lg.geom_type == "Polygon" and lg.area > 0.1:
+                        out["pieces"].append((lg, zt - fin))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project steps landing")
+        pcs = []
+        for rank, (pl_, (poly, sg)) in enumerate(zip(ps, st_)):
+            ztop = zt - rank * r_
+            if ztop - zg <= 0.01:
+                continue
+            nose = pl_.buffer(-sg * 0.045, single_sided=True, join_style=2,
+                              mitre_limit=4.0)
+            pcs.append((poly, ztop, {"edge": pl_, "down": -sg,
+                                     "nose": nose}, r_))
+        if pcs:
+            out["steps"].append((f"Steps {k_} ({n} risers)", pcs))
     cad_lines = [ln for cs_ in csets for ln in cs_["lines"]]
     if not st.get("entry_steps", True):
         return out
@@ -6878,6 +7152,22 @@ def _platform_groups(doc):
             rr = p_[3] if len(p_) > 3 else 0.15
             if o is None or ft <= 0:
                 f_ += _prism(pc, zg, zt)
+                continue
+            if isinstance(o, dict):
+                # a whole riser line (round its corners): the tread's finish
+                # out over the riser by the nosing, the riser's finish
+                f_ += _prism(pc, zg, zt - ft)
+                edge, dn = o["edge"], o["down"]
+                tf = pc.union(edge.buffer(dn * (nos + frt), single_sided=True,
+                                          join_style=2, mitre_limit=4.0)) \
+                    if nos + frt > 1e-4 else pc
+                f_ += [dict(fc, color=fcol) for fc in
+                       _prism(tf.buffer(0), zt - ft, zt)]
+                if frt > 0:
+                    rs = edge.buffer(dn * frt, single_sided=True,
+                                     join_style=2, mitre_limit=4.0)
+                    f_ += [dict(fc, color=fcol) for fc in
+                           _prism(rs, max(zg, zt - rr), zt - ft, 0.002)]
                 continue
             # the step as the stairs': concrete, the tread's finish with its
             # nosing out over the riser, the riser's finish
@@ -7913,6 +8203,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")
+    try:
+        from . import domes as DM_
+        new_groups += DM_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.domes groups")
     try:
         from . import lowparts as LP
         new_groups += LP.groups(doc)

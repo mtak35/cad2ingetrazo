@@ -295,27 +295,32 @@ def _runs(pieces):
         ivs = sorted((min(_dot(w["p"], u), _dot(w["q"], u)),
                       max(_dot(w["p"], u), _dot(w["q"], u)))
                      for w in g["members"])
-        cur = [ivs[0][0], ivs[0][1], []]
+        cur = [ivs[0][0], ivs[0][1], [], [[ivs[0][0], ivs[0][1]]]]
         runs = []
         for a0, a1 in ivs[1:]:
             gap = a0 - cur[1]
             if gap <= PAR_TOL or _crossed(u, n, c, t, cur[1], a0, pieces):
                 cur[1] = max(cur[1], a1)
+                cur[3][-1][1] = max(cur[3][-1][1], a1)
             elif OPEN_MIN <= gap <= OPEN_MAX:
                 cur[2].append((cur[1], a0))          # an opening
                 cur[1] = max(cur[1], a1)
+                cur[3].append([a0, a1])
             else:
                 runs.append(cur)
-                cur = [a0, a1, []]
+                cur = [a0, a1, [], [[a0, a1]]]
         runs.append(cur)
         base = _mul(n, c)
-        for t0, t1, gaps in runs:
+        for t0, t1, gaps, solid in runs:
             # longer than thick: a cut column (a square) is not a wall
             if t1 - t0 >= max(MIN_RUN, 1.5 * t):
                 out.append({"p": _add(base, _mul(u, t0)),
                             "q": _add(base, _mul(u, t1)), "t": t,
                             "gaps": [(_add(base, _mul(u, (a + b) / 2)), b - a)
-                                     for a, b in gaps]})
+                                     for a, b in gaps],
+                            "solid": [(_add(base, _mul(u, a)),
+                                       _add(base, _mul(u, b)))
+                                      for a, b in solid]})
     return out
 
 
@@ -446,6 +451,32 @@ def walls_from(segs, tmin: float = 0.08, tmax: float = 0.40, context=None):
              for s in segs]
     tmin, tmax = sorted((float(tmin), float(tmax)))
     runs = _extend(_runs(_pairs(lines, tmin, tmax)))
+    # a row of short pieces with long gaps between and nothing drawn in
+    # them (the ends of the fins along a lobby): not one wall with
+    # openings — each piece its own
+    split = []
+    for w in runs:
+        sol = w.get("solid") or []
+        gl = [g for g in w["gaps"]]
+        if gl and len(sol) == len(gl) + 1 and context:
+            u_ = _unit_v(_sub(w["q"], w["p"]))
+            longest = max(_len(_sub(b, a)) for a, b in sol)
+            if longest < 0.8 * min(wd for _m, wd in gl) and all(
+                    _gap_kind(m, wd, u_, w["t"], context) is None
+                    for m, wd in gl):
+                for k_, (a, b) in enumerate(sol):
+                    p_, q_ = a, b
+                    if k_ == 0:
+                        p_ = w["p"]
+                    if k_ == len(sol) - 1:
+                        q_ = w["q"]
+                    if _len(_sub(q_, p_)) >= max(MIN_RUN, 1.5 * w["t"]) \
+                            or _len(_sub(q_, p_)) >= 0.3:
+                        split.append({"p": p_, "q": q_, "t": w["t"],
+                                      "gaps": []})
+                continue
+        split.append(w)
+    runs = split
     walls, ops = [], []
     for w in runs:
         a, b = w["p"], w["q"]

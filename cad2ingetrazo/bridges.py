@@ -331,9 +331,15 @@ def bridge(arch, lid, pl, is_door, is_win, is_wall, st,
         h = _host(walls + new_w, p, q, t)
         if h is not None and kind == "window":
             # glazing over a wall the plan draws whole (no gap): a glass
-            # railing on it, a window shown above — not an opening here
+            # railing on it, a window shown above — not an opening here;
+            # but glazing deeper than the wall (a thin sill / jamb line
+            # drawn through the window's frame): the window, the wall as
+            # thick as its frame
             hit = _covered(ops + new_o, h[0], h[1], h[2])
-            if hit is None or hit.get("kind") != "void" or hit.get("hl"):
+            deeper = t > float(h[0]["t"]) + 0.03
+            if hit is None and deeper:
+                h[0]["t"] = round(min(t, 0.46) * 200) / 200
+            elif hit is None or hit.get("kind") != "void" or hit.get("hl"):
                 return
         if h is None and kind == "window":
             # an implied wall: only between two solids (walls, piers,
@@ -443,3 +449,155 @@ def _op(kind, wid, pos, w, leaves, st):
             "swing": "left", "face": 1,
             "style": ("double" if leaves == 2 else "hinged") if door
             else st.get("win_style", "sliding")}
+
+
+# ---- walls meeting ----------------------------------------------------------------
+def close_gaps(arch, lid, pl, is_solid, st) -> dict:
+    """Walls that stop short of one another closed up, as the plan means
+    them: a free end facing another wall's free end on the same line —
+    across a column, a pier, an arch opening — joined by a wall through
+    the gap (its open spans plain openings: the hidden lines then make
+    them arches); a free end stopping short of a wall ahead brought into
+    it. How many of each."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    from .engine import model as M
+    from .engine import structure as S_
+    rep = {"joined": 0, "extended": 0, "openings": 0}
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and w.get("kind", "line") == "line"
+             and math.dist(w["a"], w["b"]) > 0.05]
+    if not walls:
+        return rep
+
+    def poly(w):
+        return LineString([w["a"], w["b"]]).buffer(float(w["t"]) / 2,
+                                                   cap_style=2)
+    polys = {w["id"]: poly(w) for w in walls}
+    cols = []
+    for c in arch["structure"]:
+        if c["type"] == "column" and c["level"] == lid:
+            try:
+                from shapely.geometry import Polygon
+                cols.append(Polygon(S_.column_outline(c)).buffer(0.02))
+            except Exception:  # noqa: BLE001
+                continue
+    lay = pl["layers"]
+    solid_l = [LineString([(s[0], s[1]), (s[2], s[3])]).buffer(0.02)
+               for s in pl["segs"] if is_solid(lay[s[4]]) and
+               math.dist((s[0], s[1]), (s[2], s[3])) > 0.05]
+    SOL = unary_union(cols + solid_l) if (cols or solid_l) else None
+
+    def free_ends():
+        out = []
+        for w in walls:
+            for e, o in (("a", "b"), ("b", "a")):
+                p = w[e]
+                pt = Point(p)
+                if any(k != w["id"] and pg.buffer(0.03).contains(pt)
+                       for k, pg in polys.items()):
+                    continue
+                d = _u(w[o], p)              # out of the wall
+                out.append((w, e, tuple(p), d))
+        return out
+    ends = free_ends()
+    used = set()
+    new_w, new_o = [], []
+    # 1. two free ends on one line, facing: joined
+    for i, (w, e, p, d) in enumerate(ends):
+        if (w["id"], e) in used:
+            continue
+        best = None
+        for j, (w2, e2, q, d2) in enumerate(ends):
+            if j == i or w2["id"] == w["id"] or (w2["id"], e2) in used:
+                continue
+            if d[0] * d2[0] + d[1] * d2[1] > -0.985:     # facing ±10°
+                continue
+            v = (q[0] - p[0], q[1] - p[1])
+            ahead = v[0] * d[0] + v[1] * d[1]
+            side = abs(v[0] * -d[1] + v[1] * d[0])
+            if not 0.02 < ahead <= 8.0:
+                continue
+            if side > max(float(w["t"]), float(w2["t"])) / 2 + 0.06:
+                continue
+            if best is None or ahead < best[0]:
+                best = (ahead, j)
+        if best is None:
+            continue
+        ahead, j = best
+        w2, e2, q, _d2 = ends[j]
+        gap = LineString([p, q])
+        # the open spans of the gap (no column / pier / wall lines)
+        open_ = gap if SOL is None else gap.difference(SOL)
+        spans = [g for g in getattr(open_, "geoms", [open_])
+                 if g.geom_type == "LineString" and g.length > 0.05]
+        if any(g.length > 3.0 for g in spans):
+            continue                   # too wide: a real opening, not a gap
+        if ahead > 2.0 and SOL is not None and \
+                gap.intersection(SOL).length < 0.2:
+            continue                   # nothing between: not one wall
+        t = min(float(w["t"]), float(w2["t"]))
+        rec = {"kind": "line", "a": [round(p[0], 4), round(p[1], 4)],
+               "b": [round(q[0], 4), round(q[1], 4)],
+               "t": round(t * 200) / 200, "align": "centre", "side": 1,
+               "height": "level", "base": 0.0, "level": lid,
+               "filler": True}
+        # a little into both walls: the plan joins them
+        u = _u(p, q)
+        rec["a"] = [round(p[0] - u[0] * 0.02, 4), round(p[1] - u[1] * 0.02, 4)]
+        rec["b"] = [round(q[0] + u[0] * 0.02, 4), round(q[1] + u[1] * 0.02, 4)]
+        nw = M.new_walls(arch["walls"] + new_w, [rec])[0]
+        new_w.append(nw)
+        used |= {(w["id"], e), (w2["id"], e2)}
+        rep["joined"] += 1
+        L = math.dist(nw["a"], nw["b"])
+        for g in spans:
+            if g.length < 0.5:
+                continue
+            m = g.interpolate(0.5, normalized=True)
+            pos = (m.x - nw["a"][0]) * u[0] + (m.y - nw["a"][1]) * u[1]
+            wd = min(g.length, L - 0.22)
+            pos = min(max(pos, wd / 2 + 0.11), L - wd / 2 - 0.11)
+            if wd < 0.4:
+                continue
+            new_o.append({"kind": "void", "wall": nw["id"],
+                          "pos": round(pos, 4), "w": round(wd, 3),
+                          "h": float(st.get("door_h", 2.1336)),
+                          "sill": 0.0, "swing": "left", "face": 1,
+                          "style": ""})
+            rep["openings"] += 1
+    arch["walls"] += new_w
+    walls += new_w
+    for w in new_w:
+        polys[w["id"]] = poly(w)
+    # 2. a free end short of a wall ahead (≤ 0.6 m): carried into it
+    for w, e, p, d in free_ends():
+        if (w["id"], e) in used:
+            continue
+        ray = LineString([p, (p[0] + d[0] * 0.6, p[1] + d[1] * 0.6)])
+        best = None
+        for k, pg in polys.items():
+            if k == w["id"]:
+                continue
+            x = ray.intersection(pg)
+            if x.is_empty:
+                continue
+            dist = Point(p).distance(x)
+            if best is None or dist < best[0]:
+                best = (dist, k)
+        if best is None or best[0] < 0.005:
+            continue
+        o = next(x for x in walls if x["id"] == best[1])
+        go = best[0] + float(o["t"]) / 2
+        old = list(w[e])
+        w[e] = [round(p[0] + d[0] * go, 4), round(p[1] + d[1] * go, 4)]
+        if e == "a":                     # openings measured from «a»
+            for op in arch["openings"]:
+                if op["wall"] == w["id"]:
+                    op["pos"] = round(float(op["pos"]) + math.dist(old, w[e]),
+                                      4)
+        polys[w["id"]] = poly(w)
+        rep["extended"] += 1
+    rep["_new"] = new_o
+    return rep

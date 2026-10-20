@@ -21,12 +21,19 @@ MIN_AREA = 0.5          # m² — less is a gap between walls, not a room
 _cache: dict = {}
 
 
-def found(walls: list[dict]) -> list[dict]:
+#: CAD2IngeTrazo: walls stopping short of one another (a column, a pier,
+#: a window band between them) still close a room — gaps up to twice this
+CLOSE = 0.38
+
+
+def found(walls: list[dict], solids=()) -> list[dict]:
     """The rooms the walls enclose: [{"poly": shapely Polygon, "area",
-    "perimeter", "at": (x, y) label point}], largest first."""
+    "perimeter", "at": (x, y) label point}], largest first. ``solids``:
+    plan outlines that close rooms too (the level's columns)."""
     key = repr(sorted((w["id"], w.get("a"), w.get("b"), w.get("m"),
                        w.get("c"), w.get("r"), w.get("t"), w.get("align"),
-                       w.get("side"), w.get("kind")) for w in walls))
+                       w.get("side"), w.get("kind")) for w in walls)) + \
+        repr([tuple(map(tuple, s_)) for s_ in solids])
     if key in _cache:
         return _cache[key]
     from shapely.geometry import Polygon
@@ -36,11 +43,19 @@ def found(walls: list[dict]) -> list[dict]:
         for pc in pcs:
             p = Polygon(pc["outer"], pc["holes"])
             polys.append(p if p.is_valid else p.buffer(0))
+    for s_ in solids:
+        try:
+            p = Polygon(s_)
+            polys.append(p if p.is_valid else p.buffer(0))
+        except Exception:  # noqa: BLE001
+            continue
     out = []
     if polys:
-        # close the hairline seams between joined pieces
-        u = unary_union(polys).buffer(1e-4, join_style=2).buffer(
-            -1e-4, join_style=2)
+        # close the hairline seams between joined pieces — and the small
+        # gaps the plan leaves between walls, piers and columns
+        g_ = CLOSE if solids is not None else 1e-4
+        u = unary_union(polys).buffer(g_, join_style=2).buffer(
+            -g_, join_style=2)
         comps = list(getattr(u, "geoms", [u]))
         filled = [Polygon(g.exterior) for g in comps]
         for g in comps:
@@ -104,8 +119,16 @@ def of_level(doc: dict, level_id: str) -> list[dict]:
     from shapely.geometry import Point
     walls = [w for w in doc.get("walls") or [] if w["level"] == level_id]
     recs = [r for r in doc.get("rooms") or [] if r["level"] == level_id]
+    sol = []
+    try:                          # the columns close rooms with the walls
+        from . import structure as S_
+        for c in doc.get("structure") or []:
+            if c.get("type") == "column" and c.get("level") == level_id:
+                sol.append([tuple(q) for q in S_.column_outline(c)])
+    except Exception:  # noqa: BLE001
+        sol = []
     out, n = [], 0
-    for room in found(walls):
+    for room in found(walls, sol):
         rec = next((r for r in recs
                     if room["poly"].contains(Point(r["x"], r["y"]))), None)
         if rec is None:

@@ -180,6 +180,10 @@ FIELDS = {
                   "fixed", "louvre", "top-hung")),
                 ("leaves", "Leaves (single / double)", "choice", (1, 2)),
                 ("head", "Head", "choice", ("flat", "transom", "arch")),
+                ("arch", "Arch shape (head: arch)", "choice",
+                 ("semi", "segmental", "elliptical", "pointed", "ogee",
+                  "horseshoe", "multifoil", "trefoil", "tudor")),
+                ("grille", "Grille in it", "choice", ("none", "cnc")),
                 ("frame", "Frame", "choice",
                  ("auto", "wood", "aluminium", "steel", "upvc")),
                 ("frame_w", "Frame width (its face)", "len", (0.02, 0.30)),
@@ -308,6 +312,8 @@ CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
                       if k != "auto"})
+CHOICE_LABELS.update({k: lab for k, lab, _r in _S_PT.ARCHES})
+CHOICE_LABELS.update({"cnc": "CNC grille (jali)", "none": "None"})
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
 
@@ -2863,6 +2869,44 @@ class Panel(QWidget):
             n += 1
         self.commit(doc, f"{n} doors / windows: types and heads applied")
 
+    def _arch_openings(self, which):
+        """Arched heads (the «Arch shape» picked) on the selected openings,
+        or on every plain opening of the level; «flat» undoes them."""
+        doc = self.doc()
+        sty = self.o_arch.currentData() or "semi"
+        doc["settings"]["arch_style"] = sty
+        if which == "voids":
+            lid, _lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            walls = {w["id"] for w in doc["arch"]["walls"]
+                     if w["level"] == lid}
+            ops = [o for o in doc["arch"]["openings"]
+                   if o["wall"] in walls and o["kind"] == "void"
+                   and not o.get("grille")]
+        else:
+            ids = {i for k, i in self._selected_all() if k == "opening"}
+            ops = [o for o in doc["arch"]["openings"] if o["id"] in ids]
+            if not ops:
+                self.flash("Select openings first (click a door / window / "
+                           "opening in the model; Shift+click for more)")
+                return
+        n = 0
+        for o in ops:
+            if which == "flat":
+                o["head"] = "flat"
+                o.pop("arch", None)
+            else:
+                o["head"] = "arch"
+                o["arch"] = sty
+                PJ.fit_head(o)
+            n += 1
+        from .engine import structure as S_
+        lab = dict((k, l_) for k, l_, _r in S_.ARCHES).get(sty, sty)
+        self.commit(doc, f"{n} opening(s): " + (
+            "flat heads" if which == "flat" else f"arched — {lab}"))
+
     def _openings_part(self):
         box, body = _fold("5  Openings", "openings", False)
         f = _form(body)
@@ -2922,6 +2966,19 @@ class Panel(QWidget):
                                "cusped multifoil / trefoil, Persian "
                                "four-centred")
         f.addRow("Arch shape", self.o_arch)
+        f.addRow(_btn("Arch the selected openings (this shape)",
+                      lambda: self._arch_openings("selected"),
+                      "The openings selected in the model (click, "
+                      "Shift+click — doors, windows or plain openings): an "
+                      "arched head of the shape above"))
+        f.addRow(_btn("Arch every plain opening of this level",
+                      lambda: self._arch_openings("voids"),
+                      "Every opening of the level picked at the top with no "
+                      "door and no window: an arched head of the shape "
+                      "above"))
+        f.addRow(_btn("Flat heads again (selected)",
+                      lambda: self._arch_openings("flat"),
+                      "The selected openings back to a flat head"))
         self.o_void_arch = QCheckBox("Openings with no door / window: "
                                      "arched (that shape)")
         self.o_void_arch.setToolTip("Every plain opening of this level "
@@ -3974,6 +4031,59 @@ class Panel(QWidget):
                       self._roof_level, "A «Roof» level over the top floor: "
                       "its slab round the outside of the walls below, a "
                       "parapet wall on its edge — also in the Level list"))
+        # domes (domes.py): kinds, sizes, on a drum, with a finial
+        from . import domes as DM_
+        f.addRow(QLabel("<i>Domes (on top of the level picked above):</i>"))
+        self.dm_list = QComboBox()
+        self.dm_list.setToolTip("The domes of the project — pick one to "
+                                "change or remove it; «New dome» to add one")
+        self.dm_list.currentIndexChanged.connect(self._dome_pick)
+        f.addRow("Dome", self.dm_list)
+        self.dm_kind = QComboBox()
+        for k, label, _r in DM_.KINDS:
+            self.dm_kind.addItem(label, k)
+        f.addRow("Dome type", self.dm_kind)
+        self.dm_d = _spin(0.0, 80.0, 0.0, 0.1524, 3)
+        self.dm_d.setToolTip("Its diameter at the spring (0 = as big as the "
+                             "room under it allows)")
+        f.addRow("Diameter (0 = fit the room)", self.dm_d)
+        self.dm_rise = _spin(0.0, 3.0, 0.0, 0.05, 2)
+        self.dm_rise.setToolTip("Its height over its diameter (0 = the "
+                                "type's own: hemispherical 0.5, onion 1.05, "
+                                "pointed 0.75, saucer 0.28…)")
+        f.addRow("Height ÷ diameter (0 = the type's)", self.dm_rise)
+        self.dm_drum = _spin(0.0, 20.0, 0.0, 0.1524, 3)
+        self.dm_drum.setToolTip("A cylindrical drum under it (0 = none)")
+        f.addRow("Drum height", self.dm_drum)
+        self.dm_fin = QComboBox()
+        for k, label, _c in DM_.FINISHES:
+            self.dm_fin.addItem(label, k)
+        f.addRow("Finish", self.dm_fin)
+        self.dm_finial = QCheckBox("Finial on top (kalash)")
+        self.dm_finial.setChecked(True)
+        f.addRow(self.dm_finial)
+        row = QHBoxLayout()
+        self.dm_x = _spin(-1e5, 1e5, 0.0, 0.1, 3)
+        self.dm_y = _spin(-1e5, 1e5, 0.0, 0.1, 3)
+        row.addWidget(self.dm_x)
+        row.addWidget(self.dm_y)
+        f.addRow("Centre X, Y (its own place)", row)
+        f.addRow(_btn("Add a dome over the selected room (else the biggest)",
+                      lambda: self._dome_add("room"),
+                      "A dome over the room you click in the model (a "
+                      "room's floor finish), else over the level's biggest "
+                      "room — centred in it, as big as fits (or the "
+                      "diameter typed)", primary=True))
+        f.addRow(_btn("Add a dome at X, Y", lambda: self._dome_add("xy"),
+                      "A dome centred at the X, Y typed, on top of the level "
+                      "picked above"))
+        row = QHBoxLayout()
+        row.addWidget(_btn("Apply to this dome", self._dome_apply,
+                           "The dome picked in the list takes the type, "
+                           "size, drum, finish and place above"))
+        row.addWidget(_btn("Remove this dome", self._dome_remove,
+                           "The dome picked in the list goes"))
+        f.addRow(row)
         from . import ceilings as CE_
         f.addRow(QLabel("<i>False ceiling (every room of a level):</i>"))
         self.fc_kind = QComboBox()
@@ -4023,6 +4133,119 @@ class Panel(QWidget):
         if lid:
             CE.remove_level(doc, lid)
         self.commit(doc, "False ceiling removed")
+
+    # ---- domes --------------------------------------------------------------------
+    def _dome_fill(self, doc=None):
+        if getattr(self, "dm_list", None) is None:
+            return
+        doc = doc or self.doc()
+        cur = self.dm_list.currentData()
+        self.dm_list.blockSignals(True)
+        self.dm_list.clear()
+        self.dm_list.addItem("— new dome —", "")
+        from . import domes as DM_
+        lab = {k: l_ for k, l_, _r in DM_.KINDS}
+        for i, d in enumerate(doc.get("domes") or [], 1):
+            self.dm_list.addItem(f"Dome {i} · {lab.get(d['kind'], '')} "
+                                 f"Ø{d['d']:.2f} m", d["id"])
+        k = self.dm_list.findData(cur)
+        self.dm_list.setCurrentIndex(max(k, 0))
+        self.dm_list.blockSignals(False)
+
+    def _dome_pick(self, _i=None):
+        did = self.dm_list.currentData()
+        d = next((x for x in self.doc().get("domes") or []
+                  if x["id"] == did), None)
+        if d is None:
+            return
+        for w, v in ((self.dm_d, d["d"]), (self.dm_rise, d.get("rise", 0)),
+                     (self.dm_drum, d.get("drum", 0)), (self.dm_x, d["x"]),
+                     (self.dm_y, d["y"])):
+            w.blockSignals(True)
+            w.setValue(float(v))
+            w.blockSignals(False)
+        self.dm_kind.setCurrentIndex(max(self.dm_kind.findData(d["kind"]), 0))
+        self.dm_fin.setCurrentIndex(max(self.dm_fin.findData(
+            d.get("color", "white")), 0))
+        self.dm_finial.setChecked(bool(d.get("finial", True)))
+
+    def _dome_level(self, doc):
+        lid, _lv = self.level()
+        if not lid:
+            lvs = doc["arch"]["levels"]
+            lid = lvs[-1]["id"] if lvs else None
+        return lid
+
+    def _dome_add(self, how):
+        from . import domes as DM_
+        doc = self.doc()
+        lid = self._dome_level(doc)
+        if not lid:
+            self.flash("Import a level first")
+            return
+        d = float(self.dm_d.value())
+        if how == "room":
+            pt = None
+            try:                         # the room clicked (its finish)
+                for k, i in self._selected_all():
+                    if k == "room":
+                        rec = PJ.room_record(doc, i)
+                        if rec:
+                            pt = (rec["x"], rec["y"])
+                            break
+            except Exception:  # noqa: BLE001
+                pt = None
+            got = DM_.over_room(doc, lid, pt)
+            if got is None:
+                self.flash("No room on this level — type X, Y and use "
+                           "«Add a dome at X, Y»")
+                return
+            x, y, dfit = got
+            if d <= 0.01:
+                d = max(round(dfit * 0.9, 2), 1.0)
+        else:
+            x, y = float(self.dm_x.value()), float(self.dm_y.value())
+            if d <= 0.01:
+                d = 6.0
+        rec = DM_.new(doc, lid, x, y, d, self.dm_kind.currentData(),
+                      float(self.dm_rise.value()),
+                      float(self.dm_drum.value()),
+                      self.dm_finial.isChecked(),
+                      self.dm_fin.currentData())
+        from .host import len_txt
+        if self.commit(doc, f"Dome added ({self.dm_kind.currentText()}, "
+                            f"Ø{len_txt(d)})"):
+            self._dome_fill()
+            self.dm_list.setCurrentIndex(max(self.dm_list.findData(
+                rec["id"]), 0))
+
+    def _dome_apply(self):
+        doc = self.doc()
+        did = self.dm_list.currentData()
+        d = next((x for x in doc.get("domes") or [] if x["id"] == did), None)
+        if d is None:
+            self.flash("Pick a dome in the list (or add one)")
+            return
+        d.update(kind=self.dm_kind.currentData(),
+                 d=max(float(self.dm_d.value()), 0.5),
+                 rise=float(self.dm_rise.value()),
+                 drum=float(self.dm_drum.value()),
+                 finial=self.dm_finial.isChecked(),
+                 color=self.dm_fin.currentData(),
+                 x=float(self.dm_x.value()), y=float(self.dm_y.value()))
+        if self.commit(doc, "Dome changed"):
+            self._dome_fill()
+
+    def _dome_remove(self):
+        doc = self.doc()
+        did = self.dm_list.currentData()
+        n0 = len(doc.get("domes") or [])
+        doc["domes"] = [x for x in doc.get("domes") or [] if x["id"] != did]
+        if len(doc["domes"]) == n0:
+            self.flash("Pick a dome in the list")
+            return
+        if self.commit(doc, "Dome removed"):
+            self._dome_fill()
 
     def _roof_level(self):
         doc = self.doc()
@@ -7691,6 +7914,10 @@ class Panel(QWidget):
         self.s_slab_pos.setCurrentIndex(max(self.s_slab_pos.findData(
             doc["settings"].get("slab_pos", "bottom")), 0))
         self.s_slab_pos.blockSignals(False)
+        try:
+            self._dome_fill(doc)
+        except Exception:  # noqa: BLE001
+            pass
         if getattr(self, "pa_style", None) is not None:
             self.pa_style.blockSignals(True)
             self.pa_style.setCurrentIndex(max(self.pa_style.findData(

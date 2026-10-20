@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.21)
+## 13. What's new since 3.11 (3.12 – 3.22)
 
 The full list, version by version, is in the README. In short:
 
@@ -469,6 +469,12 @@ The full list, version by version, is in the README. In short:
 - **Doors and windows from their symbols** even where no wall line runs along them (doors between fins, glazing from pier to pier): each gets a wall of its own.
 - **Floor levels from the level texts** (LEV. +4'-0", LEVEL 163.00…): the floor's level from the note in its hall / rooms, each area at its own noted level; the ground F.F.L. field set from it.
 - **Round columns** as the IngeTrazo library's round column; **arch shapes** — semicircular, segmental, elliptical, pointed (Islamic), ogee (Mughal), horseshoe (Moorish), multifoil, trefoil, four-centred (Persian).
+
+**3.22 — closer to the drawing, and domes**
+- Rooms close across columns, piers and window bands (the prayer hall is a room: its floor finish and level); walls stopping short are joined; rooms take their names, stair halls «STAIRCASE».
+- Steps run on round their corners (an L / U of steps), up to the floor they climb to, with the landing built; floors noted by the CAD get no made-up outside drop.
+- Blocks named ARCH arch their openings; any selected opening can be arched (section 5).
+- **Domes** (section 8): hemispherical, onion, pointed, bulbous, saucer, ribbed, conical — any size, on a drum, with a finial, over a room or at a point.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that updates the extension from GitHub.
