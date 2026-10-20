@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.20)
+## 13. What's new since 3.11 (3.12 – 3.21)
 
 The full list, version by version, is in the README. In short:
 
@@ -462,6 +462,13 @@ The full list, version by version, is in the README. In short:
 
 **Sheets and export**
 - Sheets with the CAD's own linework over each plan at its plotted line weights; dimensions, room schedule, north arrow, line weights in the sheet window; PDF, DXF, a real SketchUp .skp.
+
+**3.21 — reading the plan like a draughtsman**
+- **STEP and STAIR layers apart**: the STEP layer is steps to another level of the same floor (a raised hall, a mimber, a verandah) — the stairs' finish and nosing, no railing; only the STAIR layers make staircases.
+- **The LINE layer by where it lies**: in a wall's opening → a CNC grille (jali); closing round an area → a low platform at its noted level; outside the walls → a low wall.
+- **Doors and windows from their symbols** even where no wall line runs along them (doors between fins, glazing from pier to pier): each gets a wall of its own.
+- **Floor levels from the level texts** (LEV. +4'-0", LEVEL 163.00…): the floor's level from the note in its hall / rooms, each area at its own noted level; the ground F.F.L. field set from it.
+- **Round columns** as the IngeTrazo library's round column; **arch shapes** — semicircular, segmental, elliptical, pointed (Islamic), ogee (Mughal), horseshoe (Moorish), multifoil, trefoil, four-centred (Persian).
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that updates the extension from GitHub.

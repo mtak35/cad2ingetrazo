@@ -246,6 +246,10 @@ def new_dig(digs: list[dict], corners, bottom: dict,
 
 
 WALL_ALIGNS = ("outside", "centre", "inside")
+#: the shapes of an arched head (engine/structure.py draws them)
+ARCH_STYLES = ("semi", "segmental", "pointed", "ogee", "horseshoe",
+               "multifoil", "tudor", "trefoil", "elliptical")
+
 GLASS_KEYS = ("clear", "double", "lowe", "grey", "bronze", "green", "blue_ref", "silver_ref", "frosted")
 
 
@@ -444,6 +448,14 @@ def _structure(raw, level_ids: set) -> list[dict]:
                            # it, into the ground; his ask 2026-10-03)
                            base=min(max(float(e.get("base", 0.0)), -20.0),
                                     20.0))
+                for k_ in ("pier", "round_lib"):  # a pier box; a round
+                    if e.get(k_):                # column of the library
+                        rec[k_] = e[k_]
+                try:                             # a round column's shaft
+                    if float(e.get("shaft") or 0) > 0.03:
+                        rec["shaft"] = min(float(e["shaft"]), 3.0)
+                except (TypeError, ValueError):
+                    pass
                 if shp == "poly":      # an L / T / C section: its corners,
                     pts_ = [[float(p[0]), float(p[1])]   # from (x, y)
                             for p in e.get("pts") or []]
@@ -473,7 +485,8 @@ def _structure(raw, level_ids: set) -> list[dict]:
                     rec["zone"] = True
                 # a part sunk / raised by hand; the roof slab on the top
                 # floor; a slab not built (the ground floor's, slabs on top)
-                for k_ in ("user", "roof", "skip", "top", "grade", "auto_roof"):
+                for k_ in ("user", "roof", "skip", "top", "grade", "auto_roof",
+                           "note"):
                     if e.get(k_):
                         rec[k_] = True
                 if e.get("room"):          # sunk / raised for this room
@@ -627,6 +640,10 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["shade_d"] = min(max(sd_, 0.1), 2.0)
         if o.get("hl"):              # the plan's hidden lines read for it
             rec["hl"] = 1
+        if o.get("grille") in ("cnc", "jali", "ms"):   # a grille in it
+            rec["grille"] = o["grille"]
+        if o.get("arch") in ARCH_STYLES:     # the arch's shape
+            rec["arch"] = o["arch"]
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

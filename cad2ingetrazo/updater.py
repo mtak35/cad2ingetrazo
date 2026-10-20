@@ -53,8 +53,8 @@ def newer(remote: str, local: str) -> bool:
 
 def install(dest: Path | None = None) -> Path:
     """The main branch's package downloaded and put in ``dest`` (this
-    package's folder); the old files copied to ``<dest>_backup_<time>``. The
-    backup's path."""
+    package's folder); the old files copied to ``_<dest>_backup_<time>``
+    (a name IngeTrazo does not load as a plugin). The backup's path."""
     dest = Path(dest or Path(__file__).resolve().parent)
     data = _get(ZIP, timeout=90.0)
     zf = zipfile.ZipFile(io.BytesIO(data))
@@ -77,10 +77,31 @@ def install(dest: Path | None = None) -> Path:
     # the current version kept beside it (a new folder each time: nothing
     # is ever deleted)
     import time
-    bak = dest.with_name(f"{dest.name}_backup_{time.strftime('%Y%m%d_%H%M%S')}")
+    # «_…»: IngeTrazo never loads a plugin folder whose name starts so —
+    # the copy is kept, not run as a second CAD2IngeTrazo
+    bak = dest.with_name(
+        f"_{dest.name}_backup_{time.strftime('%Y%m%d_%H%M%S')}")
     shutil.copytree(dest, bak, ignore=shutil.ignore_patterns("__pycache__"))
     for rel, data_ in files.items():      # over the old files, in place
         q = dest / rel
         q.parent.mkdir(parents=True, exist_ok=True)
         q.write_bytes(data_)
     return bak
+
+
+def hide_backups(here: Path | None = None) -> int:
+    """Copies 3.20.1 kept beside this package as ``cad2ingetrazo_backup_…``
+    — IngeTrazo loaded them as a second CAD2IngeTrazo — renamed
+    ``_cad2ingetrazo_backup_…`` (kept, never loaded again). How many."""
+    here = Path(here or Path(__file__).resolve().parent)
+    n = 0
+    try:
+        for p in here.parent.iterdir():
+            if p.is_dir() and p.name.startswith(f"{here.name}_backup"):
+                q = p.with_name("_" + p.name)
+                if not q.exists():
+                    p.rename(q)
+                    n += 1
+    except OSError:
+        pass
+    return n

@@ -15,7 +15,7 @@ import re
 
 ROLES = ("walls", "doors", "windows", "columns", "beams", "slab", "holes",
          "text", "plot", "footings", "stairs", "grid", "lift", "parking",
-         "cars", "ramps", "bikes", "rails")
+         "cars", "ramps", "bikes", "rails", "steps", "lines")
 
 _W = r"(^|[^A-Z])"            # a word's start: not inside another word
 KEYS = {
@@ -34,7 +34,8 @@ KEYS = {
              r"FLOOR.?OUTLINE", r"FLOOR.?EDGE"],
     "holes": [r"STAIR", r"SHAFT", r"LIFT", r"VOID", r"HOLE", r"ESCALERA",
               r"ELEVATOR", r"DUCT", r"S-OPEN", r"OPENING"],
-    "text": [r"TEXT", r"TXT", r"ANNO", r"ROOM", r"NAME", r"LABEL", r"TAG",
+    "text": [r"TEXT", r"TXT", r"(^|[^A-Z])TEX($|[^A-Z])", r"ANNO", r"ROOM",
+             r"NAME", r"LABEL", r"TAG",
              r"A-AREA", r"TEXTO", r"NOTE"],
     "plot": [r"PLOT", r"SITE", r"BOUNDARY", r"PROPERTY", r"\bLOT\b",
              r"PARCEL", r"TERRENO", r"LOTE", r"L-PROP", r"C-PROP",
@@ -42,7 +43,12 @@ KEYS = {
     "grid": [r"GRID", r"GIRD", r"AXIS", r"AXES", r"EJE", r"S-GRID", r"CENT.?LINE",
              r"C-L\b"],
     "stairs": [r"STAIR", r"ESCAL", r"ESCADA", r"TREPP", r"SCALA",
-               r"STEP", r"A-FLOR-STRS", r"RISER", r"TREAD"],
+               r"A-FLOR-STRS", r"RISER", r"TREAD"],
+    # steps: a few risers to another level of the same floor (no railing)
+    "steps": [r"STEP", r"PELDA", r"ESCALON", r"DEGRAU", r"MARCHE"],
+    # «line»: a low wall outside the walls, a CNC grille in an opening, a
+    # low platform where it closes round an area
+    "lines": [r"^LINES?$", r"^A-LINE", r"LOW.?WALL", r"JAALI|JALI"],
     "lift": [r"LIFT", r"ELEVATOR", r"(^|[^A-Z])CORE", r"SHEAR"],
     "parking": [r"PARK", r"PRKG", r"ESTACION", r"STALL", r"\bBAY"],
     "cars": [r"(^|[^A-Z])CARS?($|[^A-Z])", r"VEHIC", r"AUTOMOB"],

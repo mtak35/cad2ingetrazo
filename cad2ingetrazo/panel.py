@@ -1398,7 +1398,9 @@ class Panel(QWidget):
                          ("parking", "Parking bays"), ("cars", "Cars"),
                          ("bikes", "Motorbike parking"),
                          ("ramps", "Car ramps"),
-                         ("rails", "Railings (slab edges)")):
+                         ("rails", "Railings (slab edges)"),
+                         ("steps", "Steps (no railing)"),
+                         ("lines", "Lines (low wall / grille / platform)")):
             e = QLineEdit()
             lf.addRow(label, e)
             self.i_layers[k] = e
@@ -1732,6 +1734,17 @@ class Panel(QWidget):
                f", {rep['rooms']} rooms, {rep['texts']} texts")
         if rep.get("blocks"):
             txt += f"\n{rep['blocks']} door / window blocks placed in walls"
+        br_ = rep.get("bridged") or {}
+        if br_.get("doors") or br_.get("windows"):
+            txt += (f"\n{br_.get('doors', 0)} door(s), "
+                    f"{br_.get('windows', 0)} window(s) found from their "
+                    f"symbols ({br_.get('bridges', 0)} set in a wall of "
+                    "their own: no wall line drawn along them)")
+        ln_ = rep.get("lines") or {}
+        if any(ln_.values()):
+            txt += (f"\nLINE layer: {ln_.get('grilles', 0)} CNC grille(s) in "
+                    f"openings, {ln_.get('low_walls', 0)} low wall(s), "
+                    f"{ln_.get('platforms', 0)} low platform(s)")
         if rep.get("stairs_built"):
             txt += (f"\n{rep['stairs_built']} stair(s) built from the plans' "
                     "tread lines")
@@ -2404,6 +2417,8 @@ class Panel(QWidget):
         st["door2_style"] = self.o_d2style.currentData() or "double"
         st["door_head"] = self.o_dhead.currentData() or "flat"
         st["win_head"] = self.o_whead.currentData() or "flat"
+        st["arch_style"] = self.o_arch.currentData() or "semi"
+        st["void_arch"] = self.o_void_arch.isChecked()
         st["door_frame"] = self.o_dframe.currentData() or "auto"
         st["win_frame"] = self.o_wframe.currentData() or "auto"
 
@@ -2828,7 +2843,14 @@ class Panel(QWidget):
         walls = {w["id"] for w in doc["arch"]["walls"] if w["level"] == lid}
         n = 0
         for o in doc["arch"]["openings"]:
-            if o["wall"] not in walls or o["kind"] == "void":
+            if o["wall"] not in walls:
+                continue
+            if o["kind"] == "void":
+                if st.get("void_arch") and not o.get("grille"):
+                    o["head"] = "arch"
+                if o.get("head") == "arch":    # arched already (hidden
+                    o["arch"] = st.get("arch_style", "semi")  # lines too)
+                    n += 1
                 continue
             if o["kind"] == "door":
                 if o.get("style") in PJ.SINGLE_TYPES + PJ.DOUBLE_TYPES + (
@@ -2889,6 +2911,24 @@ class Panel(QWidget):
             self.o_whead.addItem(label, k)
         f.addRow("Door head (import)", self.o_dhead)
         f.addRow("Window head (import)", self.o_whead)
+        self.o_arch = QComboBox()
+        for k, label, _r in S_.ARCHES:
+            self.o_arch.addItem(label, k)
+        self.o_arch.setToolTip("The shape of every arched head — arch-top "
+                               "doors and windows, and the arches the "
+                               "plan's hidden lines show over openings "
+                               "with no door: Roman, segmental, Islamic "
+                               "pointed, Mughal ogee, Moorish horseshoe, "
+                               "cusped multifoil / trefoil, Persian "
+                               "four-centred")
+        f.addRow("Arch shape", self.o_arch)
+        self.o_void_arch = QCheckBox("Openings with no door / window: "
+                                     "arched (that shape)")
+        self.o_void_arch.setToolTip("Every plain opening of this level "
+                                    "(no door, no window drawn) gets an "
+                                    "arched head when the types are "
+                                    "applied")
+        f.addRow(self.o_void_arch)
         self.o_dframe = QComboBox()
         self.o_wframe = QComboBox()
         for cb_ in (self.o_dframe, self.o_wframe):
@@ -3013,6 +3053,24 @@ class Panel(QWidget):
             lambda on: self._flag_commit("entry_steps", on,
                                          "Entrance steps"))
         f.addRow(self.s_steps)
+        # the CAD's «line» layer (lowparts.py): its low walls / platforms
+        self.s_loww = _spin(0.15, 2.0, 0.6096, 0.0254, 3)
+        self.s_loww.setToolTip(
+            "The CAD's LINE layer: a line outside the walls is a low wall "
+            "(a planter's, a wudu counter's…) this high")
+        self.s_loww.editingFinished.connect(
+            lambda: self._num_commit("low_wall_h", self.s_loww,
+                                     "Low walls' height"))
+        f.addRow("Low walls (LINE layer) height", self.s_loww)
+        self.s_lowp = _spin(0.05, 2.0, 0.4572, 0.0254, 3)
+        self.s_lowp.setToolTip(
+            "The CAD's LINE layer: an area its lines close round is a low "
+            "platform — at the level its LEV. note gives, else this high "
+            "over the floor under it")
+        self.s_lowp.editingFinished.connect(
+            lambda: self._num_commit("low_plat_h", self.s_lowp,
+                                     "Low platforms' height"))
+        f.addRow("Low platforms (no level note) height", self.s_lowp)
         f.addRow(QLabel("<i>Sunk / raised floor — select rooms' floor "
                         "finishes, or draw a rectangle (Rectangle tool) on "
                         "the floor and select it:</i>"))
@@ -3202,6 +3260,17 @@ class Panel(QWidget):
             return
         doc["settings"]["parapet_style"] = v
         self.commit(doc, "Parapet design: " + self.pa_style.currentText())
+
+    def _num_commit(self, key, w, what):
+        if getattr(self, "_building", False):
+            return
+        doc = self.doc()
+        v = round(float(w.value()), 4)
+        if abs(float(doc["settings"].get(key, 0.0) or 0.0) - v) < 1e-4:
+            return
+        doc["settings"][key] = v
+        from .host import len_txt
+        self.commit(doc, f"{what}: {len_txt(v)}")
 
     def _flag_commit(self, key, on, what):
         if getattr(self, "_building", False):
@@ -5301,9 +5370,18 @@ class Panel(QWidget):
                 a.setChecked((rec.get("style") or "") == k)
             mh = sub.addMenu("Head")
             for k, label in S_.HEADS:
+                if k == "arch":
+                    continue
                 a = mh.addAction(label, lambda k=k: self._quick(sel, head=k))
                 a.setCheckable(True)
                 a.setChecked((rec.get("head") or "flat") == k)
+            ma = mh.addMenu("Arch top")
+            for k, label, _r in S_.ARCHES:
+                a = ma.addAction(label, lambda k=k: self._quick(
+                    sel, head="arch", arch=k))
+                a.setCheckable(True)
+                a.setChecked((rec.get("head") or "flat") == "arch" and
+                             (rec.get("arch") or "semi") == k)
             mf = sub.addMenu("Frame")
             for k, label in [("auto", "Auto")] + [
                     (k, v[0]) for k, v in S_.FRAMES.items()]:
@@ -7405,6 +7483,8 @@ class Panel(QWidget):
                 "door2_style": self.o_d2style.currentData(),
                 "door_head": self.o_dhead.currentData(),
                 "win_head": self.o_whead.currentData(),
+                "arch_style": self.o_arch.currentData(),
+                "void_arch": self.o_void_arch.isChecked(),
                 "door_frame": self.o_dframe.currentData(),
                 "win_frame": self.o_wframe.currentData(),
                 **{k: e.text() for k, e in self.i_layers.items()}}
@@ -7432,6 +7512,7 @@ class Panel(QWidget):
                                (self.o_d2style, "door2_style", "hinged"),
                                (self.o_dhead, "door_head", "flat"),
                                (self.o_whead, "win_head", "flat"),
+                               (self.o_arch, "arch_style", "semi"),
                                (self.o_dframe, "door_frame", "auto"),
                                (self.o_wframe, "win_frame", "auto")):
             cb_.setCurrentIndex(max(cb_.findData(str(s.value(key_, dv_))), 0))
@@ -7615,6 +7696,14 @@ class Panel(QWidget):
             self.pa_style.setCurrentIndex(max(self.pa_style.findData(
                 doc["settings"].get("parapet_style", "coping")), 0))
             self.pa_style.blockSignals(False)
+        for sp_, k_, dv_ in ((getattr(self, "s_loww", None), "low_wall_h",
+                              0.6096),
+                             (getattr(self, "s_lowp", None), "low_plat_h",
+                              0.4572)):
+            if sp_ is not None:
+                sp_.blockSignals(True)
+                sp_.setValue(float(doc["settings"].get(k_, dv_) or dv_))
+                sp_.blockSignals(False)
         for cb_, k_ in ((getattr(self, "s_platform", None), "platform"),
                         (getattr(self, "s_steps", None), "entry_steps"),
                         (getattr(self, "c_hipoly", None), "hi_poly")):

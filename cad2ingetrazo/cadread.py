@@ -69,7 +69,7 @@ def _unit(doc, forced):
 
 _cache: dict = {}
 #: what a read holds: a read kept from an older version is read again
-READ_V = 3
+READ_V = 4
 
 
 def _sibling_dxf(path: Path):
@@ -244,7 +244,8 @@ def _read(path, unit=None) -> dict:
     try:
         doc = _open(tmp or path)
         k, note = _unit(doc, unit)
-        out = {"segs": [], "loops": [], "circles": [], "texts": [],
+        out = {"segs": [], "loops": [], "circles": [], "arcs": [],
+               "texts": [],
                "inserts": [], "unit": k, "unit_note": note,
                "seg_style": [], "styles": [], "hidden_layers": [],
                "_path": str(path), "v": READ_V}
@@ -505,6 +506,16 @@ def _emit(e, inherit, depth, sag, out) -> None:
             _seg(out, (p[0], p[1], q[0], q[1], lay), st)
     elif t in ("ARC", "ELLIPSE", "SPLINE"):
         pts = list(e.flattening(sag))
+        if t == "ARC" and len(pts) >= 2:      # a door's swing, an arch
+            try:
+                c = e.ocs().to_wcs(e.dxf.center)
+                out["arcs"].append({
+                    "layer": lay, "c": (c[0], c[1]), "r": e.dxf.radius,
+                    "p0": (pts[0][0], pts[0][1]),
+                    "p1": (pts[-1][0], pts[-1][1]),
+                    "pm": (pts[len(pts) // 2][0], pts[len(pts) // 2][1])})
+            except Exception:  # noqa: BLE001
+                pass
         for p, q in zip(pts, pts[1:]):
             _seg(out, (p[0], p[1], q[0], q[1], lay), st)
     elif t in ("TEXT", "ATTRIB"):
@@ -587,6 +598,11 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
             "circles": [{"layer": ci["layer"], "c": T(*ci["c"]),
                          "r": ci["r"] * k}
                         for ci in drawing["circles"] if ci["layer"] in index],
+            "arcs": [{"layer": a_["layer"], "c": T(*a_["c"]), "r": a_["r"] * k,
+                      "p0": T(*a_["p0"]), "p1": T(*a_["p1"]),
+                      "pm": T(*a_["pm"])}
+                     for a_ in drawing.get("arcs") or ()
+                     if a_["layer"] in index],
             "texts": [dict(t, x=T(t["x"], t["y"])[0], y=T(t["x"], t["y"])[1],
                            h=t["h"] * k, rot=t["rot"] + rot_deg)
                       for t in drawing["texts"] if t["layer"] in index]}
@@ -629,6 +645,7 @@ def crop(drawing: dict, region) -> dict:
              if inside(sum(p[0] for p in lp["pts"]) / len(lp["pts"]),
                        sum(p[1] for p in lp["pts"]) / len(lp["pts"]))]
     circles = [c for c in drawing["circles"] if inside(*c["c"])]
+    arcs = [a_ for a_ in drawing.get("arcs") or () if inside(*a_["pm"])]
     texts = [t for t in drawing["texts"] if inside(t["x"], t["y"])]
     inserts = [i for i in drawing.get("inserts", ())
                if inside((i["box"][0] + i["box"][2]) / 2,
@@ -636,7 +653,7 @@ def crop(drawing: dict, region) -> dict:
     xs = [v for s in segs for v in (s[0], s[2])]
     ys = [v for s in segs for v in (s[1], s[3])]
     out = dict(drawing, segs=segs, seg_style=seg_style, loops=loops,
-               circles=circles, texts=texts,
+               circles=circles, arcs=arcs, texts=texts,
                inserts=inserts,
                extents=([min(xs), min(ys), max(xs), max(ys)] if xs
                         else [x0, y0, x1, y1]),

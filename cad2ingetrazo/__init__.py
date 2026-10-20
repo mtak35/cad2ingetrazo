@@ -11,7 +11,7 @@ ArchXQ IT Lite (c) Orlando Souza / XQ, GPL-3.0-or-later.
 """
 from __future__ import annotations
 
-__version__ = "3.20.1"
+__version__ = "3.21.0"
 TITLE = "CAD2IngeTrazo"
 
 _panel = None
@@ -19,6 +19,14 @@ _panel = None
 
 def setup(app) -> None:
     global _panel
+    from pathlib import Path
+    if Path(__file__).resolve().parent.name.startswith(("_", "cad2ingetrazo_backup")):
+        return                      # a kept copy (an update's backup): idle
+    try:                            # earlier updates' copies: not loaded
+        from .updater import hide_backups   # as plugins any more
+        hide_backups()
+    except Exception:  # noqa: BLE001
+        pass
     from PySide6.QtCore import QTimer
 
     from . import sheets

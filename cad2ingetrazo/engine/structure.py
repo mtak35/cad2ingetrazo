@@ -734,6 +734,7 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
     eps = 1e-4
     spans = []                       # (s0, s1, zs, zt) — clipped to the wall
     rises = {}                       # an arch-top opening's rise, by span
+    arch_of = {}                     # … and its shape
     for o in ops:
         zs = max(b, z0 + float(o.get("sill", 0.0)))
         zt = min(top, z0 + float(o.get("sill", 0.0)) + float(o["h"]))
@@ -744,6 +745,7 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
                 r = min(head_size(o), zt - zs - 0.05)
                 if r > 0.02:
                     rises[sp] = r
+                    arch_of[sp] = o.get("arch")
 
     def S(p):
         return (p[0] - p0[0]) * u[0] + (p[1] - p0[1]) * u[1]
@@ -771,7 +773,7 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
                 zb_ = zs - (eps if zs <= b + eps else 0)
                 if spn in rises:             # rectangle, then the arch
                     zsp = zt - rises[spn]
-                    curve = arch_pts(t0, t1, zsp, zt, 20)
+                    curve = arch_pts(t0, t1, zsp, zt, 20, arch_of.get(spn))
                     cut.append(Polygon([(t0, zb_), (t1, zb_)] + curve))
                 else:
                     cut.append(box(t0, zb_, t1,
@@ -812,7 +814,8 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
         faces.append([P(s1, c_lo, zs), P(s1, c_lo, zj), P(s1, c_hi, zj),
                       P(s1, c_hi, zs)])
         if rise > 0:                             # the arch's soffit
-            curve = arch_pts(s0, s1, zj, zt, 20)     # s1 → crown → s0
+            curve = arch_pts(s0, s1, zj, zt, 20,
+                             arch_of.get(spn))     # s1 → crown → s0
             for (sa, za), (sb, zb2) in zip(curve, curve[1:]):
                 # as the flat head: the smaller s first (faces inward)
                 faces.append([P(sb, c_lo, zb2), P(sb, c_hi, zb2),
@@ -1028,28 +1031,114 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
     return out
 
 
+#: the arched heads' shapes: (key, label, rise over the opening's width)
+ARCHES = [("semi", "Semicircular (Roman)", 0.50),
+          ("segmental", "Segmental (shallow)", 0.20),
+          ("elliptical", "Elliptical (basket)", 0.30),
+          ("pointed", "Pointed (Islamic / Gothic, two-centred)", 0.80),
+          ("ogee", "Ogee (Mughal, S-curved to a point)", 0.85),
+          ("horseshoe", "Horseshoe (Moorish)", 0.65),
+          ("multifoil", "Multifoil (cusped, five lobes)", 0.50),
+          ("trefoil", "Trefoil (three lobes)", 0.50),
+          ("tudor", "Tudor / four-centred (Persian, flat point)", 0.32)]
+_RISE = {k: r for k, _l, r in ARCHES}
+
+
 def head_size(o: dict) -> float:
     """How much of the opening's height its head takes (0: a flat head):
-    a transom light, or an arch's rise (a semicircle on a narrow opening,
-    a segmental arch on a wide one)."""
+    a transom light, or an arch's rise (as its shape wants it — a
+    semicircle half the width, a pointed arch more — capped by the
+    opening's height)."""
     head = o.get("head") or "flat"
     h, w = float(o["h"]), float(o["w"])
     if head == "transom":
         return 0.45 if o["kind"] == "door" else min(0.45, 0.30 * h)
     if head == "arch":
-        cap = 0.60 if o["kind"] == "door" else 0.40 * h
-        return min(w / 2, cap)
+        sty = o.get("arch") or "semi"
+        if sty == "semi":
+            cap = 0.60 if o["kind"] == "door" else 0.40 * h
+            return min(w / 2, cap)
+        cap = 1.20 if o["kind"] == "door" else 0.50 * h
+        return min(_RISE.get(sty, 0.5) * w, cap)
     return 0.0
 
 
-def arch_pts(s0, s1, zsp, zt, k=16) -> list:
+def _half(hw, r, sty, k):
+    """The arch's right half in (dx, dz) from its spring (hw, 0) to the
+    crown (0, r), never outside the jamb (dx ≤ hw)."""
+    if sty == "pointed" and r > hw * 1.01:
+        e = (r * r - hw * hw) / (2 * hw)        # centres on the spring line
+        R = hw + e
+        a1 = math.atan2(r, e)                   # from the centre (−e, 0)
+        return [(-e + R * math.cos(a1 * i / k), R * math.sin(a1 * i / k))
+                for i in range(k + 1)]
+    if sty == "elliptical" or (sty == "pointed" and r <= hw * 1.01):
+        return [(hw * math.cos(math.pi / 2 * i / k),
+                 r * math.sin(math.pi / 2 * i / k)) for i in range(k + 1)]
+    if sty == "ogee":
+        m = max(k // 2, 3)
+        lo = [(hw / 2 + hw / 2 * math.cos(math.pi / 2 * i / m),
+               r / 2 * math.sin(math.pi / 2 * i / m)) for i in range(m + 1)]
+        up = [(hw / 2 - hw / 2 * math.sin(math.pi / 2 * i / m),
+               r - r / 2 * math.cos(math.pi / 2 * i / m))
+              for i in range(1, m + 1)]
+        return lo + up
+    if sty == "horseshoe":
+        # a circle wider than its spring: its centre over the spring line,
+        # the jambs' line its widest; the arch steps in at the spring
+        R = r / 1.3
+        R = min(R, hw)
+        zc = r - R
+        x0 = math.sqrt(max(R * R - zc * zc, 0.0))
+        out = [(hw, 0.0)]
+        a0 = math.atan2(-zc, x0)
+        for i in range(k + 1):
+            a = a0 + (math.pi / 2 - a0) * i / k
+            out.append((R * math.cos(a), zc + R * math.sin(a)))
+        return out
+    if sty in ("multifoil", "trefoil"):
+        n = 5 if sty == "multifoil" else 3
+        kk = max(k * 2, 24)
+        out = []
+        for i in range(kk + 1):
+            th = math.pi / 2 * i / kk           # 0 at the spring
+            # lobes: cusps pointing in, between them the full circle
+            f = 1.0 - 0.14 * (1.0 - abs(math.sin(n * th)))
+            out.append((hw * f * math.cos(th), r * f * math.sin(th)))
+        out[0] = (hw, 0.0)
+        return out
+    if sty == "tudor":
+        a = 0.35 * hw                           # the small arcs at the
+        al = math.radians(60.0)                 # springs, then straight
+        m = max(k // 2, 3)                      # to the flat point
+        lo = [(hw - a + a * math.cos(al * i / m), a * math.sin(al * i / m))
+              for i in range(m + 1)]
+        px, pz = lo[-1]
+        if r < pz + 0.01:
+            r = pz + 0.01
+        up = [(px * (1 - t), pz + (r - pz) * (t ** 0.85)) for t in
+              (j / m for j in range(1, m + 1))]
+        return lo + up
+    return None
+
+
+def arch_pts(s0, s1, zsp, zt, k=16, style=None) -> list:
     """The arch's curve in the wall's (along, z) plane, from (s1, zsp) over
-    the crown (mid, zt) to (s0, zsp): k+1 points."""
+    the crown (mid, zt) to (s0, zsp): of the shape ``style`` (ARCHES; a
+    circle through spring and crown when none)."""
     hw, r = (s1 - s0) / 2, zt - zsp
     if r < 1e-4 or hw < 1e-4:
         return [(s1, zsp), (s0, zsp)]
+    mid = (s0 + s1) / 2
+    half = _half(abs(hw), r, style, k) if style and style not in (
+        "semi", "segmental") else None
+    if half:
+        sg = 1.0 if hw > 0 else -1.0
+        right = [(mid + sg * dx, zsp + dz) for dx, dz in half]
+        left = [(mid - sg * dx, zsp + dz) for dx, dz in reversed(half[:-1])]
+        return right + left
     R = (hw * hw + r * r) / (2 * r)
-    zc, mid = zt - R, (s0 + s1) / 2
+    zc = zt - R
     a1 = math.atan2(zsp - zc, hw)
     out = []
     for i in range(k + 1):
@@ -1190,8 +1279,9 @@ def _opening_parts_head(o: dict, seg, z0: float) -> list:
                 parts.append(_box(p0, u, n, sm - f / 2, sm + f / 2, -hd, hd,
                                   zsp, zt - f, FRAME_COLOR))
     else:                                        # arch: frame ring, glass
-        outer = arch_pts(s0, s1, zsp, zt)
-        inner = arch_pts(s0 + f, s1 - f, zsp, zt - f)
+        sty = o.get("arch")
+        outer = arch_pts(s0, s1, zsp, zt, 16, sty)
+        inner = arch_pts(s0 + f, s1 - f, zsp, zt - f, 16, sty)
         ring = outer + list(reversed(inner))
         parts.append(_sz_prism(p0, u, n, ring, -hd, hd, FRAME_COLOR))
         parts.append(_sz_prism(p0, u, n, list(reversed(inner)), -0.005,
