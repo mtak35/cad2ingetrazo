@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.22)
+## 13. What's new since 3.11 (3.12 – 3.23)
 
 The full list, version by version, is in the README. In short:
 
@@ -475,6 +475,11 @@ The full list, version by version, is in the README. In short:
 - Steps run on round their corners (an L / U of steps), up to the floor they climb to, with the landing built; floors noted by the CAD get no made-up outside drop.
 - Blocks named ARCH arch their openings; any selected opening can be arched (section 5).
 - **Domes** (section 8): hemispherical, onion, pointed, bulbous, saucer, ribbed, conical — any size, on a drum, with a finial, over a room or at a point.
+
+**3.23 — the masjid as its elevations draw it**
+- Minarets (square, octagonal and fluted shafts, corbelled galleries, lantern, cupola, crescent) and chhatris on the parapet (section 8).
+- Domes on a square block with stepped tiers, raised over the roof.
+- Arcades over the selected columns, rows of small arched openings (a clerestory / attic band) and ablaq voussoirs on any arch (section 5).
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that updates the extension from GitHub.

@@ -470,3 +470,12 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Arch any opening**: section 5 — «Arch the selected openings», «Arch every plain opening of this level», «Flat heads again»; «Selected element» shows the arch shape and the grille of an opening.
 - **Lobby fins**: a row of short wall ends with wide empty gaps between them is no longer read as one wall with openings.
 - **Domes** (section 8 ▸ Domes): hemispherical, onion (Mughal), pointed / ogival, bulbous (Persian), shallow saucer (Ottoman), ribbed (melon), conical — any diameter (or as big as the room allows), height over diameter, a drum under it, a gold finial, finishes (white, gold, green or blue tiles, copper, sandstone); over the room clicked (else the level's biggest) or at an X, Y; each can be changed or removed from the list.
+
+## 3.23.0
+- **Minarets** (section 8): a square shaft, an octagonal then fluted round shafts between one to three corbelled galleries with their red balustrades, an open lantern, a bulbous / onion / conical cupola and a gold crescent finial — any height and base; at the selected columns or at X, Y.
+- **Chhatris**: small domed kiosks on four posts, spread along the selected walls on the parapet, or at their corners.
+- **Domes on a raised base**: a square block and stepped tiers under the dome (the elevations' «Y» detail); a dome can stand higher than the roof (its base offset).
+- **Arch voussoirs**: ablaq (dark / light stones in turn) or a plain stone band round an arched opening, on both faces («Selected element» ▸ Arch voussoirs; section 5 for the import).
+- **Arcade over the selected columns** (section 5): a wall standing on a row of columns (pairs count as one pier), an arched opening of the chosen shape in each bay — a portico, a riwaq.
+- **Rows of small arched openings in the selected walls** (section 5): a clerestory / attic band, in groups, with CNC grilles.
+- The roof level's parapet follows the building's main body when its outline pinches.

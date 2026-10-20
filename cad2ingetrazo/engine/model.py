@@ -644,6 +644,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["grille"] = o["grille"]
         if o.get("arch") in ARCH_STYLES:     # the arch's shape
             rec["arch"] = o["arch"]
+        if o.get("ring") in ("ablaq", "plain"):   # its voussoirs shown
+            rec["ring"] = o["ring"]
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)

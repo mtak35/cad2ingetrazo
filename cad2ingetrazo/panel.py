@@ -184,6 +184,8 @@ FIELDS = {
                  ("semi", "segmental", "elliptical", "pointed", "ogee",
                   "horseshoe", "multifoil", "trefoil", "tudor")),
                 ("grille", "Grille in it", "choice", ("none", "cnc")),
+                ("ring", "Arch voussoirs", "choice",
+                 ("none", "plain", "ablaq")),
                 ("frame", "Frame", "choice",
                  ("auto", "wood", "aluminium", "steel", "upvc")),
                 ("frame_w", "Frame width (its face)", "len", (0.02, 0.30)),
@@ -313,7 +315,9 @@ CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({k: lab for k, lab, _r in _S_PT.ARCHES})
-CHOICE_LABELS.update({"cnc": "CNC grille (jali)", "none": "None"})
+CHOICE_LABELS.update({"cnc": "CNC grille (jali)", "none": "None",
+                      "ablaq": "Ablaq (dark / light stones)",
+                      "plain": "Plain band"})
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
 
@@ -2869,6 +2873,31 @@ class Panel(QWidget):
             n += 1
         self.commit(doc, f"{n} doors / windows: types and heads applied")
 
+    def _arcade(self):
+        doc = self.doc()
+        ids = [i for k, i in self._selected_all() if k == "column"]
+        why = PJ.arcade_over_columns(doc, ids,
+                                     style=self.o_arch.currentData() or
+                                     "pointed",
+                                     ring=getattr(self, "o_ring", None) and
+                                     self.o_ring.currentData() or "ablaq")
+        if why:
+            self.flash(why)
+            return
+        self.commit(doc, "Arcade over the columns")
+
+    def _clerestory(self):
+        doc = self.doc()
+        ids = [i for k, i in self._selected_all() if k == "wall"]
+        if not ids:
+            self.flash("Select walls first (click, Shift+click)")
+            return
+        n = PJ.openings_along(doc, ids, float(self.cl_w.value()),
+                              float(self.cl_h.value()),
+                              group=int(self.cl_n.value()),
+                              style=self.o_arch.currentData() or "semi")
+        self.commit(doc, f"{n} small arched opening(s)")
+
     def _arch_openings(self, which):
         """Arched heads (the «Arch shape» picked) on the selected openings,
         or on every plain opening of the level; «flat» undoes them."""
@@ -2900,6 +2929,11 @@ class Panel(QWidget):
             else:
                 o["head"] = "arch"
                 o["arch"] = sty
+                rg = self.o_ring.currentData() or "none"
+                if rg == "none":
+                    o.pop("ring", None)
+                else:
+                    o["ring"] = rg
                 PJ.fit_head(o)
             n += 1
         from .engine import structure as S_
@@ -2966,6 +3000,14 @@ class Panel(QWidget):
                                "cusped multifoil / trefoil, Persian "
                                "four-centred")
         f.addRow("Arch shape", self.o_arch)
+        self.o_ring = QComboBox()
+        for k, label in (("none", "None"), ("ablaq",
+                          "Ablaq — dark / light stones in turn"),
+                         ("plain", "Plain stone band")):
+            self.o_ring.addItem(label, k)
+        self.o_ring.setToolTip("The arch's voussoirs drawn round it on both "
+                               "faces of the wall")
+        f.addRow("Arch voussoirs", self.o_ring)
         f.addRow(_btn("Arch the selected openings (this shape)",
                       lambda: self._arch_openings("selected"),
                       "The openings selected in the model (click, "
@@ -2979,6 +3021,28 @@ class Panel(QWidget):
         f.addRow(_btn("Flat heads again (selected)",
                       lambda: self._arch_openings("flat"),
                       "The selected openings back to a flat head"))
+        f.addRow(_btn("Arcade over the selected columns",
+                      self._arcade,
+                      "A wall standing on the columns selected (a row of "
+                      "them; columns in pairs count as one pier) with an "
+                      "arched opening of the shape above in each bay, its "
+                      "voussoirs in two colours — a portico, a riwaq"))
+        row = QHBoxLayout()
+        self.cl_w = _spin(0.2, 3.0, 0.46, 0.0254, 3)
+        self.cl_h = _spin(0.3, 6.0, 1.40, 0.0254, 3)
+        self.cl_n = QSpinBox()
+        self.cl_n.setRange(1, 9)
+        self.cl_n.setValue(3)
+        self.cl_n.setToolTip("Openings in each group")
+        row.addWidget(self.cl_w)
+        row.addWidget(self.cl_h)
+        row.addWidget(self.cl_n)
+        f.addRow("Clerestory: width / height / in a group", row)
+        f.addRow(_btn("Rows of small arched openings in the selected walls",
+                      self._clerestory,
+                      "A clerestory / attic band: groups of small arched "
+                      "openings with a CNC grille, spread along each wall "
+                      "selected (a parapet, a drum, a high wall)"))
         self.o_void_arch = QCheckBox("Openings with no door / window: "
                                      "arched (that shape)")
         self.o_void_arch.setToolTip("Every plain opening of this level "
@@ -4047,7 +4111,7 @@ class Panel(QWidget):
         self.dm_d.setToolTip("Its diameter at the spring (0 = as big as the "
                              "room under it allows)")
         f.addRow("Diameter (0 = fit the room)", self.dm_d)
-        self.dm_rise = _spin(0.0, 3.0, 0.0, 0.05, 2)
+        self.dm_rise = _spin(0.0, 3.0, 0.0, 0.05, 2, "")
         self.dm_rise.setToolTip("Its height over its diameter (0 = the "
                                 "type's own: hemispherical 0.5, onion 1.05, "
                                 "pointed 0.75, saucer 0.28…)")
@@ -4055,6 +4119,17 @@ class Panel(QWidget):
         self.dm_drum = _spin(0.0, 20.0, 0.0, 0.1524, 3)
         self.dm_drum.setToolTip("A cylindrical drum under it (0 = none)")
         f.addRow("Drum height", self.dm_drum)
+        row = QHBoxLayout()
+        self.dm_base = _spin(0.0, 30.0, 0.0, 0.1524, 3)
+        self.dm_base.setToolTip("A square block it stands on (raised over "
+                                "the roof, 0 = none)")
+        self.dm_steps = QSpinBox()
+        self.dm_steps.setRange(0, 6)
+        self.dm_steps.setToolTip("Stepped tiers over the square block, each "
+                                 "set back")
+        row.addWidget(self.dm_base)
+        row.addWidget(self.dm_steps)
+        f.addRow("Square base height / stepped tiers", row)
         self.dm_fin = QComboBox()
         for k, label, _c in DM_.FINISHES:
             self.dm_fin.addItem(label, k)
@@ -4084,6 +4159,62 @@ class Panel(QWidget):
         row.addWidget(_btn("Remove this dome", self._dome_remove,
                            "The dome picked in the list goes"))
         f.addRow(row)
+        # minarets and chhatris (minarets.py)
+        from . import minarets as MN_
+        f.addRow(QLabel("<i>Minarets (rising from the level picked "
+                        "above):</i>"))
+        row = QHBoxLayout()
+        self.mn_h = _spin(6.0, 150.0, 30.0, 0.3048, 3)
+        self.mn_h.setToolTip("Its height from the floor to the crescent")
+        self.mn_b = _spin(0.6, 10.0, 1.83, 0.0762, 3)
+        self.mn_b.setToolTip("The side of its square base")
+        row.addWidget(self.mn_h)
+        row.addWidget(self.mn_b)
+        f.addRow("Height / base side", row)
+        row = QHBoxLayout()
+        self.mn_bh = _spin(1.0, 120.0, 18.0, 0.3048, 3)
+        self.mn_bh.setToolTip("How high the square shaft rises before the "
+                              "first gallery")
+        self.mn_gal = QComboBox()
+        for k_ in (1, 2, 3):
+            self.mn_gal.addItem(f"{k_} galler{'y' if k_ == 1 else 'ies'}", k_)
+        self.mn_gal.setCurrentIndex(2)
+        row.addWidget(self.mn_bh)
+        row.addWidget(self.mn_gal)
+        f.addRow("Square shaft height / galleries", row)
+        self.mn_cup = QComboBox()
+        for k_, lab_ in MN_.CUPOLAS:
+            self.mn_cup.addItem(lab_, k_)
+        self.mn_cup.setCurrentIndex(1)
+        f.addRow("Cupola", self.mn_cup)
+        f.addRow(_btn("Add minarets at the selected columns (else X, Y)",
+                      self._minaret_add,
+                      "A minaret centred on each column selected in the "
+                      "model (click, Shift+click), else at the X, Y typed "
+                      "for the dome; its square base turned with the "
+                      "column"))
+        f.addRow(_btn("Remove the minarets", lambda: self._mn_clear(
+            "minarets"), "Every minaret goes"))
+        f.addRow(QLabel("<i>Chhatris (domed kiosks on the parapet):</i>"))
+        row = QHBoxLayout()
+        self.ch_w = _spin(0.6, 10.0, 1.98, 0.0762, 3)
+        self.ch_w.setToolTip("Its side")
+        self.ch_n = QSpinBox()
+        self.ch_n.setRange(1, 30)
+        self.ch_n.setValue(5)
+        self.ch_n.setToolTip("How many along each side picked")
+        row.addWidget(self.ch_w)
+        row.addWidget(self.ch_n)
+        f.addRow("Side / how many along a wall", row)
+        f.addRow(_btn("Chhatris along the selected walls (on the parapet)",
+                      self._chhatri_add,
+                      "Spread evenly along each wall selected in the model, "
+                      "on the roof's parapet over it"))
+        f.addRow(_btn("Chhatris at the corners of the selected walls",
+                      lambda: self._chhatri_add(corners=True),
+                      "One at each end of each wall selected"))
+        f.addRow(_btn("Remove the chhatris", lambda: self._mn_clear(
+            "chhatris"), "Every chhatri goes"))
         from . import ceilings as CE_
         f.addRow(QLabel("<i>False ceiling (every room of a level):</i>"))
         self.fc_kind = QComboBox()
@@ -4168,6 +4299,10 @@ class Panel(QWidget):
         self.dm_fin.setCurrentIndex(max(self.dm_fin.findData(
             d.get("color", "white")), 0))
         self.dm_finial.setChecked(bool(d.get("finial", True)))
+        self.dm_base.blockSignals(True)
+        self.dm_base.setValue(float(d.get("base_h", 0) or 0))
+        self.dm_base.blockSignals(False)
+        self.dm_steps.setValue(int(d.get("steps", 0) or 0))
 
     def _dome_level(self, doc):
         lid, _lv = self.level()
@@ -4212,6 +4347,8 @@ class Panel(QWidget):
                       float(self.dm_drum.value()),
                       self.dm_finial.isChecked(),
                       self.dm_fin.currentData())
+        rec["base_h"] = float(self.dm_base.value())
+        rec["steps"] = int(self.dm_steps.value())
         from .host import len_txt
         if self.commit(doc, f"Dome added ({self.dm_kind.currentText()}, "
                             f"Ø{len_txt(d)})"):
@@ -4232,7 +4369,9 @@ class Panel(QWidget):
                  drum=float(self.dm_drum.value()),
                  finial=self.dm_finial.isChecked(),
                  color=self.dm_fin.currentData(),
-                 x=float(self.dm_x.value()), y=float(self.dm_y.value()))
+                 x=float(self.dm_x.value()), y=float(self.dm_y.value()),
+                 base_h=float(self.dm_base.value()),
+                 steps=int(self.dm_steps.value()))
         if self.commit(doc, "Dome changed"):
             self._dome_fill()
 
@@ -4246,6 +4385,64 @@ class Panel(QWidget):
             return
         if self.commit(doc, "Dome removed"):
             self._dome_fill()
+
+    # ---- minarets / chhatris ----------------------------------------------------------
+    def _minaret_add(self):
+        from . import minarets as MN_
+        doc = self.doc()
+        lid = self._dome_level(doc)
+        if not lid:
+            self.flash("Import a level first")
+            return
+        cols = [i for k, i in self._selected_all() if k == "column"]
+        pts = []
+        for c in doc["arch"]["structure"]:
+            if c["type"] == "column" and c["id"] in cols:
+                pts.append((c["x"], c["y"], float(c.get("angle", 0) or 0),
+                            c["level"]))
+        if not pts:
+            pts = [(float(self.dm_x.value()), float(self.dm_y.value()), 0.0,
+                    lid)]
+        for x, y, a, lv in pts:
+            MN_.new_minaret(doc, lv, x, y, float(self.mn_b.value()),
+                            float(self.mn_h.value()),
+                            float(self.mn_bh.value()),
+                            int(self.mn_gal.currentData() or 3),
+                            self.mn_cup.currentData() or "bulbous", a)
+        self.commit(doc, f"{len(pts)} minaret(s) added")
+
+    def _chhatri_add(self, corners=False):
+        from . import minarets as MN_
+        doc = self.doc()
+        ids = {i for k, i in self._selected_all() if k == "wall"}
+        walls = [w for w in doc["arch"]["walls"] if w["id"] in ids
+                 and w.get("kind", "line") == "line"]
+        if not walls:
+            self.flash("Select walls first (click, Shift+click)")
+            return
+        n_ = 0
+        w_ = float(self.ch_w.value())
+        k_ = int(self.ch_n.value())
+        for w in walls:
+            a, b = w["a"], w["b"]
+            L = math.dist(a, b)
+            if L < 1e-6:
+                continue
+            ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+            ts = [0.0, 1.0] if corners else [(i + 0.5) / k_ for i in range(k_)]
+            for t_ in ts:
+                if corners:
+                    t_ = min(max(t_, (w_ / 2) / L), 1 - (w_ / 2) / L)
+                MN_.new_chhatri(doc, w["level"], a[0] + (b[0] - a[0]) * t_,
+                                a[1] + (b[1] - a[1]) * t_, w_, ang)
+                n_ += 1
+        self.commit(doc, f"{n_} chhatri(s) added")
+
+    def _mn_clear(self, key):
+        doc = self.doc()
+        n_ = len(doc.get(key) or [])
+        doc[key] = []
+        self.commit(doc, f"{n_} {key} removed")
 
     def _roof_level(self):
         doc = self.doc()

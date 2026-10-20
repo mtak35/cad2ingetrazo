@@ -323,6 +323,57 @@ def _grille_faces(w, o, z0):
     return out
 
 
+def _ring_faces(w, o, z0):
+    """An arched opening's voussoirs on both faces of its wall: ablaq —
+    dark and light stones in turn — or one plain band."""
+    from shapely.geometry import Polygon
+
+    from . import project as PJ
+    from .engine import structure as S
+    a, b = w["a"], w["b"]
+    u = _u(a, b)
+    n = (-u[1], u[0])
+    t = float(w["t"])
+    s0 = float(o["pos"]) - float(o["w"]) / 2
+    s1 = float(o["pos"]) + float(o["w"]) / 2
+    zs = float(o.get("sill", 0.0))
+    zt = zs + float(o["h"])
+    rise = min(S.head_size(o), zt - zs - 0.05)
+    if rise <= 0.02:
+        return []
+    zsp = zt - rise
+    sty = o.get("arch") or "semi"
+    rw = min(max(0.16 * float(o["w"]), 0.18), 0.6)
+    k = 16
+    inner = S.arch_pts(s0, s1, zsp, zt, k, sty)
+    outer = S.arch_pts(s0 - rw, s1 + rw, zsp, zt + rw, k, sty)
+    if len(inner) != len(outer) or len(inner) < 3:
+        return []
+    ablaq = o.get("ring") == "ablaq"
+    dark, light = (0.22, 0.20, 0.20), (0.94, 0.92, 0.86)
+    out = []
+    m = len(inner)
+    step = 1 if m <= 24 else 2
+    blocks = [(i, min(i + step, m - 1)) for i in range(0, m - 1, step)]
+    th = 0.025
+    for bi, (i, j) in enumerate(blocks):
+        poly = Polygon(inner[i:j + 1] + list(reversed(outer[i:j + 1])))
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or poly.area < 1e-5:
+            continue
+        col = (dark if bi % 2 else light) if ablaq else light
+        for side in (1, -1):
+            off = side * (t / 2 + th / 2)
+            for f in PJ._prism(poly, -th / 2, th / 2, 1e-6):
+                loop = [(a[0] + u[0] * x + n[0] * (off + zz),
+                         a[1] + u[1] * x + n[1] * (off + zz), z0 + y)
+                        for x, y, zz in f["loop"]]
+                out.append({"loop": list(reversed(loop)), "holes": [],
+                            "color": col})
+    return out
+
+
 GRILLE_COLOR = (0.93, 0.92, 0.88)
 LOW_COLOR = (0.88, 0.86, 0.82)
 
@@ -424,6 +475,30 @@ def groups(doc):
             by_lv.setdefault(w["level"], []).extend(_grille_faces(w, o, z0))
         except Exception:  # noqa: BLE001
             continue
+    rings = {}
+    for o in arch["openings"]:
+        if o.get("head") != "arch" or o.get("ring") not in ("ablaq", "plain"):
+            continue
+        w = walls.get(o["wall"])
+        if w is None or w.get("kind", "line") != "line":
+            continue
+        z0 = elev[lvi[w["level"]]] + float(w.get("base", 0.0) or 0.0)
+        try:
+            rings.setdefault(w["level"], []).extend(_ring_faces(w, o, z0))
+        except Exception:  # noqa: BLE001
+            continue
+    for lid, faces in rings.items():
+        if not faces:
+            continue
+        lv = arch["levels"][lvi[lid]]
+        g = Group(PJ._mesh_of(faces), name=f"Arch voussoirs · {lv['name']}")
+        g.component = False
+        g.material = {"color": (0.94, 0.92, 0.86), "opacity": 1.0}
+        g.layer = level_layer(lv["name"])
+        g.ifc = {"class": "IfcMember", "name": "Arch voussoirs"}
+        g.ext = {KEY: {"type": "lowpart", "id": f"rings-{lid}",
+                       "level": lid}}
+        out.append(g)
     for lid, faces in by_lv.items():
         if not faces:
             continue

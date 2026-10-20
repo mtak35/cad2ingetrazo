@@ -197,7 +197,8 @@ def empty() -> dict:
             "off3d": [], "roof_terraces": [],
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
-            "sunshades": {}, "lowparts": {}, "domes": []}
+            "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
+            "chhatris": []}
 
 
 def load(raw) -> dict:
@@ -287,6 +288,9 @@ def load(raw) -> dict:
                        if k in ids and isinstance(v, dict)}
     from . import domes as DM_                 # the domes (domes.py)
     doc["domes"] = [d for d in DM_.load(raw.get("domes")) if d["level"] in ids]
+    from . import minarets as MN_              # minarets, chhatris
+    for k_ in ("minarets", "chhatris"):
+        doc[k_] = [d for d in MN_.load(raw.get(k_), k_) if d["level"] in ids]
     return doc
 
 
@@ -7478,6 +7482,8 @@ def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
         arch["structure"] += M.new_elements(arch["structure"], [rec])
     if parapet_h > 0:
         ring = Polygon(outline).buffer(-parapet_t / 2, join_style=2)
+        if ring.geom_type != "Polygon" and not ring.is_empty:
+            ring = max(ring.geoms, key=lambda g_: g_.area)   # its main body
         pts = list(ring.exterior.coords)[:-1] if not ring.is_empty else []
         recs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
                  "b": [round(b[0], 4), round(b[1], 4)], "t": parapet_t,
@@ -8204,6 +8210,12 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._plot_groups")
     try:
+        from . import minarets as MN_
+        new_groups += MN_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.minarets groups")
+    try:
         from . import domes as DM_
         new_groups += DM_.groups(doc)
     except Exception:  # noqa: BLE001
@@ -8929,3 +8941,102 @@ def cad_changed(doc) -> list:
         except OSError:
             pass
     return out
+
+
+# =====================================================================================
+# Arcades and rows of arched openings (as the elevations draw them)
+# =====================================================================================
+def arcade_over_columns(doc, col_ids, t=0.45, sill=0.0, top_gap=0.9,
+                        style="pointed", ring="ablaq") -> str | None:
+    """A wall standing on the selected columns (in a row) — its arches
+    between them: an arched opening from ``sill`` up to ``top_gap`` under
+    the wall's top in each bay, columns paired close together counted as
+    one pier. None, or why not."""
+    arch = doc["arch"]
+    cols = [c for c in arch["structure"] if c["type"] == "column"
+            and c["id"] in set(col_ids)]
+    if len(cols) < 2:
+        return "Select two columns or more, in a row"
+    lid = cols[0]["level"]
+    pts = [(float(c["x"]), float(c["y"]), max(float(c["w"]), float(c["d"])))
+           for c in cols]
+    # the row's line: principal direction
+    mx = sum(p[0] for p in pts) / len(pts)
+    my = sum(p[1] for p in pts) / len(pts)
+    sxx = sum((p[0] - mx) ** 2 for p in pts)
+    syy = sum((p[1] - my) ** 2 for p in pts)
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
+    ang = 0.5 * math.atan2(2 * sxy, sxx - syy)
+    u = (math.cos(ang), math.sin(ang))
+    proj = sorted(((p[0] - mx) * u[0] + (p[1] - my) * u[1], p[2])
+                  for p in pts)
+    # columns close together: one pier
+    piers = []
+    for s, d in proj:
+        if piers and s - piers[-1][1] < max(d, piers[-1][2]) * 1.6:
+            piers[-1] = [piers[-1][0], s, max(d, piers[-1][2])]
+        else:
+            piers.append([s, s, d])
+    if len(piers) < 2:
+        return "The columns stand together — select a row of them"
+    s0 = piers[0][0] - piers[0][2] / 2
+    s1 = piers[-1][1] + piers[-1][2] / 2
+    a = [round(mx + u[0] * s0, 4), round(my + u[1] * s0, 4)]
+    b = [round(mx + u[0] * s1, 4), round(my + u[1] * s1, 4)]
+    rec = {"kind": "line", "a": a, "b": b, "t": round(t * 200) / 200,
+           "align": "centre", "side": 1, "height": "level", "base": 0.0,
+           "level": lid, "arcade": True}
+    w = M.new_walls(arch["walls"], [rec])[0]
+    w["name"] = "Arcade " + w["name"].split()[-1]
+    arch["walls"].append(w)
+    info = S.levels_info(arch, M.elevations)[lid]
+    H = info["under"] - info["z0"]
+    ops = []
+    for (p0, p1, d0), (q0, q1, d1) in zip(piers, piers[1:]):
+        ga = p1 + d0 / 2 + 0.05
+        gb = q0 - d1 / 2 - 0.05
+        wd = gb - ga
+        if wd < 0.5:
+            continue
+        ops.append({"kind": "void", "wall": w["id"],
+                    "pos": round((ga + gb) / 2 - s0, 4), "w": round(wd, 3),
+                    "h": round(max(H - sill - top_gap, 1.0), 3),
+                    "sill": sill, "swing": "left", "face": 1, "style": "",
+                    "head": "arch", "arch": style,
+                    **({"ring": ring} if ring in ("ablaq", "plain") else {})})
+    arch["openings"] += M.new_openings(arch["openings"], ops)
+    return None
+
+
+def openings_along(doc, wall_ids, w=0.46, h=1.4, sill=0.5, pitch=0.75,
+                   group=3, gap=1.2, style="semi", grille="cnc",
+                   ring=None) -> int:
+    """Rows of small arched openings along the selected walls (a
+    clerestory, an attic band): groups of ``group`` at ``pitch``, the
+    groups ``gap`` apart, centred on each wall. How many made."""
+    arch = doc["arch"]
+    n = 0
+    for wl in arch["walls"]:
+        if wl["id"] not in set(wall_ids) or wl.get("kind", "line") != "line":
+            continue
+        L = math.dist(wl["a"], wl["b"])
+        span = (group - 1) * pitch + w
+        unit = span + gap
+        k = int((L - 0.6 + gap) // unit)
+        if k < 1:
+            continue
+        tot = k * unit - gap
+        start = (L - tot) / 2
+        recs = []
+        for g in range(k):
+            for i in range(group):
+                pos = start + g * unit + w / 2 + i * pitch
+                recs.append({"kind": "void", "wall": wl["id"],
+                             "pos": round(pos, 4), "w": w, "h": h,
+                             "sill": sill, "swing": "left", "face": 1,
+                             "style": "", "head": "arch", "arch": style,
+                             **({"grille": grille} if grille else {}),
+                             **({"ring": ring} if ring else {})})
+        arch["openings"] += M.new_openings(arch["openings"], recs)
+        n += len(recs)
+    return n
