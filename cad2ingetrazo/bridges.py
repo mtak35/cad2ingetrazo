@@ -19,7 +19,6 @@ from __future__ import annotations
 import math
 
 ANG = 4.0             # ° parallel
-_DBG = None
 DOOR_R = (0.45, 1.35)  # m, a leaf's width
 WIN_MIN = 0.35        # m, a window band's least length
 BAND_MAX = 0.45       # m, a window band's most depth across
@@ -330,14 +329,6 @@ def bridge(arch, lid, pl, is_door, is_win, is_wall, st,
         if L < 0.3:
             return
         h = _host(walls + new_w, p, q, t)
-        if _DBG is not None:
-            _DBG.append((kind, p, q, h is not None and h[0].get("id"),
-                         h is not None and _covered(ops + new_o, h[0], h[1],
-                                                    h[2]),
-                         solids is not None and solids.contains(
-                             __import__("shapely.geometry").geometry.Point(p))
-                         and solids.contains(
-                             __import__("shapely.geometry").geometry.Point(q))))
         if h is not None and kind == "window":
             # glazing over a wall the plan draws whole (no gap): a glass
             # railing on it, a window shown above — not an opening here
