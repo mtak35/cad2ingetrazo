@@ -294,21 +294,29 @@ def _grille_faces(w, o, z0):
     W_, H_ = s1 - s0, zt - zb
     if W_ < 0.2 or H_ < 0.2:
         return []
-    panel = box(0, 0, W_, H_)
     rim = 0.04
     pitch, half = 0.16, 0.055
-    holes = []
-    nx, ny = int((W_ - 2 * rim) / pitch), int((H_ - 2 * rim) / pitch)
-    x0 = (W_ - nx * pitch) / 2 + pitch / 2
-    y0 = (H_ - ny * pitch) / 2 + pitch / 2
-    for i in range(nx):
-        for j in range(ny):
-            cx, cy = x0 + i * pitch, y0 + j * pitch
-            holes.append(Polygon([(cx - half, cy), (cx, cy - half),
-                                  (cx + half, cy), (cx, cy + half)]))
-    if holes:
-        panel = panel.difference(unary_union(holes))
-    faces = PJ._prism(panel, 0.0, th, 0.0001)
+    # in panels at most ~1.2 m high (the jali's own frames): each face keeps
+    # a few dozen holes — a tall window's in one face would take seconds to
+    # draw every time the model changes
+    k_ = max(1, int(math.ceil(H_ / 1.2)))
+    hh = H_ / k_
+    faces = []
+    for r_ in range(k_):
+        yb = r_ * hh
+        panel = box(0, yb, W_, yb + hh)
+        holes = []
+        nx, ny = int((W_ - 2 * rim) / pitch), int((hh - 2 * rim) / pitch)
+        x0 = (W_ - nx * pitch) / 2 + pitch / 2
+        y0 = yb + (hh - ny * pitch) / 2 + pitch / 2
+        for i in range(nx):
+            for j in range(ny):
+                cx, cy = x0 + i * pitch, y0 + j * pitch
+                holes.append(Polygon([(cx - half, cy), (cx, cy - half),
+                                      (cx + half, cy), (cx, cy + half)]))
+        if holes:
+            panel = panel.difference(unary_union(holes))
+        faces += PJ._prism(panel, 0.0, th, 0.0001)
     out = []
     for f in faces:
         loop = [(a[0] + u[0] * (s0 + x) + n[0] * (off + z - th / 2),
