@@ -53,7 +53,14 @@ FLOORS = [("Basement 1", "basement", -3364, 13 * FT),
 d = P.doc()
 a = d["arch"]
 if a["walls"] or a["structure"]:
-    raise SystemExit("The model is not empty: open a new model (File > New) first")
+    ours = any("MASJID" in str((h or {}).get("file", "")).upper()
+               for h in d.get("imports", {}).values() if isinstance(h, dict))
+    if not ours:
+        raise SystemExit("The model is not empty: open a new model (File > New) first")
+    keep = dict(d["settings"])
+    d = PJ.empty()                 # the masjid made before: made again
+    d["settings"].update(keep)
+    a = d["arch"]
 lv = [{"name": n, "kind": k, "height": h, "id": ""} for n, k, dx, h in FLOORS]
 lv[1]["id"] = next((l["id"] for l in a["levels"] if l.get("kind") == "ground"), "lv0")
 a["levels"] = M.fix_levels(lv)

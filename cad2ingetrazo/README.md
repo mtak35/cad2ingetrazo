@@ -480,6 +480,11 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Rows of small arched openings in the selected walls** (section 5): a clerestory / attic band, in groups, with CNC grilles.
 - The roof level's parapet follows the building's main body when its outline pinches.
 
-## 3.23.1
-- **CNC grilles (jali) in tall openings** are made in panels about 1.2 m high, each with its own frame. A 35-ft jali window used to be one face with hundreds of holes, which made IngeTrazo redraw slowly every time the model changed.
-- **Example:** `examples/court_masjid` builds a mosque from a multi-floor DWG (five plans laid out side by side, aligned by their offsets). It then shapes the building as its elevations draw it: the façade in one wall from ground to the attic, tall pointed jali windows placed where the elevations put them, an arcade on each row of paired round columns (portico and riwaqs), attic bands with groups of small arches, chhatris from the roof plan's circles, a dome on its stepped block, and minarets on the stair towers.
+## 3.23.2
+- **A dome's base block and its tiers** turn with the building (`rot`), no longer square to the world axes.
+- **Court Masjid example**, checked against the CAD's own elevations laid over the model:
+  - the long sides' end-bay windows are placed from the riwaq's ends;
+  - the riwaqs' open ends are closed on the outer face, as the elevations draw them;
+  - the roof plan's glazing on the attic goes;
+  - the dome stands over the middle of the riwaqs;
+  - a masjid built before is replaced when the build runs again.

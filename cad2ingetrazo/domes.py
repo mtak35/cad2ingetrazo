@@ -164,18 +164,22 @@ def build(dome, z_base, hi=False):
         from shapely.geometry import box as _box
 
         from . import project as PJ_
+        from shapely import affinity as _af
+        rot_ = float(dome.get("rot", 0.0) or 0.0)
+
+        def _sq(w_):                  # the block / a tier, turned to the building
+            b_ = _box(cx - w_ / 2, cy - w_ / 2, cx + w_ / 2, cy + w_ / 2)
+            return _af.rotate(b_, rot_, origin=(cx, cy)) if rot_ else b_
         bw = 2 * R * float(dome.get("base_w", 1.45) or 1.45)
         if base_h > 0.01:
             parts.append(("base", [dict(f, color=trim) for f in PJ_._prism(
-                _box(cx - bw / 2, cy - bw / 2, cx + bw / 2, cy + bw / 2),
-                z, z + base_h, 1e-5)], trim))
+                _sq(bw), z, z + base_h, 1e-5)], trim))
             z += base_h
         sh = float(dome.get("step_h", 0.45) or 0.45)
         for i in range(nst):
             w_ = bw - (i + 1) * (bw - 2.05 * R) / max(nst, 1)
             parts.append(("tier", [dict(f, color=trim) for f in PJ_._prism(
-                _box(cx - w_ / 2, cy - w_ / 2, cx + w_ / 2, cy + w_ / 2),
-                z, z + sh, 1e-5)], trim))
+                _sq(w_), z, z + sh, 1e-5)], trim))
             z += sh
     drum = max(float(dome.get("drum", 0.0) or 0.0), 0.0)
     if drum > 0.01:                          # the drum, a band round its top
@@ -257,6 +261,7 @@ def load(raw) -> list:
                                           0.05), 3.0),
                         "base_w": min(max(float(d.get("base_w") or 1.45),
                                           1.0), 3.0),
+                        "rot": float(d.get("rot") or 0.0) % 360.0,
                         "color": d.get("color") if d.get("color") in COLOR
                         else "white"})
         except (KeyError, TypeError, ValueError):

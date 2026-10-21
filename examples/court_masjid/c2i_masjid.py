@@ -207,6 +207,37 @@ for key, row in rows.items():
     arc.append((key, len(row), why or "ok"))
 rep["arcades"] = arc
 
+# the riwaqs' ends closed on the outer face (E-02 / E-04 draw a solid pier
+# from the last arch to the end bay): a wall from each arcade end to the
+# nearest facade wall end
+fill = []
+for w in [w for w in arch["walls"] if str(w.get("name", "")).startswith("Arcade")]:
+    (ua, va), (ub, vb) = _uv(*w["a"]), _uv(*w["b"])
+    if abs(ub - ua) < abs(vb - va):
+        continue                                   # the portico
+    for e_ in (w["a"], w["b"]):
+        best = None
+        ue, ve = _uv(*e_)
+        out_u = 1 if ue > (ua + ub) / 2 else -1
+        for f in fac:
+            for p_ in (f["a"], f["b"]):
+                dd = math.dist(e_, p_)
+                up, vp = _uv(*p_)
+                if (up - ue) * out_u < 0.3 or abs(vp) < abs(ve) - 0.25:
+                    continue                       # behind the arcade / inside
+                if dd < 1.8 and (best is None or dd < best[0]):
+                    best = (dd, p_)
+        if best is not None:
+            fill.append({"kind": "line", "a": list(e_), "b": list(best[1]),
+                         "t": 0.3, "align": "centre", "side": 1,
+                         "height": round(40 * FT, 4), "base": 0.0, "level": gid})
+if fill:
+    made_ = M.new_walls(arch["walls"], fill)
+    for k_, x in enumerate(made_, 1):
+        x["name"] = "Riwaq end " + str(k_)
+    arch["walls"] += made_
+rep["riwaq_ends"] = len(fill)
+
 # the facade's openings as the elevations draw them (distances from each
 # end of a face, ft): the plan's windows on the facade give way to them
 E_FRONT = [5.1, 16.5]                 # E-01: two tall windows each side
@@ -293,8 +324,17 @@ for side, lst in (("front", E_FRONT), ("rear", E_REAR)):
         for s_m in (VMIN + e_ * FT, VMAX - e_ * FT):
             ok = _place(side, s_m, _win(4.0, TALL_H))
             put[side if ok else "missed"] += 1
+# the long sides' end bays: one window each, 5'-0" (front) and 5'-6" (rear)
+# from the riwaq's ends (E-02 / E-04 in the CAD)
+ARC_U = {}
+for w in arch["walls"]:
+    if str(w.get("name", "")).startswith("Arcade"):
+        (ua, va), (ub, vb) = _uv(*w["a"]), _uv(*w["b"])
+        if abs(ub - ua) > abs(vb - va):
+            ARC_U["left" if (va + vb) / 2 > 0 else "right"] = (min(ua, ub), max(ua, ub))
 for side in ("left", "right"):
-    for s_m in (UMIN + E_SIDE[0] * FT, UMAX - E_SIDE[0] * FT):
+    lo_, hi_ = ARC_U.get(side, (UMIN + 3.2, UMAX - 3.2))
+    for s_m in (hi_ + 5.0 * FT, lo_ - 5.5 * FT):
         ok = _place(side, s_m, _win(4.0, TALL_H))
         put[side if ok else "missed"] += 1
 # E-03: the qibla wall's portal, 8'-10" wide, its pointed arch at 22'-6"
@@ -334,6 +374,13 @@ arch["openings"] += M.new_openings(arch["openings"], okn)
 rep["attic_windows"] = len(okn)
 for w in fac:
     w.pop("_side", None)
+
+# the roof plan's glazing (the tall windows' heads, drawn on the attic) goes:
+# the facade's windows carry their own heads
+if RF is not None:
+    rfw = {w["id"] for w in arch["walls"] if w["level"] == RF["id"]}
+    arch["openings"] = [o for o in arch["openings"] if not (
+        o["wall"] in rfw and o["kind"] == "window" and float(o["w"]) > 0.6)]
 
 # the attic band over the arcades (+36'-0" → +44'-6"): the roof plan's wall
 # on each arcade's line (made when the plan has none), with groups of three
@@ -443,10 +490,18 @@ if RF is not None:
     rr = SP.of_level(arch, RF["id"])
     st_ = next((r for r in rr if "STORE" in str(r["name"]).upper()), None)
     c = st_["poly"].centroid if st_ is not None else hall["poly"].centroid
-    DM.new(d, RF["id"], c.x, c.y, 13.75 * FT, "onion", 11.5 / 13.75, 0.0,
+    cx_, cy_ = c.x, c.y
+    if "left" in ARC_U and "right" in ARC_U:   # E-02 / E-04: over the riwaqs' middle
+        um = (sum(ARC_U["left"]) + sum(ARC_U["right"])) / 4
+        vm = (VMIN + VMAX) / 2
+        cx_ = hc.x + um * fx - vm * fy
+        cy_ = hc.y + um * fy + vm * fx
+    DM.new(d, RF["id"], cx_, cy_, 13.75 * FT, "onion", 11.5 / 13.75, 0.0,
            True, "white")
     d["domes"][-1].update(base_h=round(9 * FT, 4), steps=3,
-                          step_h=round(1.5 * FT, 4), base=0.0)
+                          step_h=round(1.5 * FT, 4), base=0.0,
+                          rot=round(wang % 90.0, 2))
+    c = Point(cx_, cy_)
     rep["dome"] = (round(c.x, 2), round(c.y, 2))
 try:
     rep["stairs"] = ST.auto(d)
