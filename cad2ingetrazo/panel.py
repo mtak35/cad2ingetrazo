@@ -183,7 +183,11 @@ FIELDS = {
                 ("arch", "Arch shape (head: arch)", "choice",
                  ("semi", "segmental", "elliptical", "pointed", "ogee",
                   "horseshoe", "multifoil", "trefoil", "tudor")),
-                ("grille", "Grille in it", "choice", ("none", "cnc")),
+                ("grille", "CNC jali in it (pattern)", "choice",
+                 ("none", "cnc", "cnc_square", "cnc_round", "cnc_hex",
+                  "cnc_star", "cnc_lattice")),
+                ("grille_side", "Jali fixed on", "choice",
+                 ("exterior", "centre", "interior")),
                 ("ring", "Arch voussoirs", "choice",
                  ("none", "plain", "ablaq")),
                 ("frame", "Frame", "choice",
@@ -315,7 +319,15 @@ CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({k: lab for k, lab, _r in _S_PT.ARCHES})
-CHOICE_LABELS.update({"cnc": "CNC grille (jali)", "none": "None",
+CHOICE_LABELS.update({"cnc": "CNC jali — diamonds", "none": "None",
+                      "cnc_square": "CNC jali — squares",
+                      "cnc_round": "CNC jali — round holes",
+                      "cnc_hex": "CNC jali — hexagons",
+                      "cnc_star": "CNC jali — 8-point stars",
+                      "cnc_lattice": "CNC jali — basket lattice",
+                      "exterior": "Outer face of the wall",
+                      "centre": "Middle of the wall",
+                      "interior": "Inner face of the wall",
                       "ablaq": "Ablaq (dark / light stones)",
                       "plain": "Plain band"})
 CHOICE_LABELS.update({"slab": "Attached to the slab",
@@ -2898,12 +2910,20 @@ class Panel(QWidget):
             ops = [o for o in doc["arch"]["openings"]
                    if o["wall"] in walls and o["kind"] == "void"
                    and not o.get("grille")]
+        elif which == "level":
+            lid, _lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            walls = {w["id"] for w in doc["arch"]["walls"]
+                     if w["level"] == lid}
+            ops = [o for o in doc["arch"]["openings"] if o["wall"] in walls]
         else:
-            ids = {i for k, i in self._selected_all() if k == "opening"}
-            ops = [o for o in doc["arch"]["openings"] if o["id"] in ids]
+            ops = self._sel_openings(doc)
             if not ops:
-                self.flash("Select openings first (click a door / window / "
-                           "opening in the model; Shift+click for more)")
+                self.flash("Select openings or walls first (click a door / "
+                           "window / opening / wall in the model; "
+                           "Shift+click for more)")
                 return
         n = 0
         for o in ops:
@@ -2924,6 +2944,55 @@ class Panel(QWidget):
         lab = dict((k, l_) for k, l_, _r in S_.ARCHES).get(sty, sty)
         self.commit(doc, f"{n} opening(s): " + (
             "flat heads" if which == "flat" else f"arched — {lab}"))
+
+    def _sel_openings(self, doc):
+        """The selected openings, and every opening of the selected walls
+        (of ``doc``, the copy being changed)."""
+        sel = self._selected_all()
+        ids = {i for k, i in sel if k == "opening"}
+        wids = {i for k, i in sel if k == "wall"}
+        return [o for o in doc["arch"]["openings"]
+                if o["id"] in ids or o["wall"] in wids]
+
+    def _jali_openings(self, which):
+        """A CNC jali of the pattern picked (fixed on the side picked) in
+        the selected openings / the selected walls' windows — or on every
+        window of the level; «none» takes them out."""
+        doc = self.doc()
+        pat = self.o_jali.currentData() or "cnc"
+        side = self.o_jali_side.currentData() or "exterior"
+        doc["settings"]["jali_style"] = pat
+        doc["settings"]["jali_side"] = side
+        if which == "level":
+            lid, _lv = self.level()
+            if not lid:
+                self.flash("Pick a level at the top first")
+                return
+            walls = {w["id"] for w in doc["arch"]["walls"]
+                     if w["level"] == lid}
+            ops = [o for o in doc["arch"]["openings"]
+                   if o["wall"] in walls and o.get("grille")]
+        else:
+            ops = self._sel_openings(doc)
+            if not ops:
+                self.flash("Select openings or walls first")
+                return
+        n = 0
+        for o in ops:
+            if which == "none":
+                if o.pop("grille", None):
+                    o.pop("grille_side", None)
+                    n += 1
+                continue
+            if o["kind"] == "door":       # a door keeps its leaf
+                continue
+            o["grille"] = pat
+            o["grille_side"] = side
+            n += 1
+        self.commit(doc, f"{n} opening(s): " + (
+            "no jali" if which == "none" else
+            f"jali — {CHOICE_LABELS.get(pat, pat)}, "
+            f"{CHOICE_LABELS.get(side, side).lower()}"))
 
     def _openings_part(self):
         box, body = _fold("5  Openings", "openings", False)
@@ -3002,9 +3071,39 @@ class Panel(QWidget):
                       "Every opening of the level picked at the top with no "
                       "door and no window: an arched head of the shape "
                       "above"))
+        f.addRow(_btn("Arch every opening of this level (doors, windows "
+                      "too)", lambda: self._arch_openings("level"),
+                      "Every door, window and opening of the level picked "
+                      "at the top: the arch shape and voussoirs above"))
         f.addRow(_btn("Flat heads again (selected)",
                       lambda: self._arch_openings("flat"),
-                      "The selected openings back to a flat head"))
+                      "The selected openings (or the selected walls' "
+                      "openings) back to a flat head"))
+        self.o_jali = QComboBox()
+        for k in ("cnc", "cnc_square", "cnc_round", "cnc_hex", "cnc_star",
+                  "cnc_lattice"):
+            self.o_jali.addItem(CHOICE_LABELS.get(k, k), k)
+        self.o_jali.setToolTip("The CNC-cut pattern of the jali screens")
+        f.addRow("CNC jali pattern", self.o_jali)
+        self.o_jali_side = QComboBox()
+        for k in ("exterior", "centre", "interior"):
+            self.o_jali_side.addItem(CHOICE_LABELS.get(k, k), k)
+        self.o_jali_side.setToolTip("Where the jali is fixed in the wall's "
+                                    "depth — by default on the outer face, "
+                                    "outside the window's glass")
+        f.addRow("Jali fixed on", self.o_jali_side)
+        f.addRow(_btn("Jali in the selected openings / walls",
+                      lambda: self._jali_openings("selected"),
+                      "The selected windows / openings (or every window of "
+                      "the selected walls): a CNC jali of this pattern, "
+                      "fixed on the side above"))
+        f.addRow(_btn("Restyle every jali of this level",
+                      lambda: self._jali_openings("level"),
+                      "Every jali already on the level picked at the top: "
+                      "this pattern and side"))
+        f.addRow(_btn("No jali (selected)",
+                      lambda: self._jali_openings("none"),
+                      "The jali taken out of the selected openings / walls"))
         f.addRow(_btn("Arcade over the selected columns",
                       self._arcade,
                       "A wall standing on the columns selected (a row of "
@@ -5594,6 +5693,11 @@ class Panel(QWidget):
         if sel[0] == "stair":           # riser / tread / steps re-laid
             from . import stairs as ST_
             new = ST_.redesign(rec, new)
+        if sel[0] == "opening" and new.get("head") != "arch" and (
+                new.get("arch") != rec.get("arch")
+                or (new.get("ring") not in (None, "none")
+                    and new.get("ring") != rec.get("ring"))):
+            new["head"] = "arch"        # an arch shape picked: arched now
         if sel[0] == "opening":
             PJ.fit_head(new)            # a transom / arch: a full leaf under
         why = PJ.check_record(doc, sel[0], new) if sel[0] != "opening" else \
@@ -7946,6 +8050,8 @@ class Panel(QWidget):
                 "door_head": self.o_dhead.currentData(),
                 "win_head": self.o_whead.currentData(),
                 "arch_style": self.o_arch.currentData(),
+                "jali_style": self.o_jali.currentData(),
+                "jali_side": self.o_jali_side.currentData(),
                 "void_arch": self.o_void_arch.isChecked(),
                 "door_frame": self.o_dframe.currentData(),
                 "win_frame": self.o_wframe.currentData(),
@@ -7975,6 +8081,8 @@ class Panel(QWidget):
                                (self.o_dhead, "door_head", "flat"),
                                (self.o_whead, "win_head", "flat"),
                                (self.o_arch, "arch_style", "semi"),
+                               (self.o_jali, "jali_style", "cnc"),
+                               (self.o_jali_side, "jali_side", "exterior"),
                                (self.o_dframe, "door_frame", "auto"),
                                (self.o_wframe, "win_frame", "auto")):
             cb_.setCurrentIndex(max(cb_.findData(str(s.value(key_, dv_))), 0))

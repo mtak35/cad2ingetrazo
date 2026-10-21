@@ -1040,6 +1040,30 @@ def as_parapet_walls(walls, h) -> int:
     return join_wall_ends(walls)
 
 
+def _square_cornered(g, tol=12.0) -> bool:
+    """A polygon of square corners only (a box, an L, a T…) — no arrow
+    head, no triangle."""
+    try:
+        sp = g.simplify(0.01)
+        cs = list(sp.exterior.coords)[:-1]
+    except Exception:  # noqa: BLE001
+        return False
+    if len(cs) < 4:
+        return False
+    for i in range(len(cs)):
+        a, b, c = cs[i - 1], cs[i], cs[(i + 1) % len(cs)]
+        v1 = (a[0] - b[0], a[1] - b[1])
+        v2 = (c[0] - b[0], c[1] - b[1])
+        n1, n2 = math.hypot(*v1), math.hypot(*v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue
+        cosv = (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, cosv))))
+        if abs(ang - 90.0) > tol and ang < 180.0 - tol:
+            return False
+    return True
+
+
 def rcc_from_fills(arch, lid, pl) -> dict:
     """The CAD's hatches and solid fills in the walls (RCC work, as plans
     show it): a wall mostly covered by one is a structural RCC wall; a
@@ -1053,12 +1077,22 @@ def rcc_from_fills(arch, lid, pl) -> dict:
     from . import slabedges as SE
     out = {"walls": 0, "new_walls": 0, "columns": 0}
     fills = []
+    skip_ = re.compile(r"ARROW|CAR|DOOR|STAIR|RAMP|TEXT|DIM|FURN|SAF|PARK|"
+                       r"SECTION|GRID|TREE|PLANT|LAND|SYMB|NORTH|TILE|LOGO",
+                       re.I)
     for f in (pl or {}).get("fills") or []:
+        if skip_.search(str(f.get("layer", ""))):
+            continue                     # an arrow head, a car, a door leaf
         try:
             g = Polygon(f["pts"]).buffer(0)
         except Exception:  # noqa: BLE001
             continue
         if g.is_empty or g.area < 0.01 or g.area > 15.0:
+            continue
+        # a triangle / an arrow head (well short of its box): not RCC —
+        # an L / T of square corners (a corner column) is
+        if g.area < 0.75 * g.minimum_rotated_rectangle.area and \
+                not _square_cornered(g):
             continue
         fills.append(g)
     if not fills:
@@ -1099,9 +1133,8 @@ def rcc_from_fills(arch, lid, pl) -> dict:
     for comp in getattr(FU, "geoms", [FU]):
         if comp.geom_type != "Polygon" or comp.area < 0.02:
             continue
-        free = comp.difference(WU.buffer(0.02)).difference(CUu.buffer(0.02))
-        if free.area < 0.6 * comp.area:
-            continue                     # on a wall / column already
+        if CUu.intersection(comp).area > 0.4 * comp.area:
+            continue                     # a column there already (marked)
         r = comp.minimum_rotated_rectangle
         cs = list(r.exterior.coords)[:4]
         e1 = math.dist(cs[0], cs[1])
@@ -1109,7 +1142,36 @@ def rcc_from_fills(arch, lid, pl) -> dict:
         lo, hi = min(e1, e2), max(e1, e2)
         if lo < 0.08:
             continue
-        if hi <= 1.5 and hi / lo <= 3.0:            # a column
+        on_wall = WU.buffer(0.03).intersection(comp).area > 0.4 * comp.area
+        near_wall = WU.distance(comp) < 0.05 if not WU.is_empty else False
+        if comp.area < 0.85 * r.area and hi <= 2.4 and \
+                _square_cornered(comp):
+            # an L / T hatched at a corner: a column of that shape (the
+            # walls then stop at its faces)
+            c_ = comp.centroid
+            sp = comp.simplify(0.01)
+            pts = [[round(x - c_.x, 4), round(y - c_.y, 4)]
+                   for x, y in list(sp.exterior.coords)[:-1]]
+            xs = [q[0] for q in pts]
+            ys = [q[1] for q in pts]
+            new_cols.append({"type": "column", "level": lid,
+                             "x": round(c_.x, 4), "y": round(c_.y, 4),
+                             "shape": "poly",
+                             "w": round(max(xs) - min(xs), 3),
+                             "d": round(max(ys) - min(ys), 3),
+                             "angle": 0.0, "anchor": "centre", "base": 0.0,
+                             "pts": pts, "height": "level", "fit": False,
+                             "rcc": True})
+            continue
+        squat = hi <= 1.5 and hi / lo <= 3.0
+        if not (squat or not on_wall):
+            continue                     # a long fill along a wall: the
+            #                              wall marked RCC above
+        if not near_wall and not on_wall:
+            continue                     # loose in a room / outside: a
+            #                              symbol, not structure
+        if squat:                        # a column (in the wall's line too:
+            #                              the wall breaks at its faces)
             a, b = (cs[0], cs[1]) if e1 >= e2 else (cs[1], cs[2])
             ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
             c_ = r.centroid
@@ -2904,6 +2966,18 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.walls_at_columns")
+    if st.get("close_gaps", True):   # ends left short (of a column face,
+        try:                          # a wall): carried into it, cleanly
+            from . import bridges as BR
+            cg2 = BR.close_gaps(arch, lid, pl,
+                                lambda n: _match(n, P["walls"]) or
+                                _match(n, P["columns"]), st,
+                                only_extend=True)
+            cg2.pop("_new", None)
+            rep["ends_met"] = cg2.get("extended", 0)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.close_gaps ends")
 
     if rep.get("corner_windows"):    # the slab carried over them too
         try:
@@ -9657,6 +9731,8 @@ def openings_along(doc, wall_ids, w=0.46, h=1.4, sill=0.5, pitch=0.75,
     clerestory, an attic band): groups of ``group`` at ``pitch``, the
     groups ``gap`` apart, centred on each wall. How many made."""
     arch = doc["arch"]
+    if grille == "cnc":                  # the jali pattern picked
+        grille = doc["settings"].get("jali_style", "cnc") or "cnc"
     n = 0
     for wl in arch["walls"]:
         if wl["id"] not in set(wall_ids) or wl.get("kind", "line") != "line":

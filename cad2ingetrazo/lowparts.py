@@ -96,7 +96,7 @@ def analyze(doc, lid, pl, is_line) -> dict:
             p0, p1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
             if min(p1, s1) - max(p0, s0) > 0.4 * (s1 - s0):
                 if not o.get("grille"):
-                    o["grille"] = "cnc"
+                    o["grille"] = st.get("jali_style", "cnc")
                     rep["grilles"] += 1
                 hit = True
         if hit or L < 0.45:
@@ -112,7 +112,8 @@ def analyze(doc, lid, pl, is_line) -> dict:
                       "pos": round((s0 + s1) / 2, 4), "w": round(s1 - s0, 3),
                       "h": float(st.get("win_h", 1.2)),
                       "sill": float(st.get("sill", 0.9)), "swing": "left",
-                      "face": 1, "style": "", "grille": "cnc"})
+                      "face": 1, "style": "",
+                      "grille": st.get("jali_style", "cnc")})
         rep["grilles"] += 1
     if new_o:
         arch["openings"] += M.new_openings(arch["openings"], new_o)
@@ -225,28 +226,35 @@ def analyze(doc, lid, pl, is_line) -> dict:
     except Exception:  # noqa: BLE001
         notes = []
     out_p = []
+    try:
+        from shapely.ops import unary_union as _uu
+        allb = _uu([q for q in plats if not q.is_empty]).bounds
+    except Exception:  # noqa: BLE001
+        allb = None
     for q in plats:
         for pg in getattr(q, "geoms", [q]):
             if pg.geom_type != "Polygon" or pg.area < 0.05:
                 continue
+            if pg.area < 0.5:
+                continue                 # a tile, a jali's box: no floor
+            if allb is not None and pg.area > 30.0:
+                b_ = pg.bounds
+                edge = sum(1 for k_ in range(4)
+                           if abs(b_[k_] - allb[k_]) < 0.3)
+                if edge >= 3:
+                    rep["site_skipped"] = rep.get("site_skipped", 0) + 1
+                    continue             # the plot's own open ground round
+                                         # the building: the site, no floor
             here = [(x, y, v) for x, y, v in notes
                     if pg.contains(Point(x, y))]
-            parts = [(pg, None)]
-            if len({round(v, 3) for _x, _y, v in here}) == 1:
-                parts = [(pg, here[0][2])]
-            elif here:
-                try:
-                    cells = voronoi_diagram(
-                        MultiPoint([(x, y) for x, y, _v in here]),
-                        envelope=pg.envelope.buffer(5.0))
-                    parts = []
-                    for cell in cells.geoms:
-                        vs = [v for x, y, v in here
-                              if cell.contains(Point(x, y))]
-                        if vs:
-                            parts.append((cell.intersection(pg), vs[0]))
-                except Exception:  # noqa: BLE001
-                    parts = [(pg, here[0][2])]
+            if not here:
+                continue                 # no level written in it: none
+            # one area, one level: the level written in it most often (the
+            # lowest of those alike) — no line drawn, no level split
+            from collections import Counter as _C
+            cnt = _C(round(v, 3) for _x, _y, v in here)
+            v0 = min(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            parts = [(pg, v0)]
             for part, v in parts:
                 for g in getattr(part, "geoms", [part]):
                     if g.geom_type != "Polygon" or g.area < 0.05:
@@ -265,7 +273,77 @@ def analyze(doc, lid, pl, is_line) -> dict:
 
 
 # ---- building ---------------------------------------------------------------------
-def _grille_faces(w, o, z0):
+JALI_STYLES = ("cnc", "cnc_square", "cnc_round", "cnc_hex", "cnc_star",
+               "cnc_lattice")
+
+
+def _jali_holes(style, W_, yb, hh, rim):
+    """The cut-outs of one jali panel [0, W_] × [yb, yb + hh] in a pattern:
+    cnc (diamonds), cnc_square, cnc_round, cnc_hex (staggered), cnc_star
+    (8-point stars) or cnc_lattice (basket-weave slots)."""
+    import math as _m
+
+    from shapely.geometry import Polygon
+    from shapely import affinity
+
+    def ngon(cx, cy, r, k, rot=0.0):
+        return Polygon([(cx + r * _m.cos(rot + 2 * _m.pi * i / k),
+                         cy + r * _m.sin(rot + 2 * _m.pi * i / k))
+                        for i in range(k)])
+
+    if style == "cnc_hex":
+        px, py, stag = 0.15, 0.13, True
+    elif style == "cnc_star":
+        px, py, stag = 0.19, 0.19, False
+    elif style == "cnc_lattice":
+        px, py, stag = 0.16, 0.16, False
+    elif style == "cnc_square":
+        px, py, stag = 0.15, 0.15, False
+    elif style == "cnc_round":
+        px, py, stag = 0.15, 0.15, False
+    else:
+        px, py, stag = 0.16, 0.16, False
+    nx, ny = int((W_ - 2 * rim) / px), int((hh - 2 * rim) / py)
+    if nx < 1 or ny < 1:
+        return []
+    x0 = (W_ - nx * px) / 2 + px / 2
+    y0 = yb + (hh - ny * py) / 2 + py / 2
+    out = []
+    for j in range(ny):
+        sh = px / 2 if (stag and j % 2) else 0.0
+        for i in range(nx - (1 if sh else 0)):
+            cx, cy = x0 + i * px + sh, y0 + j * py
+            if style == "cnc_square":
+                h = 0.05
+                out.append(Polygon([(cx - h, cy - h), (cx + h, cy - h),
+                                    (cx + h, cy + h), (cx - h, cy + h)]))
+            elif style == "cnc_round":
+                out.append(ngon(cx, cy, 0.052, 14))
+            elif style == "cnc_hex":
+                out.append(ngon(cx, cy, 0.06, 6, _m.pi / 6))
+            elif style == "cnc_star":
+                sq = Polygon([(cx - 0.05, cy - 0.05), (cx + 0.05, cy - 0.05),
+                              (cx + 0.05, cy + 0.05), (cx - 0.05, cy + 0.05)])
+                out.append(sq.union(affinity.rotate(sq, 45, (cx, cy))))
+            elif style == "cnc_lattice":
+                if (i + j) % 2:
+                    out.append(Polygon([(cx - 0.06, cy - 0.018),
+                                        (cx + 0.06, cy - 0.018),
+                                        (cx + 0.06, cy + 0.018),
+                                        (cx - 0.06, cy + 0.018)]))
+                else:
+                    out.append(Polygon([(cx - 0.018, cy - 0.06),
+                                        (cx + 0.018, cy - 0.06),
+                                        (cx + 0.018, cy + 0.06),
+                                        (cx - 0.018, cy + 0.06)]))
+            else:
+                h = 0.055
+                out.append(Polygon([(cx - h, cy), (cx, cy - h),
+                                    (cx + h, cy), (cx, cy + h)]))
+    return out
+
+
+def _grille_faces(w, o, z0, out_sign=None):
     """A CNC grille (jali) panel filling the opening ``o`` of wall ``w``:
     a 30 mm panel cut with a diamond lattice, in the wall's middle — a
     window's on its outer side."""
@@ -284,13 +362,19 @@ def _grille_faces(w, o, z0):
     zt = zb + float(o["h"])
     th = 0.03
     off = 0.0
-    if o["kind"] == "window":           # beside the glass, inside the wall
-        off = -(t / 2 - th / 2 - 0.01) * (1 if o.get("face", 1) >= 0 else -1)
+    side = o.get("grille_side") or "exterior"
+    if out_sign is None:              # no rooms to tell: the face's back
+        out_sign = -(1 if o.get("face", 1) >= 0 else -1)
+    edge = t / 2 - th / 2 - 0.005     # flush with the wall's face
+    if side == "exterior":
+        off = edge * out_sign
+    elif side == "interior":
+        off = -edge * out_sign
     W_, H_ = s1 - s0, zt - zb
     if W_ < 0.2 or H_ < 0.2:
         return []
     rim = 0.04
-    pitch, half = 0.16, 0.055
+    sty = o.get("grille") if o.get("grille") in JALI_STYLES else "cnc"
     # in panels at most ~1.2 m high (the jali's own frames): each face keeps
     # a few dozen holes — a tall window's in one face would take seconds to
     # draw every time the model changes
@@ -300,15 +384,7 @@ def _grille_faces(w, o, z0):
     for r_ in range(k_):
         yb = r_ * hh
         panel = box(0, yb, W_, yb + hh)
-        holes = []
-        nx, ny = int((W_ - 2 * rim) / pitch), int((hh - 2 * rim) / pitch)
-        x0 = (W_ - nx * pitch) / 2 + pitch / 2
-        y0 = yb + (hh - ny * pitch) / 2 + pitch / 2
-        for i in range(nx):
-            for j in range(ny):
-                cx, cy = x0 + i * pitch, y0 + j * pitch
-                holes.append(Polygon([(cx - half, cy), (cx, cy - half),
-                                      (cx + half, cy), (cx, cy + half)]))
+        holes = _jali_holes(sty, W_, yb, hh, rim)
         if holes:
             panel = panel.difference(unary_union(holes))
         faces += PJ._prism(panel, 0.0, th, 0.0001)
@@ -324,6 +400,41 @@ def _grille_faces(w, o, z0):
         out.append({"loop": list(reversed(loop)),
                     "holes": [list(reversed(h)) for h in hs]})
     return out
+
+
+def _outward(arch, w, cache, Point):
+    """+1 / -1: the side of wall ``w`` (along its left normal) that faces
+    out of the building — the side with no room of its level; None when
+    both or neither side has one (an inner wall, an open plan)."""
+    lid = w["level"]
+    if lid not in cache:
+        from shapely.ops import unary_union
+        from .engine import spaces
+        try:
+            ps = [r["poly"] for r in spaces.of_level(arch, lid)]
+            cache[lid] = unary_union(ps).buffer(0.02) if ps else None
+        except Exception:  # noqa: BLE001
+            cache[lid] = None
+    U = cache[lid]
+    if U is None:
+        return None
+    a, b = w["a"], w["b"]
+    u = _u(a, b)
+    n = (-u[1], u[0])
+    d = float(w["t"]) / 2 + 0.2
+    ins = []
+    for f in (0.25, 0.5, 0.75):
+        mx = a[0] + (b[0] - a[0]) * f
+        my = a[1] + (b[1] - a[1]) * f
+        ins.append((U.contains(Point(mx + n[0] * d, my + n[1] * d)),
+                    U.contains(Point(mx - n[0] * d, my - n[1] * d))))
+    lp = sum(1 for x, _ in ins if x)
+    rp = sum(1 for _, y in ins if y)
+    if lp > rp:
+        return -1
+    if rp > lp:
+        return 1
+    return None
 
 
 def _ring_faces(w, o, z0):
@@ -432,11 +543,25 @@ def groups(doc):
             return g
         plats = []
         faces = []
+        # never over the steps (they climb from the paving to the doors)
+        steps_u = None
+        if lp.get("plats") and lv.get("kind") == "ground":
+            try:
+                from shapely.ops import unary_union as _uu
+                sp_ = [pg_ for _n, parts_ in PJ.platform_parts(doc)["steps"]
+                       for pg_, _t in parts_]
+                steps_u = _uu(sp_).buffer(0.03) if sp_ else None
+            except Exception:  # noqa: BLE001
+                steps_u = None
         for k, p in enumerate(lp.get("plats") or (), 1):
             try:
                 pg = Polygon(p["pts"], p.get("holes") or []).buffer(0)
             except Exception:  # noqa: BLE001
                 continue
+            if steps_u is not None:
+                pg = pg.difference(steps_u)
+                if pg.is_empty or pg.area < 0.3:
+                    continue
             c = pg.representative_point()
             z0 = under(c.x, c.y)
             top = elev[i] + p["v"] if p.get("v") is not None else z0 + hp
@@ -467,6 +592,7 @@ def groups(doc):
     walls = {w["id"]: w for w in arch["walls"]}
     lvi = {lv["id"]: i for i, lv in enumerate(arch["levels"])}
     by_lv = {}
+    rooms_of = {}
     for o in arch["openings"]:
         if not o.get("grille"):
             continue
@@ -475,7 +601,12 @@ def groups(doc):
             continue
         z0 = elev[lvi[w["level"]]] + float(w.get("base", 0.0) or 0.0)
         try:
-            by_lv.setdefault(w["level"], []).extend(_grille_faces(w, o, z0))
+            sg = _outward(arch, w, rooms_of, Point)
+        except Exception:  # noqa: BLE001
+            sg = None
+        try:
+            by_lv.setdefault(w["level"], []).extend(
+                _grille_faces(w, o, z0, sg))
         except Exception:  # noqa: BLE001
             continue
     rings = {}

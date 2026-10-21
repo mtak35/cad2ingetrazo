@@ -640,8 +640,13 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["shade_d"] = min(max(sd_, 0.1), 2.0)
         if o.get("hl"):              # the plan's hidden lines read for it
             rec["hl"] = 1
-        if o.get("grille") in ("cnc", "jali", "ms"):   # a grille in it
+        if o.get("grille") in ("cnc", "jali", "ms", "cnc_square",
+                               "cnc_round", "cnc_hex", "cnc_star",
+                               "cnc_lattice"):   # a grille in it
             rec["grille"] = o["grille"]
+            if o.get("grille_side") in ("exterior", "centre",
+                                          "interior"):
+                rec["grille_side"] = o["grille_side"]
         if o.get("arch") in ARCH_STYLES:     # the arch's shape
             rec["arch"] = o["arch"]
         if o.get("ring") in ("ablaq", "plain"):   # its voussoirs shown

@@ -452,7 +452,7 @@ def _op(kind, wid, pos, w, leaves, st):
 
 
 # ---- walls meeting ----------------------------------------------------------------
-def close_gaps(arch, lid, pl, is_solid, st) -> dict:
+def close_gaps(arch, lid, pl, is_solid, st, only_extend=False) -> dict:
     """Walls that stop short of one another closed up, as the plan means
     them: a free end facing another wall's free end on the same line —
     across a column, a pier, an arch opening — joined by a wall through
@@ -506,6 +506,8 @@ def close_gaps(arch, lid, pl, is_solid, st) -> dict:
     new_w, new_o = [], []
     # 1. two free ends on one line, facing: joined
     for i, (w, e, p, d) in enumerate(ends):
+        if only_extend:
+            break
         if (w["id"], e) in used:
             continue
         best = None
@@ -571,25 +573,87 @@ def close_gaps(arch, lid, pl, is_solid, st) -> dict:
     walls += new_w
     for w in new_w:
         polys[w["id"]] = poly(w)
-    # 2. a free end short of a wall ahead (≤ 0.6 m): carried into it
+    # 2. a free end short of a wall / column ahead: carried into it — up
+    # to 0.6 m, or up to 1.0 m where the plan's wall lines run on along
+    # both its faces (a piece of wall the reading missed)
+    cpolys = []
+    for c in arch["structure"]:
+        if c["type"] == "column" and c["level"] == lid:
+            try:
+                from shapely.geometry import Polygon as _Pg
+                cpolys.append(_Pg(S_.column_outline(c)).buffer(0))
+            except Exception:  # noqa: BLE001
+                continue
+    WL = unary_union(solid_l) if solid_l else None
+
+    def faced(p, d, t, L):
+        """The plan's lines along both faces of the gap ahead."""
+        if WL is None or L < 0.02:
+            return False
+        n_ = (-d[1], d[0])
+        for sg in (1, -1):
+            o_ = sg * (t / 2)
+            r_ = LineString([(p[0] + n_[0] * o_, p[1] + n_[1] * o_),
+                             (p[0] + n_[0] * o_ + d[0] * L,
+                              p[1] + n_[1] * o_ + d[1] * L)])
+            if r_.intersection(WL.buffer(0.03)).length < 0.8 * L:
+                return False
+        return True
     for w, e, p, d in free_ends():
         if (w["id"], e) in used:
             continue
-        ray = LineString([p, (p[0] + d[0] * 0.6, p[1] + d[1] * 0.6)])
+        if any(cp.buffer(0.01).contains(Point(p)) for cp in cpolys):
+            continue                     # in a column already
+        ray = LineString([p, (p[0] + d[0] * 1.0, p[1] + d[1] * 1.0)])
+        band = ray.buffer(float(w["t"]) * 0.45, cap_style=2)
         best = None
-        for k, pg in polys.items():
+        for k, pg in list(polys.items()) + [(None, cp) for cp in cpolys]:
             if k == w["id"]:
                 continue
             x = ray.intersection(pg)
+            side = False
             if x.is_empty:
-                continue
-            dist = Point(p).distance(x)
+                # the wall's band (not its centre line) running into it: a
+                # column / wall beside the end, met by the wall's face
+                x = band.intersection(pg)
+                if x.is_empty:
+                    continue
+                side = True
+            if side:
+                cs_ = []
+                for g_ in getattr(x, "geoms", [x]):
+                    if g_.geom_type == "Polygon":
+                        cs_ += list(g_.exterior.coords)
+                    else:
+                        cs_ += list(g_.coords)
+                dist = min((q[0] - p[0]) * d[0] + (q[1] - p[1]) * d[1]
+                           for q in cs_)
+                if dist > 0.3:
+                    continue
+            else:
+                dist = Point(p).distance(x)
             if best is None or dist < best[0]:
-                best = (dist, k)
+                best = (dist, k, side)
+        if best is None:
+            # a column beside the end, running on past it (a corner the
+            # plan turns round the column): the wall on, flush with the
+            # column's far face
+            for cp in cpolys:
+                if cp.distance(Point(p)) > 0.15:
+                    continue
+                ext = max((q[0] - p[0]) * d[0] + (q[1] - p[1]) * d[1]
+                          for q in cp.exterior.coords)
+                if 0.005 < ext <= 0.4 and (best is None or ext < best[0]):
+                    best = (ext - 0.01, None, True)
         if best is None or best[0] < 0.005:
             continue
-        o = next(x for x in walls if x["id"] == best[1])
-        go = best[0] + float(o["t"]) / 2
+        if best[0] > 0.6 and not faced(p, d, float(w["t"]), best[0]):
+            continue
+        if best[1] is None or best[2]:   # a column / a wall's side: to it
+            go = best[0] + 0.01
+        else:
+            o = next(x for x in walls if x["id"] == best[1])
+            go = best[0] + float(o["t"]) / 2
         old = list(w[e])
         w[e] = [round(p[0] + d[0] * go, 4), round(p[1] + d[1] * go, 4)]
         if e == "a":                     # openings measured from «a»

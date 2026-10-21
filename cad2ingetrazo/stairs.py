@@ -342,6 +342,91 @@ def extend_landings(st, room, reach=1.5) -> int:
     return n
 
 
+def u_stack(flights, n, mx=MAX_FLIGHT, room=None):
+    """A U stair the plan draws (two flights side by side, running
+    opposite ways) holding fewer risers than the storey needs: the flights
+    go on turning in the same well — up, back, up again… over one another —
+    each no longer than the flight drawn there (nor ``mx`` risers), a
+    landing at each turn. None when the plan is not such a U (or it holds
+    the storey already). (flights, landings)."""
+    fs = [f for f in flights if f.get("lines")]
+    if len(fs) != 2:
+        return None
+    d0, d1 = fs[0]["d"], fs[1]["d"]
+    if d0[0] * d1[0] + d0[1] * d1[1] > -0.9:
+        return None                       # not antiparallel: not a U
+    have = sum(len(f["lines"]) for f in fs)
+    if room is None and n <= have and all(len(f["lines"]) <= mx
+                                          for f in fs):
+        return None
+
+    def fit(f, from_end):
+        """How many of the flight's risers lie in the stair hall —
+        counted from its end (an up flight) or its start (a return)."""
+        ls = f["lines"][::-1] if from_end else f["lines"]
+        if room is None:
+            return len(ls)
+        from shapely.geometry import LineString
+        R = room.buffer(0.05)
+        c = 0
+        for a, b in ls:
+            if not R.contains(LineString([a, b])):
+                break
+            c += 1
+        return c
+    caps = [min(fit(fs[0], True), mx), min(fit(fs[1], False), mx)]
+    if room is not None and n <= caps[0] + caps[1] and \
+            len(fs[0]["lines"]) <= caps[0] and \
+            len(fs[1]["lines"]) <= caps[1]:
+        return None                     # it fits the hall as it is
+    if min(caps) < 2:
+        return None
+    k, tot = 0, 0
+    while tot < n:
+        tot += caps[k % 2]
+        k += 1
+        if k > 12:
+            return None
+    # risers shared out over the k flights, as their room allows
+    want = [caps[i % 2] for i in range(k)]
+    # as even as the hall lets them be (the first ones a riser more)
+    sizes = [min(n // k + (1 if i < n % k else 0), want[i])
+             for i in range(k)]
+    while sum(sizes) < n:
+        js = [i for i in range(k) if sizes[i] < want[i]]
+        if not js:
+            return None
+        j = min(js, key=lambda i: (sizes[i], i))
+        sizes[j] += 1
+    if sum(sizes) != n:
+        return None
+    out = []
+    for i, sz in enumerate(sizes):
+        T = fs[i % 2]
+        lines = [[list(a), list(b)] for a, b in T["lines"]]
+        # the up flight ends at the far landing (its last risers kept);
+        # the return flight starts at it (its first risers kept)
+        chunk = lines[-sz:] if i % 2 == 0 else lines[:sz]
+        out.append(dict(T, lines=chunk))
+    lands = []
+    count = 0
+    for i, f in enumerate(out[:-1]):
+        count += len(f["lines"])
+        nx = out[i + 1]
+        la, lb = f["lines"][-1]
+        fa, fb = nx["lines"][0]
+        d = f["d"]
+        depth = float(f.get("w", 1.0))
+        g = float(f.get("g", 0.28))
+        la2 = (la[0] + d[0] * g, la[1] + d[1] * g)
+        lb2 = (lb[0] + d[0] * g, lb[1] + d[1] * g)
+        pts = [tuple(la2), tuple(lb2), tuple(fa), tuple(fb)]
+        pts += [(p[0] + d[0] * depth, p[1] + d[1] * depth) for p in pts]
+        lands.append({"corners": [list(p) for p in _box_along(pts, d)],
+                      "after": count})
+    return out, lands
+
+
 def refit(r, H, n_need, mx=MAX_FLIGHT, stt0=None, flip=False) -> dict:
     """The stair ``r`` (the floor below's) made for a storey ``H`` high:
     ``n_need`` risers — the last flight lengthened (or shortened) as
@@ -476,7 +561,37 @@ def auto(doc, cad=None, flip=False) -> dict:
             have = sum(len(f["lines"]) for f in flights)
             n_use = have if have and H / have <= 0.2032 else n_need
             diag = flights[0].get("_diag") if flights else None
-            fl, lands = complete(flights, n_use, room)
+            mx_ = int(stt0.get("stair_max_flight", MAX_FLIGHT))
+            u_ = None
+            if stt0.get("stair_shape", "u") == "u" and not diag:
+                try:                 # a U drawn: more flights go on in it
+                    u_ = u_stack(flights, n_use, mx_)
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("stairs.u_stack")
+                    u_ = None
+            if u_ is not None:
+                fl, lands = u_
+            else:
+                fl, lands = complete(flights, n_use, room)
+                if stt0.get("stair_shape", "u") == "u" and \
+                        (room is not None and len(fl) == 2 or
+                         room is None and len(flights) == 2):
+                    # the flights run past the hall: they turn back and
+                    # forth in it instead — a U going on up over itself
+                    try:
+                        u_ = u_stack(fl, n_use, mx_, room)
+                        if u_ is None and room is None:
+                            # no hall found round it: the U the plan
+                            # draws, turning on over itself
+                            u_ = u_stack(flights, n_use, mx_)
+                    except Exception:  # noqa: BLE001
+                        from .host import log_error
+                        log_error("stairs.u_stack hall")
+                        u_ = None
+                    if u_ is not None:
+                        fl, lands = u_
+                        diag = None
             if diag:
                 try:                 # winders drawn on a turning landing
                     fl, lands = winders(fl, lands, diag)

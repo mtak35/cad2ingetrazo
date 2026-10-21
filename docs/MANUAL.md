@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.25)
+## 13. What's new since 3.11 (3.12 – 3.26)
 
 The full list, version by version, is in the README. In short:
 
@@ -493,6 +493,13 @@ The full list, version by version, is in the README. In short:
 - Floors stop where the plan and its level texts end.
 - Walls broken at the column faces, their corners joined cleanly; the LINE layer never read as a wall.
 - Hatched / filled walls taken as RCC structure; an X of hidden lines between columns is an (Islamic, pointed) arch.
+
+**3.26 — jali, arches, stairs, structure**
+- CNC jali in six patterns (diamonds, squares, round, hexagons, 8-point stars, lattice), fixed on the wall's outer face by default (or middle / inner): per opening in «Selected element», or for the selected openings / walls and a whole level in section 5.
+- Arch shape and voussoirs applied to the selected walls' openings, or to every opening of a level; an arch shape picked for an opening arches its head.
+- A U stair needing more risers than drawn turns back and forth inside its hall, a landing at each turn.
+- Square-cornered hatches (boxes, L, T) in walls become RCC columns of their shape; arrow heads never do.
+- Wall ends short of a column face or a wall are met; outside platforms only where a level text is written, never the plot's open ground; platforms cut round the entrance steps.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).
