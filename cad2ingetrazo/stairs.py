@@ -424,6 +424,18 @@ def u_stack(flights, n, mx=MAX_FLIGHT, room=None):
         pts += [(p[0] + d[0] * depth, p[1] + d[1] * depth) for p in pts]
         lands.append({"corners": [list(p) for p in _box_along(pts, d)],
                       "after": count})
+    # the arrival: a landing at the floor above, past the last riser
+    f = out[-1]
+    la, lb = f["lines"][-1]
+    d = f["d"]
+    depth = float(f.get("w", 1.0))
+    g = float(f.get("g", 0.28))
+    a2 = (la[0] + d[0] * g, la[1] + d[1] * g)
+    b2 = (lb[0] + d[0] * g, lb[1] + d[1] * g)
+    pts = [a2, b2, (a2[0] + d[0] * depth, a2[1] + d[1] * depth),
+           (b2[0] + d[0] * depth, b2[1] + d[1] * depth)]
+    lands.append({"corners": [list(p) for p in _box_along(pts, d)],
+                  "after": count + len(f["lines"]), "top": True})
     return out, lands
 
 

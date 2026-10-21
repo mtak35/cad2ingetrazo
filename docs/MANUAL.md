@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.26)
+## 13. What's new since 3.11 (3.12 – 3.26.1)
 
 The full list, version by version, is in the README. In short:
 
@@ -500,6 +500,12 @@ The full list, version by version, is in the README. In short:
 - A U stair needing more risers than drawn turns back and forth inside its hall, a landing at each turn.
 - Square-cornered hatches (boxes, L, T) in walls become RCC columns of their shape; arrow heads never do.
 - Wall ends short of a column face or a wall are met; outside platforms only where a level text is written, never the plot's open ground; platforms cut round the entrance steps.
+
+**3.26.1 — fixes from the Court Masjid ground floor**
+- No runaway wall at near-straight joins; openings cut even in walls whose faces a join turned slightly.
+- Crossed hidden lines: pointed (Islamic) arches by default, cut into a wall already across the gap.
+- Duplicate walls (a window band over a drawn wall) merged; railings beside steps / inside the building kept, none on a wall.
+- A landing at the top of traced stairs; the entrance porch floored; square pedestals for twin columns between planters.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

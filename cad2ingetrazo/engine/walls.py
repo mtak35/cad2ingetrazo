@@ -454,6 +454,12 @@ def _mitre(node, e1, e2):
     _s1, f1 = _face_of(e1, +1)
     _s2, f2 = _face_of(e2, -1)
     pt = _nearest(_meet(f1, f2), node)
+    near_straight = abs(_gap(e1, e2) - math.pi) < math.radians(3.0)
+    if pt is not None and (near_straight or _dist(pt, node) > 3.0 + 4.0 * max(
+            e1["pc"].t, e2["pc"].t)):
+        pt = None    # (all but straight on, or a corner met far off — two
+        #              walls of different thickness nearly in line: their
+        #              faces meet hundreds of metres away) — squared instead
     if pt is None:
         # parallel (a wall going on straight): each squares at its end
         n1, n2 = _left(e1["u"]), _left(e2["u"])

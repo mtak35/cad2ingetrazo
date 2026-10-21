@@ -520,3 +520,14 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Walls meet cleanly**: after the walls are broken at the columns, wall ends left short of a column face or of a wall are carried into it. This includes a column beside the end at a corner, and a missing piece of wall up to 1 m where the CAD's wall lines run on along both faces.
 - **No floor outside the building without a reason**: a platform needs a level text written inside it and takes one level, the one written there most often. Small closed areas (under 0.5 m²) are not floors, and the plot's own open ground around the building is not a platform. Platforms are cut around the entrance steps, so the steps show.
 
+
+## 3.26.1
+- **No wall running off the model**: two walls meeting almost in line (different thicknesses) no longer make a corner hundreds of metres away; their ends are squared.
+- **Openings always cut**: a wall whose faces a corner join turned a hair off its line kept its doors, windows and arches uncut (a solid face). They are cut now, so the ablution arcade shows its arches.
+- **Crossed hidden lines make pointed (Islamic) arches** by default, whatever arch shape is picked for doors and windows («Arch for crossed hidden lines (import)», section 5). An arch the hidden lines draw across a gap already closed by a wall is cut into that wall, between the columns.
+- **No wall on another**: a window band read as a wall of its own where the CAD also draws the wall is merged into that wall (its windows kept where the wall has none), so no two wall faces lie on one another.
+- **Railings inside the building**: a railing the RAIL layer draws beside steps or inside the building (round a mimber, a stair) is made without a RAIL text; one drawn on top of a wall is not.
+- **The stair's last landing**: a traced stair ends on a landing at the floor above.
+- **Entrance porch**: the porch the main doors open onto keeps its floor, at the top step's level, round the portico's columns and fins.
+- **Columns between planters**: twin columns outside the rooms stand on their own square pedestals; the slab's odd scraps round them and the floor finish over those scraps are gone.
+- **The plot's open ground is not a platform** (as in 3.26.0), even where a level is written in it.

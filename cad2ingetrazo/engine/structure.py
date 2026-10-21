@@ -758,7 +758,8 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
         if L < 1e-9:
             continue
         d = ((q[0] - p[0]) / L, (q[1] - p[1]) / L)
-        along = abs(d[0] * u[1] - d[1] * u[0]) < 1e-6
+        along = abs(d[0] * u[1] - d[1] * u[0]) < 0.01   # (±0.6°: a
+        #                    face a join turned a hair off the wall line)
         if not along:                # an end (square, mitred): whole
             faces.append([(p[0], p[1], b), (q[0], q[1], b),
                           (q[0], q[1], top), (p[0], p[1], top)])

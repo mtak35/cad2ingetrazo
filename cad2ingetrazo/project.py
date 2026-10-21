@@ -68,6 +68,7 @@ DEFAULTS = {
     "cars_lib": True, "cad_lines": True, "levels_cad": True, "car_model": "suv", "park_nums": True, "marks_on": True, "ramp_t": 0.20,
     "win_style": "sliding", "door_style": "hinged", "door2_style": "hinged",
     "door_head": "flat", "win_head": "flat", "arch_style": "pointed",
+    "hl_arch_style": "pointed",
     "void_arch": False,
     "door_frame": "auto", "win_frame": "auto", "floor_h": 3.048,
     "tmin": 0.08, "tmax": 0.40,
@@ -1210,6 +1211,102 @@ def rcc_from_fills(arch, lid, pl) -> dict:
     return out
 
 
+def dedupe_walls(arch, lid) -> dict:
+    """Two walls on one line, one over the other (a window band read as a
+    wall of its own where the CAD draws the wall too): the thinner keeps
+    only what runs past the thicker; its doors / windows over the thicker
+    one go into it (unless that one has its own there). No wall face on
+    another. {"merged", "trimmed"}."""
+    out = {"merged": 0, "trimmed": 0}
+    ws = [w for w in arch["walls"] if w["level"] == lid
+          and w.get("kind", "line") == "line" and not w.get("rail")
+          and W.why_not(w) is None and math.dist(w["a"], w["b"]) > 0.05]
+    ws.sort(key=lambda w: (-float(w["t"]), -math.dist(w["a"], w["b"])))
+    gone = set()
+    new_walls, new_ops = [], []
+    for i, H in enumerate(ws):
+        if H["id"] in gone:
+            continue
+        a, b = H["a"], H["b"]
+        L = math.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        n = (-u[1], u[0])
+        th = float(H["t"])
+        for T in ws[i + 1:]:
+            if T["id"] in gone or T is H:
+                continue
+            ta, tb = T["a"], T["b"]
+            Lt = math.dist(ta, tb)
+            ut = ((tb[0] - ta[0]) / Lt, (tb[1] - ta[1]) / Lt)
+            if abs(u[0] * ut[1] - u[1] * ut[0]) > 0.05:
+                continue                          # not parallel (±3°)
+            oa = (ta[0] - a[0]) * n[0] + (ta[1] - a[1]) * n[1]
+            ob = (tb[0] - a[0]) * n[0] + (tb[1] - a[1]) * n[1]
+            if max(abs(oa), abs(ob)) > (th + float(T["t"])) / 2 - 0.02:
+                continue                          # side by side, apart
+            s0 = (ta[0] - a[0]) * u[0] + (ta[1] - a[1]) * u[1]
+            s1 = (tb[0] - a[0]) * u[0] + (tb[1] - a[1]) * u[1]
+            lo, hi = min(s0, s1), max(s0, s1)
+            ov = min(hi, L) - max(lo, 0.0)
+            if ov < 0.2:
+                continue
+            # the thin wall's openings over the host: into the host
+            hops = [o for o in arch["openings"] if o["wall"] == H["id"]]
+            for o in [o for o in arch["openings"] if o["wall"] == T["id"]]:
+                c = (ta[0] + ut[0] * float(o["pos"]),
+                     ta[1] + ut[1] * float(o["pos"]))
+                sc = (c[0] - a[0]) * u[0] + (c[1] - a[1]) * u[1]
+                if not 0.0 <= sc <= L:
+                    continue
+                o["_drop"] = True
+                half = float(o["w"]) / 2
+                if sc - half < 0.05 or sc + half > L - 0.05:
+                    continue
+                if any(abs(float(h["pos"]) - sc) < (float(h["w"]) + 2 * half)
+                       / 2 - 0.05 for h in hops):
+                    continue                     # the host has its own
+                new_ops.append(dict(o, wall=H["id"], pos=round(sc, 4)))
+            arch["openings"] = [o for o in arch["openings"]
+                                if not o.pop("_drop", False)]
+            # what runs past the host: kept as its own wall(s)
+            rest = []
+            for p0, p1 in ((lo, max(lo, min(hi, 0.0))),
+                           (min(hi, max(lo, L)), hi)):
+                if p1 - p0 >= 0.3:
+                    rest.append((p0, p1))
+            gone.add(T["id"])
+            out["merged"] += 1
+            for p0, p1 in rest:
+                q0 = (a[0] + u[0] * p0 + n[0] * (oa + ob) / 2,
+                      a[1] + u[1] * p0 + n[1] * (oa + ob) / 2)
+                q1 = (a[0] + u[0] * p1 + n[0] * (oa + ob) / 2,
+                      a[1] + u[1] * p1 + n[1] * (oa + ob) / 2)
+                rec = {k: v for k, v in T.items()
+                       if k not in ("id", "name", "a", "b")}
+                rec["a"] = [round(q0[0], 4), round(q0[1], 4)]
+                rec["b"] = [round(q1[0], 4), round(q1[1], 4)]
+                nw = M.new_walls(arch["walls"] + new_walls, [rec])[0]
+                new_walls.append(nw)
+                # its openings there move with it
+                for o in [o for o in arch["openings"]
+                          if o["wall"] == T["id"]]:
+                    c = (ta[0] + ut[0] * float(o["pos"]),
+                         ta[1] + ut[1] * float(o["pos"]))
+                    sc = (c[0] - a[0]) * u[0] + (c[1] - a[1]) * u[1]
+                    if p0 <= sc <= p1:
+                        o["wall"] = nw["id"]
+                        o["pos"] = round(sc - p0, 4)
+                out["trimmed"] += 1
+    if gone:
+        arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
+        arch["openings"] = [o for o in arch["openings"]
+                            if o["wall"] not in gone]
+    arch["walls"] += new_walls
+    if new_ops:
+        arch["openings"] += M.new_openings(arch["openings"], new_ops)
+    return out
+
+
 def walls_at_columns(arch, lid) -> dict:
     """No wall running on through a column: a wall the CAD draws through a
     column is broken at the column's faces (its pieces either side kept,
@@ -1365,6 +1462,43 @@ def walls_at_columns(arch, lid) -> dict:
         o["pos"] = round(pos, 4)
         keep_o.append(o)
     arch["openings"] = keep_o
+    # an opening running into a column at its wall's end (an arch from
+    # column to column): only as wide as the span clear of the columns
+    if cols:
+        CU_ = unary_union([g.buffer(0.005) for g in cols])
+        for o in arch["openings"]:
+            w = byid.get(o["wall"])
+            if w is None:
+                continue
+            L = math.dist(w["a"], w["b"])
+            if L < 0.3:
+                continue
+            ln = LineString([tuple(w["a"]), tuple(w["b"])])
+            if not ln.intersects(CU_):
+                continue
+            ux, uy = (w["b"][0] - w["a"][0]) / L, (w["b"][1] - w["a"][1]) / L
+            pos, half = float(o["pos"]), float(o["w"]) / 2
+            free = ln.difference(CU_)
+            seg = None
+            for q in getattr(free, "geoms", [free]):
+                if q.geom_type != "LineString" or q.length < 0.05:
+                    continue
+                s_ = sorted(((c[0] - w["a"][0]) * ux + (c[1] - w["a"][1]) * uy)
+                            for c in q.coords)
+                if s_[0] - 1e-6 <= pos <= s_[-1] + 1e-6:
+                    seg = (s_[0], s_[-1])
+                    break
+            if seg is None:
+                continue
+            lo_, hi_ = seg[0] + 0.03, seg[1] - 0.03
+            if pos - half >= lo_ and pos + half <= hi_:
+                continue
+            nw_ = min(2 * half, hi_ - lo_)
+            if nw_ < 0.3:
+                continue
+            o["w"] = round(nw_, 3)
+            o["pos"] = round(min(max(pos, lo_ + nw_ / 2), hi_ - nw_ / 2), 4)
+            out["narrowed"] += 1
     return out
 
 
@@ -1910,7 +2044,8 @@ def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:
                     o.pop(k_, None)
                 if cross >= 0.5 * float(o["w"]):
                     o["head"] = "arch"
-                    o["arch"] = st.get("arch_style", "semi") or "semi"
+                    o["arch"] = st.get("hl_arch_style", "pointed") or \
+                        "pointed"
                     n["arches"] += 1
                 else:
                     o.pop("head", None)
@@ -1932,7 +2067,8 @@ def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:
                         o.pop(k_, None)
                     if arched:
                         o["head"] = "arch"
-                        o["arch"] = st.get("arch_style", "semi") or "semi"
+                        o["arch"] = st.get("hl_arch_style", "pointed") \
+                            or "pointed"
                         n["arches"] += 1
                     else:
                         o.pop("head", None)
@@ -2027,7 +2163,30 @@ def arches_between(doc, lid, pl, P) -> int:
             if lo < 0.08 or hi < 0.6:
                 continue
             if not WU.is_empty and box.intersection(WU).area > 0.3 * box.area:
-                continue                 # across a wall's opening: done there
+                # a wall already across (a gap closed up, a plain opening
+                # in it): its opening there arched
+                hit_ = False
+                for w_ in walls:
+                    wl_ = LineString([w_["a"], w_["b"]])
+                    if wl_.length < 0.3 or box.buffer(0.05).intersection(
+                            wl_).length < 0.6 * min(wl_.length, hi):
+                        continue
+                    for o_ in arch["openings"]:
+                        if o_["wall"] != w_["id"] or o_["kind"] != "void" \
+                                or o_.get("head") == "arch":
+                            continue
+                        o_["head"] = "arch"
+                        o_["arch"] = st.get("hl_arch_style", "pointed") \
+                            or "pointed"
+                        o_["h"] = round(max(float(o_["h"]), 0.5 * float(
+                            o_["w"]) + 1.8), 3)
+                        hit_ = True
+                    if hit_ and w_.get("filler"):
+                        w_["t"] = round(max(float(w_["t"]),
+                                            max(min(lo, 0.6), 0.23)), 4)
+                if hit_:
+                    used |= {i, j}
+                continue
             # the span's two ends (the short sides) at solids
             if e1 >= e2:
                 m0 = ((cs[1][0] + cs[2][0]) / 2, (cs[1][1] + cs[2][1]) / 2)
@@ -2060,7 +2219,7 @@ def arches_between(doc, lid, pl, P) -> int:
     made = M.new_walls(arch["walls"], recs)
     arch["walls"] += made
     ops = []
-    style = st.get("arch_style", "pointed") or "pointed"
+    style = st.get("hl_arch_style", "pointed") or "pointed"
     door_h = float(st.get("door_h", 2.1336))
     for w_, L_ in zip(made, spans):
         w_["name"] = "Arch " + w_["name"].split()[-1]
@@ -2640,9 +2799,47 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                 from shapely.geometry import LineString as _LS2   # says so
                 from shapely.geometry import Point as _Pt2
                 pts_ = rail_text_points(doc, lid, pl)
-                rrecs = [r_ for r_ in rrecs if any(
+                # (a railing the RAIL layer draws beside steps — a
+                # mimber's, a stair's side — is kept: only the terraces'
+                # and balconies' edges need the text)
+                from shapely.ops import unary_union as _uu2
+                try:
+                    stp_ = [_LS2([(s_[0], s_[1]), (s_[2], s_[3])])
+                            for s_ in pl["segs"] if
+                            _match(lay[s_[4]], P.get("steps") or [])]
+                    stpu_ = _uu2(stp_) if stp_ else None
+                except Exception:  # noqa: BLE001
+                    stpu_ = None
+
+                def _inside(r_):
+                    return stpu_ is not None and _LS2(
+                        [r_["a"], r_["b"]]).distance(stpu_) < 0.6
+                try:                  # never a railing on a wall
+                    wpu_ = _uu2([_LS2([w_["a"], w_["b"]]).buffer(
+                        float(w_["t"]) / 2 + 0.02, cap_style=2)
+                        for w_ in arch["walls"] if w_["level"] == lid
+                        and not w_.get("rail")])
+                    rrecs = [r_ for r_ in rrecs if _LS2(
+                        [r_["a"], r_["b"]]).intersection(wpu_).length <
+                        0.5 * _LS2([r_["a"], r_["b"]]).length]
+                except Exception:  # noqa: BLE001
+                    pass
+                keep_ = [r_ for r_ in rrecs if _inside(r_) or any(
                     _LS2([r_["a"], r_["b"]]).distance(_Pt2(x, y)) < 3.0
                     for x, y in pts_)]
+                # and the railing running on from a kept one (its corner)
+                grew_ = True
+                while grew_:
+                    grew_ = False
+                    for r_ in rrecs:
+                        if r_ in keep_:
+                            continue
+                        if any(math.dist(p_, q_) < 0.05 for k_ in keep_
+                               for p_ in (r_["a"], r_["b"])
+                               for q_ in (k_["a"], k_["b"])):
+                            keep_.append(r_)
+                            grew_ = True
+                rrecs = keep_
             made_r = M.new_walls(arch["walls"], rrecs)
             n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
                      .startswith("Balcony railing"))
@@ -2966,6 +3163,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.walls_at_columns")
+    try:                          # no wall on another (a window band
+        rep["dedupe"] = dedupe_walls(arch, lid)    # read as a wall too)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.dedupe_walls")
     if st.get("close_gaps", True):   # ends left short (of a column face,
         try:                          # a wall): carried into it, cleanly
             from . import bridges as BR
@@ -6165,6 +6367,12 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
                     pass
             pieces.append((q, mode(vs)))
     new = []
+    try:
+        on_platform = platform_on(doc) and next(
+            (lv_ for lv_ in arch["levels"] if lv_["id"] == lid),
+            {}).get("kind") == "ground"
+    except Exception:  # noqa: BLE001
+        on_platform = False
     for part, lv in pieces:
         for g in getattr(part, "geoms", [part]):
             if g.geom_type != "Polygon" or g.area < 0.5:
@@ -6175,6 +6383,11 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
             step = max(0.0, lv - base)
             new.append({"type": "slab", "level": lid, "zone": True,
                         "note": True,
+                        # on a ground floor standing on its foundation
+                        # platform the platform is the floor: the part kept
+                        # for its outline and finish, no concrete over the
+                        # platform's own top (one face on another)
+                        **({"grade": True} if on_platform else {}),
                         "corners": [[round(x, 4), round(y, 4)] for x, y in
                                     list(g.simplify(0.005).exterior.coords)[:-1]],
                         "holes": [[[round(x, 4), round(y, 4)] for x, y in h]
@@ -6605,6 +6818,23 @@ def _finish_groups(doc):
                 for s_, q in whole:        # «Over the whole slab»
                     pieces += [g for g in getattr(q, "geoms", [q])
                                if g.geom_type == "Polygon" and g.area >= 0.3]
+                if lv.get("kind") == "ground" and pieces and \
+                        platform_on(doc):
+                    # on the foundation platform: the finish only where the
+                    # platform is (no finish left floating over the scraps
+                    # the platform leaves out)
+                    try:
+                        from shapely.ops import unary_union as _uu3
+                        pu_ = _uu3([q_ for q_, _t in
+                                    platform_parts(doc)["pieces"]])
+                        if not pu_.is_empty:
+                            pieces = [g for p_ in pieces for g in getattr(
+                                p_.intersection(pu_), "geoms",
+                                [p_.intersection(pu_)])
+                                if g.geom_type == "Polygon"
+                                and g.area >= 0.3]
+                    except Exception:  # noqa: BLE001
+                        pass
                 drop_ = float(st.get("ext_finish_drop", 0.3048) or 0.0) \
                     if lv.get("kind") == "ground" else 0.0
                 ez_ = entrance_zone(doc, lid) if drop_ else None
@@ -7553,7 +7783,70 @@ def platform_parts(doc) -> dict:
         # a floor whose levels the CAD notes: what it does not note is at
         # the floor's level (no made-up outside drop)
         drop = 0.0
+    # the columns standing outside the rooms (twin columns between the
+    # planters, a portico's): each pair on its own square pedestal — not
+    # the slab outline's odd scraps round them
+    peds = Polygon()
+    try:
+        co_ = []
+        Rin = R.buffer(-0.02)
+        for c_ in arch["structure"]:
+            if c_["type"] != "column" or c_["level"] != lid:
+                continue
+            cp_ = Polygon(S.column_outline(c_)).buffer(0)
+            if cp_.is_empty or Rin.contains(cp_.centroid):
+                continue
+            co_.append(cp_)
+        if co_:
+            grp_ = unary_union([q.buffer(0.3) for q in co_])
+            pl_ = []
+            for g_ in getattr(grp_, "geoms", [grp_]):
+                mine_ = unary_union([q for q in co_ if g_.contains(q)])
+                if mine_.is_empty:
+                    continue
+                pl_.append(mine_.minimum_rotated_rectangle.buffer(
+                    0.08, join_style=2))
+            peds = unary_union(pl_) if pl_ else Polygon()
+    except Exception:  # noqa: BLE001
+        peds = Polygon()
+    ped_done = False
     for part, dz in ((inner, 0.0), (outer, drop)):
+        if dz is drop and part is outer and not peds.is_empty:
+            # (a porch the doors open onto is a floor, whatever its shape)
+            dpts_ = []
+            wd_ = {w_["id"]: w_ for w_ in walls}
+            for o_ in arch["openings"]:
+                w_ = wd_.get(o_["wall"])
+                if w_ is None or o_["kind"] != "door":
+                    continue
+                L_ = math.dist(w_["a"], w_["b"])
+                if L_ < 1e-6:
+                    continue
+                f_ = float(o_["pos"]) / L_
+                dpts_.append(Point(w_["a"][0] + (w_["b"][0] - w_["a"][0])
+                                   * f_, w_["a"][1] + (w_["b"][1] -
+                                                       w_["a"][1]) * f_))
+            small = [g_ for g_ in getattr(part, "geoms", [part])
+                     if g_.geom_type == "Polygon" and g_.area < 15.0
+                     and g_.intersects(peds)
+                     and g_.minimum_rotated_rectangle.area > 1.6 * g_.area
+                     and not any(g_.distance(q_) < 0.5 for q_ in dpts_)]
+            if small:
+                part = part.difference(unary_union(small).buffer(0.001))
+            if not ped_done:
+                ped_done = True
+                for pg_ in getattr(peds, "geoms", [peds]):
+                    pg_ = pg_.difference(WP)
+                    c_ = pg_.representative_point() if not pg_.is_empty \
+                        else None
+                    if c_ is None:
+                        continue
+                    top = elev + floor_offset_at(doc, lid, (c_.x, c_.y)) \
+                        - (0.0 if noted.contains(c_) else drop)
+                    for q_ in getattr(pg_, "geoms", [pg_]):
+                        if q_.geom_type == "Polygon" and q_.area > 0.05 \
+                                and top - zg > 0.01:
+                            out["pieces"].append((q_, top))
         for pg in getattr(part, "geoms", [part]):
             if pg.geom_type != "Polygon" or pg.area < 0.05:
                 continue
@@ -7664,6 +7957,17 @@ def platform_parts(doc) -> dict:
                 land = unary_union([land, st_[0][0]])
                 for lg in getattr(land, "geoms", [land]):
                     if lg.geom_type == "Polygon" and lg.area > 0.1:
+                        out["pieces"].append((lg, zt - fin))
+            # the top riser running round to the building (a U, an L): the
+            # porch it closes against the walls, at the top level too
+            cs0 = list(ps[0].coords)
+            if len(cs0) >= 3:
+                encl = Polygon(cs0).buffer(0)
+                porch = encl.difference(G).difference(WP)
+                for st0 in st_:
+                    porch = porch.difference(st0[0].buffer(0.001))
+                for lg in getattr(porch, "geoms", [porch]):
+                    if lg.geom_type == "Polygon" and lg.area > 0.3:
                         out["pieces"].append((lg, zt - fin))
         except Exception:  # noqa: BLE001
             from .host import log_error

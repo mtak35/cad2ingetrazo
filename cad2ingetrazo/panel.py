@@ -3053,6 +3053,14 @@ class Panel(QWidget):
                                "cusped multifoil / trefoil, Persian "
                                "four-centred")
         f.addRow("Arch shape", self.o_arch)
+        self.o_hlarch = QComboBox()
+        for k, label, _r in S_.ARCHES:
+            self.o_hlarch.addItem(label, k)
+        self.o_hlarch.setToolTip("The arch the plan's crossed hidden lines "
+                                 "(an X between columns or walls) make on "
+                                 "import — by default the Islamic pointed "
+                                 "arch")
+        f.addRow("Arch for crossed hidden lines (import)", self.o_hlarch)
         self.o_ring = QComboBox()
         for k, label in (("none", "None"), ("ablaq",
                           "Ablaq — dark / light stones in turn"),
@@ -8051,6 +8059,7 @@ class Panel(QWidget):
                 "win_head": self.o_whead.currentData(),
                 "arch_style": self.o_arch.currentData(),
                 "jali_style": self.o_jali.currentData(),
+                "hl_arch_style": self.o_hlarch.currentData(),
                 "jali_side": self.o_jali_side.currentData(),
                 "void_arch": self.o_void_arch.isChecked(),
                 "door_frame": self.o_dframe.currentData(),
@@ -8082,6 +8091,7 @@ class Panel(QWidget):
                                (self.o_whead, "win_head", "flat"),
                                (self.o_arch, "arch_style", "semi"),
                                (self.o_jali, "jali_style", "cnc"),
+                               (self.o_hlarch, "hl_arch_style", "pointed"),
                                (self.o_jali_side, "jali_side", "exterior"),
                                (self.o_dframe, "door_frame", "auto"),
                                (self.o_wframe, "win_frame", "auto")):
