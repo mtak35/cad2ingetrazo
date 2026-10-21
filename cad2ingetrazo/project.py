@@ -67,7 +67,7 @@ DEFAULTS = {
     "round_lib": True, "round_lib_key": "online:katorlegaz-019",
     "cars_lib": True, "cad_lines": True, "levels_cad": True, "car_model": "suv", "park_nums": True, "marks_on": True, "ramp_t": 0.20,
     "win_style": "sliding", "door_style": "hinged", "door2_style": "hinged",
-    "door_head": "flat", "win_head": "flat", "arch_style": "semi",
+    "door_head": "flat", "win_head": "flat", "arch_style": "pointed",
     "void_arch": False,
     "door_frame": "auto", "win_frame": "auto", "floor_h": 3.048,
     "tmin": 0.08, "tmax": 0.40,
@@ -85,6 +85,10 @@ DEFAULTS = {
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "rail_needs_text": True,       # railings only where the CAD writes them
     "stair_max_flight": 14,        # risers in one flight at most
+    "stair_shape": "u",            # a standard stair: a U-turn
+    "walls_at_columns": True,      # walls broken at the column faces
+    "rcc_fills": True,             # hatched / filled walls: RCC structure
+    "steps_v": 2,                  # floor steps 6" / 12" (from 3.25)
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
     "stair_well": "railing", "corner_windows": True, "slab_to_columns": True,
@@ -97,7 +101,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1778, "tread_ext": 0.2794, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -219,6 +223,13 @@ def load(raw) -> dict:
                     if isinstance(t, dict) and t.get("level") in ids]
     doc["settings"].update({k: v for k, v in (raw.get("settings") or {}).items()
                             if k in DEFAULTS})
+    rs_ = raw.get("settings") or {}
+    if rs_ and "steps_v" not in rs_ and abs(float(rs_.get(
+            "riser_max", 0.1778) or 0.1778) - 0.1778) < 1e-4 and abs(float(
+            rs_.get("tread_ext", 0.2794) or 0.2794) - 0.2794) < 1e-4:
+        # the floor steps' old defaults (7" / 11", never changed): 6" / 12"
+        doc["settings"]["riser_max"] = DEFAULTS["riser_max"]
+        doc["settings"]["tread_ext"] = DEFAULTS["tread_ext"]
     if (raw.get("settings") or {}) and "gffl_v" not in raw["settings"]:
         # a project from before 3.14: the ground floor at +2'-0" by default
         doc["settings"]["ground_ffl"] = DEFAULTS["ground_ffl"]
@@ -1029,6 +1040,272 @@ def as_parapet_walls(walls, h) -> int:
     return join_wall_ends(walls)
 
 
+def rcc_from_fills(arch, lid, pl) -> dict:
+    """The CAD's hatches and solid fills in the walls (RCC work, as plans
+    show it): a wall mostly covered by one is a structural RCC wall; a
+    filled area no wall stands on — square-ish, up to 1.5 m a side — is an
+    RCC column, a long thin one (up to 0.6 m thick) an RCC wall; a column
+    under a fill is marked RCC. Big fills (floors, paving, lawns: over
+    15 m²) are not walls. {"walls", "new_walls", "columns"}."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    out = {"walls": 0, "new_walls": 0, "columns": 0}
+    fills = []
+    for f in (pl or {}).get("fills") or []:
+        try:
+            g = Polygon(f["pts"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if g.is_empty or g.area < 0.01 or g.area > 15.0:
+            continue
+        fills.append(g)
+    if not fills:
+        return out
+    FU = unary_union(fills)
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and w.get("kind", "line") == "line"
+             and W.why_not(w) is None]
+    wpolys = []
+    for w in walls:
+        try:
+            wp = SE.wall_polys([w])
+            wp = unary_union(wp) if wp else None
+        except Exception:  # noqa: BLE001
+            wp = None
+        if wp is None or wp.is_empty:
+            continue
+        wpolys.append(wp)
+        if FU.intersection(wp).area > 0.5 * wp.area:
+            if not w.get("rcc"):
+                w["rcc"] = True
+                w["type"] = "solid"
+                out["walls"] += 1
+    WU = unary_union(wpolys) if wpolys else Polygon()
+    cols = [c for c in arch["structure"] if c.get("type") == "column"
+            and c.get("level") == lid]
+    CU = []
+    for c in cols:
+        try:
+            cp = Polygon(S.column_outline(c, 0.0)).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        CU.append(cp)
+        if FU.intersection(cp).area > 0.4 * max(cp.area, 1e-6):
+            c["rcc"] = True
+    CUu = unary_union(CU) if CU else Polygon()
+    new_cols, new_walls = [], []
+    for comp in getattr(FU, "geoms", [FU]):
+        if comp.geom_type != "Polygon" or comp.area < 0.02:
+            continue
+        free = comp.difference(WU.buffer(0.02)).difference(CUu.buffer(0.02))
+        if free.area < 0.6 * comp.area:
+            continue                     # on a wall / column already
+        r = comp.minimum_rotated_rectangle
+        cs = list(r.exterior.coords)[:4]
+        e1 = math.dist(cs[0], cs[1])
+        e2 = math.dist(cs[1], cs[2])
+        lo, hi = min(e1, e2), max(e1, e2)
+        if lo < 0.08:
+            continue
+        if hi <= 1.5 and hi / lo <= 3.0:            # a column
+            a, b = (cs[0], cs[1]) if e1 >= e2 else (cs[1], cs[2])
+            ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+            c_ = r.centroid
+            new_cols.append({"type": "column", "level": lid,
+                             "x": round(c_.x, 4), "y": round(c_.y, 4),
+                             "w": round(hi, 4), "d": round(lo, 4),
+                             "angle": round(ang, 2), "shape": "rect",
+                             "anchor": "centre", "base": 0.0,
+                             "height": "level", "fit": False, "rcc": True})
+        elif lo <= 0.6 and hi >= 0.6:               # a wall
+            if e1 >= e2:
+                a = ((cs[1][0] + cs[2][0]) / 2, (cs[1][1] + cs[2][1]) / 2)
+                b = ((cs[3][0] + cs[0][0]) / 2, (cs[3][1] + cs[0][1]) / 2)
+            else:
+                a = ((cs[0][0] + cs[1][0]) / 2, (cs[0][1] + cs[1][1]) / 2)
+                b = ((cs[2][0] + cs[3][0]) / 2, (cs[2][1] + cs[3][1]) / 2)
+            new_walls.append({"kind": "line",
+                              "a": [round(a[0], 4), round(a[1], 4)],
+                              "b": [round(b[0], 4), round(b[1], 4)],
+                              "t": round(lo, 4), "align": "centre",
+                              "side": 1, "height": "level", "base": 0.0,
+                              "level": lid})
+    if new_cols:
+        made = M.new_elements(arch["structure"], new_cols)
+        for m_ in made:
+            m_["rcc"] = True
+        arch["structure"] += made
+        out["columns"] = len(made)
+    if new_walls:
+        made = M.new_walls(arch["walls"], new_walls)
+        for m_ in made:
+            m_["rcc"] = True
+            m_["type"] = "solid"
+        arch["walls"] += made
+        out["new_walls"] = len(made)
+    return out
+
+
+def walls_at_columns(arch, lid) -> dict:
+    """No wall running on through a column: a wall the CAD draws through a
+    column is broken at the column's faces (its pieces either side kept,
+    a door / window staying with the piece it stands in, one inside the
+    column left out); then the wall ends left short of / past one another
+    at a corner are met cleanly. {"broken", "pieces", "joined"}."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    out = {"broken": 0, "pieces": 0, "joined": 0}
+    cols = []
+    for c in arch["structure"]:
+        if c.get("type") != "column" or c.get("level") != lid:
+            continue
+        try:
+            g = Polygon(S.column_outline(c, 0.0)).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if not g.is_empty and g.area > 0.01:
+            cols.append(g)
+    if cols:
+        CU = unary_union(cols)
+        keep, add, remap = [], [], {}
+        for w in arch["walls"]:
+            if w.get("level") != lid or w.get("rail") or \
+                    w.get("kind", "line") != "line" or w.get("arcade"):
+                keep.append(w)
+                continue
+            L = LineString([tuple(w["a"]), tuple(w["b"])])
+            if L.length < 0.2 or CU.intersection(L).length < 0.05:
+                keep.append(w)
+                continue
+            rest = L.difference(CU.buffer(0.002))
+            parts = [q for q in getattr(rest, "geoms", [rest])
+                     if q.geom_type == "LineString" and q.length >= 0.15]
+            if len(parts) == 1 and parts[0].length > L.length - 0.02:
+                keep.append(w)
+                continue
+            out["broken"] += 1
+            ux = (w["b"][0] - w["a"][0]) / L.length
+            uy = (w["b"][1] - w["a"][1]) / L.length
+            pieces = []
+            for q in parts:
+                c0, c1 = q.coords[0], q.coords[-1]
+                s0 = (c0[0] - w["a"][0]) * ux + (c0[1] - w["a"][1]) * uy
+                s1 = (c1[0] - w["a"][0]) * ux + (c1[1] - w["a"][1]) * uy
+                if s1 < s0:
+                    c0, c1, s0, s1 = c1, c0, s1, s0
+                pieces.append((s0, s1, c0, c1))
+            pieces.sort()
+            for k, (s0, s1, c0, c1) in enumerate(pieces):
+                rec = dict(w, a=[round(c0[0], 4), round(c0[1], 4)],
+                           b=[round(c1[0], 4), round(c1[1], 4)])
+                if k == 0:
+                    rec["id"] = w["id"]          # the first keeps its id
+                    keep.append(rec)
+                else:
+                    rec.pop("id", None)
+                    add.append(rec)
+                remap.setdefault(w["id"], []).append((s0, s1, rec))
+                out["pieces"] += 1
+        made = M.new_walls(keep + add, [dict(r, name=None) for r in add]) \
+            if add else []
+        for r_, m_ in zip(add, made):
+            r_.update(id=m_["id"], name=m_["name"])
+        arch["walls"] = keep + add
+        if remap:
+            ops = []
+            for o in arch["openings"]:
+                ps = remap.get(o["wall"])
+                if not ps:
+                    ops.append(o)
+                    continue
+                pos, half = float(o["pos"]), float(o["w"]) / 2
+                hit = next(((s0, s1, r_) for s0, s1, r_ in ps
+                            if s0 - 0.03 <= pos - half and
+                            pos + half <= s1 + 0.03), None)
+                if hit is not None:
+                    o["wall"], o["pos"] = hit[2]["id"], round(pos - hit[0], 4)
+                    ops.append(o)
+                    continue
+                # across the column (a window band the CAD runs past it):
+                # a window in each piece it overlaps, up to the column faces
+                first = True
+                for s0, s1, r_ in ps:
+                    lo_, hi_ = max(pos - half, s0 + 0.02), min(pos + half,
+                                                                s1 - 0.02)
+                    if hi_ - lo_ < 0.3:
+                        continue
+                    o2 = dict(o, wall=r_["id"], w=round(hi_ - lo_, 3),
+                              pos=round((lo_ + hi_) / 2 - s0, 4))
+                    if first:
+                        ops.append(o2)
+                        first = False
+                    else:
+                        o2.pop("id", None)
+                        o2.pop("name", None)
+                        ops += M.new_openings(ops, [o2])
+            arch["openings"] = ops
+    ws_ = [w for w in arch["walls"] if w.get("level") == lid
+           and not w.get("rail") and w.get("kind", "line") == "line"
+           and W.why_not(w) is None]
+    a0 = {w["id"]: tuple(w["a"]) for w in ws_}
+    try:
+        out["joined"] = join_wall_ends(ws_, reach=0.30)
+    except Exception:  # noqa: BLE001
+        pass
+    # a wall end left inside a column (drawn into it, or carried there by
+    # the corner joins): back to the column's face
+    out["trimmed"] = 0
+    if cols:
+        for w in ws_:
+            for end, other in (("a", "b"), ("b", "a")):
+                P_ = Point(w[end])
+                c_ = next((g for g in cols if g.buffer(-0.01).contains(P_)),
+                          None)
+                if c_ is None:
+                    continue
+                Lw = LineString([tuple(w[other]), tuple(w[end])])
+                rest = Lw.difference(c_)
+                part = next((q for q in getattr(rest, "geoms", [rest])
+                             if q.geom_type == "LineString" and
+                             Point(w[other]).distance(q) < 1e-6), None)
+                if part is None or part.length < 0.15:
+                    continue
+                far = max(part.coords, key=lambda q: math.dist(q, w[other]))
+                w[end] = [round(far[0], 4), round(far[1], 4)]
+                out["trimmed"] += 1
+    # the openings kept where they stand: a wall whose start moved shifts
+    # their places along it; one now too close to an end (a window that
+    # filled the bay to the column) is narrowed to fit
+    byid = {w["id"]: w for w in ws_}
+    keep_o, out["narrowed"] = [], 0
+    for o in arch["openings"]:
+        w = byid.get(o["wall"])
+        if w is None:
+            keep_o.append(o)
+            continue
+        L = math.dist(w["a"], w["b"])
+        if L < 1e-6:
+            continue
+        ux, uy = (w["b"][0] - w["a"][0]) / L, (w["b"][1] - w["a"][1]) / L
+        oa = a0.get(w["id"], tuple(w["a"]))
+        pos = float(o["pos"]) + (oa[0] - w["a"][0]) * ux + \
+            (oa[1] - w["a"][1]) * uy
+        half = float(o["w"]) / 2
+        gap = S.END_GAP + 0.005
+        if pos - half < gap or pos + half > L - gap:
+            w_new = min(2 * (pos - gap), 2 * (L - gap - pos))
+            if w_new < max(0.6 * float(o["w"]), 0.3):
+                continue                 # no room left for it: it goes
+            o["w"] = round(w_new, 3)
+            out["narrowed"] += 1
+        o["pos"] = round(pos, 4)
+        keep_o.append(o)
+    arch["openings"] = keep_o
+    return out
+
+
 def join_wall_ends(walls, reach=0.35) -> int:
     """Straight walls whose ends come within ``reach`` of each other: both
     run to where their centre lines cross (a clean mitred corner)."""
@@ -1623,6 +1900,115 @@ def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:
                     n["shades"] += 1
         out[lid] = n
     return out
+
+
+def arches_between(doc, lid, pl, P) -> int:
+    """An X in hidden (dashed) lines drawn between two columns, or a column
+    and a wall end, with no wall across: an arch there (the plan's way to
+    show one) — a wall from face to face holding an arched opening, the
+    arch shape set (Islamic, pointed, by default). How many."""
+    from shapely.geometry import LineString, MultiPoint, Point, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    st = doc["settings"]
+    dsh = pl.get("dashed") or []
+    if len(dsh) != len(pl["segs"]) or not any(dsh):
+        return 0
+    lay = pl["layers"]
+    hid = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+           for s_, d_ in zip(pl["segs"], dsh)
+           if d_ and not HIDDEN_SKIP.search(lay[s_[4]])
+           and not _match(lay[s_[4]], P["stairs"])
+           and 0.6 < math.hypot(s_[2] - s_[0], s_[3] - s_[1]) < 9.0]
+    if len(hid) < 2:
+        return 0
+    cols = []
+    for c in arch["structure"]:
+        if c.get("type") == "column" and c.get("level") == lid:
+            try:
+                cols.append(Polygon(S.column_outline(c, 0.0)).buffer(0))
+            except Exception:  # noqa: BLE001
+                pass
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and w.get("kind", "line") == "line"
+             and W.why_not(w) is None]
+    wps = SE.wall_polys(walls) if walls else []
+    WU = unary_union(wps) if wps else Polygon()
+    solids = unary_union(cols + list(wps)) if cols or wps else Polygon()
+    if solids.is_empty:
+        return 0
+    used = set()
+    recs, spans = [], []
+    for i, a in enumerate(hid):
+        if i in used:
+            continue
+        for j in range(i + 1, len(hid)):
+            if j in used:
+                continue
+            b = hid[j]
+            x = a.intersection(b)
+            if x.is_empty or x.geom_type != "Point":
+                continue
+            # the two diagonals of one box: crossing near both middles
+            if abs(a.project(x) / a.length - 0.5) > 0.2 or \
+                    abs(b.project(x) / b.length - 0.5) > 0.2:
+                continue
+            box = MultiPoint(list(a.coords) + list(b.coords)) \
+                .minimum_rotated_rectangle
+            if box.geom_type != "Polygon":
+                continue
+            cs = list(box.exterior.coords)[:4]
+            e1, e2 = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+            lo, hi = min(e1, e2), max(e1, e2)
+            if lo < 0.08 or hi < 0.6:
+                continue
+            if not WU.is_empty and box.intersection(WU).area > 0.3 * box.area:
+                continue                 # across a wall's opening: done there
+            # the span's two ends (the short sides) at solids
+            if e1 >= e2:
+                m0 = ((cs[1][0] + cs[2][0]) / 2, (cs[1][1] + cs[2][1]) / 2)
+                m1 = ((cs[3][0] + cs[0][0]) / 2, (cs[3][1] + cs[0][1]) / 2)
+            else:
+                m0 = ((cs[0][0] + cs[1][0]) / 2, (cs[0][1] + cs[1][1]) / 2)
+                m1 = ((cs[2][0] + cs[3][0]) / 2, (cs[2][1] + cs[3][1]) / 2)
+            if solids.distance(Point(m0)) > 0.3 or \
+                    solids.distance(Point(m1)) > 0.3:
+                continue
+            # face to face: the span clear of the columns / walls it joins
+            run = LineString([m0, m1]).difference(solids.buffer(0.002))
+            run = max((q for q in getattr(run, "geoms", [run])
+                       if q.geom_type == "LineString"),
+                      key=lambda q: q.length, default=None)
+            if run is None or run.length < 0.5:
+                continue
+            m0, m1 = run.coords[0], run.coords[-1]
+            hi = run.length
+            used |= {i, j}
+            t_ = max(min(lo, 0.6), 0.23)
+            recs.append({"kind": "line", "a": [round(m0[0], 4), round(m0[1], 4)],
+                         "b": [round(m1[0], 4), round(m1[1], 4)],
+                         "t": round(t_, 4), "align": "centre", "side": 1,
+                         "height": "level", "base": 0.0, "level": lid})
+            spans.append(hi)
+            break
+    if not recs:
+        return 0
+    made = M.new_walls(arch["walls"], recs)
+    arch["walls"] += made
+    ops = []
+    style = st.get("arch_style", "pointed") or "pointed"
+    door_h = float(st.get("door_h", 2.1336))
+    for w_, L_ in zip(made, spans):
+        w_["name"] = "Arch " + w_["name"].split()[-1]
+        wd = round(max(L_ - 2 * 0.11, 0.3), 3)
+        ops.append({"kind": "void", "wall": w_["id"], "pos": round(L_ / 2, 4),
+                    "w": wd, "h": round(max(door_h, 0.5 * wd + 1.8), 3),
+                    "sill": 0.0, "swing": "left", "face": 1, "style": "",
+                    "head": "arch", "arch": style})
+    arch["openings"] += M.new_openings(arch["openings"], ops)
+    return len(made)
 
 
 def redetect_columns(doc, lids=None) -> dict:
@@ -2438,6 +2824,27 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project extend_outline")
+        try:                      # never past what the plan draws (and the
+            lim_ = plan_limit(doc, lid, pl, P)      # areas its levels note)
+        except Exception:  # noqa: BLE001
+            lim_ = None
+        if lim_ is not None and not lim_.is_empty:
+            cl_ = []
+            for o_ in outlines:
+                try:
+                    g_ = Polygon(o_).buffer(0).intersection(lim_)
+                    g_ = max((q for q in getattr(g_, "geoms", [g_])
+                              if q.geom_type == "Polygon"),
+                             key=lambda q: q.area, default=None)
+                    if g_ is not None and g_.area > 0.5 and \
+                            g_.area < Polygon(o_).buffer(0).area - 0.05:
+                        o_ = [[round(x, 4), round(y, 4)] for x, y in
+                              list(g_.simplify(0.005).exterior.coords)[:-1]]
+                        rep["slab_limited"] = rep.get("slab_limited", 0) + 1
+                except Exception:  # noqa: BLE001
+                    pass
+                cl_.append(o_)
+            outlines = cl_
         for outline in outlines:
             poly = Polygon(outline)
             inner = poly.buffer(-0.02) if poly.is_valid else poly.buffer(0)
@@ -2480,6 +2887,23 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.close_gaps")
+    if st.get("rcc_fills", True):    # hatched / filled walls: RCC work
+        try:
+            rep["rcc"] = rcc_from_fills(arch, lid, pl)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.rcc_from_fills")
+    try:                     # an X of hidden lines between columns: an arch
+        rep["arches_between"] = arches_between(doc, lid, pl, P)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.arches_between")
+    if st.get("walls_at_columns", True):    # no wall on through a column
+        try:
+            rep["walls_at_columns"] = walls_at_columns(arch, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.walls_at_columns")
 
     if rep.get("corner_windows"):    # the slab carried over them too
         try:
@@ -2648,7 +3072,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             from .host import log_error
             log_error("project.lowparts")
     try:                                  # out over the floor below: its
-        cap_lower_floor(doc, lid)         # terraces (slabs as floors)
+        cap_lower_floor(doc, lid, plan_limit(doc, lid, pl, P))
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.cap_lower_floor")
@@ -2893,7 +3317,7 @@ def slab_on_top(doc) -> bool:
     return (doc.get("settings") or {}).get("slab_pos", "top") == "top"
 
 
-def cap_lower_floor(doc, lid) -> int:
+def cap_lower_floor(doc, lid, limit=None) -> int:
     """Slabs as floors: where the floor below reaches out past this floor,
     this floor's slab is carried out over it — flush with that floor's
     external walls and columns (their outer faces) — a terrace, railed
@@ -2930,6 +3354,11 @@ def cap_lower_floor(doc, lid) -> int:
     if not polys:
         return 0
     foot = unary_union(polys)
+    if limit is not None and not limit.is_empty:
+        # never past what this floor's own CAD plan draws (nor the areas
+        # its level texts note): the floor below's roof beyond it stays a
+        # roof, not this floor's terrace
+        foot = foot.intersection(limit)
     mine = [e for e in arch["structure"] if e["type"] == "slab"
             and e["level"] == lid and not (e.get("zone") or e.get("user")
                                            or e.get("roof")
@@ -2962,6 +3391,50 @@ def cap_lower_floor(doc, lid) -> int:
     arch["structure"] += M.new_elements(arch["structure"], made)
     return len(made)
 
+
+_PLAN_LIMIT: dict = {}
+
+
+def plan_limit(doc, lid, pl, P):
+    """The area level ``lid``'s CAD plan draws: the outline of its lines
+    (walls, doors, windows, columns, the LINE and STEP layers, railings,
+    slab edges, stairs) with gaps up to ~1 m closed and the areas inside
+    filled, and the areas its level texts stand in — a floor goes no
+    further. None when it cannot be told."""
+    from shapely.geometry import LineString, Point
+    from shapely.geometry import Polygon as _Pg
+    from shapely.ops import unary_union
+    if pl is None or P is None:
+        return None
+    key = (lid, id(pl), len(pl["segs"]))
+    if key in _PLAN_LIMIT:
+        return _PLAN_LIMIT[key]
+    lay = pl["layers"]
+    pats = []
+    for k in ("walls", "doors", "windows", "columns", "lines", "steps",
+              "rails", "slab", "stairs"):
+        pats += list(P.get(k) or [])
+    segs = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+            if pats and _match(lay[s_[4]], pats)
+            and math.dist((s_[0], s_[1]), (s_[2], s_[3])) > 0.02]
+    if len(segs) < 3:
+        return None
+    # the lines thickened then thinned: an outline drawn in pieces, a
+    # parapet with breaks, read as closed; what it rings, filled
+    import shapely as _sh
+    closed = _sh.union_all(_sh.buffer(segs, 0.6, quad_segs=1)).buffer(
+        -0.45, quad_segs=1)
+    outer = unary_union([_Pg(g.exterior) for g in getattr(closed, "geoms",
+                                                         [closed])
+                         if g.geom_type == "Polygon" and g.area > 0.5])
+    if outer.is_empty:
+        return None
+    notes = [Point(x, y).buffer(1.0) for x, y, _v in note_levels(doc, lid)]
+    lim = unary_union([outer] + notes).buffer(0.3, join_style=2)
+    if len(_PLAN_LIMIT) > 8:
+        _PLAN_LIMIT.clear()
+    _PLAN_LIMIT[key] = lim
+    return lim
 
 def level_below(doc, lid):
     """The level under ``lid`` (by height), or None."""
@@ -6817,6 +7290,10 @@ def cad_steps(doc, lid) -> list:
     return out
 
 
+#: a floor step's tread when the CAD shows one riser only (12")
+STEP_TREAD = 0.3048
+
+
 def _own_steps(lines, bld) -> list:
     """The STEP layer's risers as whole lines (an L or a U of steps round
     a porch one riser line, its corners joined), in sets of risers one
@@ -6862,9 +7339,9 @@ def _own_steps(lines, bld) -> list:
                     ps[0].distance(bld) > ps[-1].distance(bld) + 0.05:
                 ps.reverse()
             gaps = [ps[k].distance(ps[k + 1]) for k in range(len(ps) - 1)]
-            tread = sorted(gaps)[len(gaps) // 2] if gaps else 0.3
+            tread = sorted(gaps)[len(gaps) // 2] if gaps else STEP_TREAD
         else:
-            tread = 0.3
+            tread = STEP_TREAD
         tread = min(max(tread, 0.2), 0.6)
         out.append({"own": True, "plines": ps, "tread": tread,
                     "n": len(ps), "lines": ps, "strips": [],
@@ -7021,7 +7498,7 @@ def platform_parts(doc) -> dict:
     # the entrance steps as the CAD draws them, from the rooms' floor
     # (the landing) down to the ground
     csets = cad_steps(doc, lid)
-    rmax_ = max(float(st.get("riser_max", 0.1778) or 0.1778), 0.10)
+    rmax_ = max(float(st.get("riser_max", 0.1524) or 0.1524), 0.10)
     Gb = G.buffer(0.01)
     Rb = R.buffer(0.01)
 
@@ -7131,8 +7608,8 @@ def platform_parts(doc) -> dict:
     cad_lines = [ln for cs_ in csets for ln in cs_["lines"]]
     if not st.get("entry_steps", True):
         return out
-    rmax = max(float(st.get("riser_max", 0.1778) or 0.1778), 0.10)
-    tread = max(float(st.get("tread_ext", 0.2794) or 0.2794), 0.22)
+    rmax = max(float(st.get("riser_max", 0.1524) or 0.1524), 0.10)
+    tread = max(float(st.get("tread_ext", 0.3048) or 0.3048), 0.22)
     solid = unary_union([G, WP])
     byid = {w["id"]: w for w in walls}
     made = []                                 # (edge point, direction)

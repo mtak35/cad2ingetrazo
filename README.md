@@ -502,3 +502,12 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Basement windows over the ground**: a window in a basement's outside wall stays between the natural ground level and the ground floor, under its slab. A window with no room for it there is left out.
 - **Floor levels by the level texts**: a level written on the plan holds for the floor until a dividing line (a step riser, a LINE-layer edge) and another level text are reached. A dividing line that stops short of a wall or of another line is carried on to it, so the areas it bounds close.
 - **Railings only where the CAD names them**: terrace and balcony railings are made only where a text on the plan says RAIL, RAILING, S.S RAIL or BALCONY (switch in 7.2).
+
+## 3.25.0
+- **Standard stairs turn back on themselves (U-turn)** by default: two flights side by side with a half landing («Standard stair» in 7.1; straight only when asked for and the well is long enough). The landings, of a traced stair too, reach out to the walls of the stair hall, never over a flight.
+- **Floor steps 6" riser, 12" tread** by default (7.1 «Floor steps: riser / tread»): the STEP layer's steps and the entrance steps.
+- **Floors never past the plan**: a floor's slab, and the terrace it makes over the floor below, stops where the level's own CAD plan, and the areas its level texts note, end.
+- **Walls broken at the columns**: a wall the CAD draws on through a column stops at the column's faces, either side, even under a window band run past the column (a window in each piece, up to the faces). A wall end left inside a column is brought back to its face, and the wall ends meeting at corners are joined cleanly.
+- **The LINE layer is never a wall**: a single line is an edge (a step, a change of floor, the paving); only the rules read it: a grille in a wall, a low wall from two faces paired or a closed strip, a platform where it closes round an area.
+- **Hatched or solid-filled walls are RCC**: a hatch or a solid fill drawn in a wall or a column marks it as structural (RCC) — a wall or a column made from the fill where none was drawn.
+- **An X of hidden (dashed) lines between columns or walls is an arch**: an arched opening across the span, by default the Islamic (pointed) arch; the default arch shape for openings is now pointed.

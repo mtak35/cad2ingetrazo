@@ -69,7 +69,7 @@ def _unit(doc, forced):
 
 _cache: dict = {}
 #: what a read holds: a read kept from an older version is read again
-READ_V = 4
+READ_V = 5
 
 
 def _sibling_dxf(path: Path):
@@ -245,7 +245,7 @@ def _read(path, unit=None) -> dict:
         doc = _open(tmp or path)
         k, note = _unit(doc, unit)
         out = {"segs": [], "loops": [], "circles": [], "arcs": [],
-               "texts": [],
+               "texts": [], "fills": [],
                "inserts": [], "unit": k, "unit_note": note,
                "seg_style": [], "styles": [], "hidden_layers": [],
                "_path": str(path), "v": READ_V}
@@ -270,7 +270,8 @@ def _read(path, unit=None) -> dict:
                       else [0.0, 0.0, 0.0, 0.0])
     out["layers"] = sorted({s[4] for s in out["segs"]}
                            | {t["layer"] for t in out["texts"]}
-                           | {lp["layer"] for lp in out["loops"]})
+                           | {lp["layer"] for lp in out["loops"]}
+                           | {f["layer"] for f in out["fills"]})
     if len(_cache) > 8:
         _cache.clear()
     _cache[key] = out
@@ -528,6 +529,41 @@ def _emit(e, inherit, depth, sag, out) -> None:
             out["texts"].append({"layer": lay, "text": txt, "x": p[0],
                                  "y": p[1], "h": e.dxf.get("height", 2.5),
                                  "rot": e.dxf.get("rotation", 0.0)})
+    elif t == "HATCH":
+        # a hatch / solid fill: its outer boundaries kept as filled areas
+        # (in a wall, RCC work), never as lines
+        try:
+            from ezdxf import path as ezpath
+            pat = str(e.dxf.get("pattern_name", "") or "")
+            solid = bool(e.dxf.get("solid_fill", 0))
+            for bp in e.paths:
+                try:
+                    pth = ezpath.from_hatch_boundary_path(bp, e.ocs(),
+                                                          e.dxf.elevation.z)
+                    pts = [(q[0], q[1]) for q in pth.flattening(sag)]
+                except Exception:  # noqa: BLE001
+                    continue
+                if len(pts) > 1 and math.dist(pts[0], pts[-1]) < 1e-9:
+                    pts = pts[:-1]
+                if len(pts) >= 3:
+                    out["fills"].append({"layer": lay, "pts": pts,
+                                         "pattern": pat, "solid": solid})
+        except Exception:  # noqa: BLE001
+            pass
+    elif t in ("SOLID", "TRACE"):
+        try:
+            vs = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx3, e.dxf.vtx2]
+            ocs = e.ocs()
+            pts = [tuple(ocs.to_wcs(v))[:2] for v in vs]
+            uniq = []
+            for q in pts:
+                if not uniq or math.dist(q, uniq[-1]) > 1e-9:
+                    uniq.append(q)
+            if len(uniq) >= 3:
+                out["fills"].append({"layer": lay, "pts": uniq,
+                                     "pattern": "SOLID", "solid": True})
+        except Exception:  # noqa: BLE001
+            pass
     elif t == "MTEXT":
         txt = e.plain_text(split=False).strip()
         if txt:
@@ -605,7 +641,10 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
                      if a_["layer"] in index],
             "texts": [dict(t, x=T(t["x"], t["y"])[0], y=T(t["x"], t["y"])[1],
                            h=t["h"] * k, rot=t["rot"] + rot_deg)
-                      for t in drawing["texts"] if t["layer"] in index]}
+                      for t in drawing["texts"] if t["layer"] in index],
+            "fills": [dict(f, pts=[T(*p) for p in f["pts"]])
+                      for f in drawing.get("fills") or ()
+                      if f["layer"] in index]}
 
 
 def far_from_base(drawing: dict, base) -> float:
@@ -646,6 +685,9 @@ def crop(drawing: dict, region) -> dict:
                        sum(p[1] for p in lp["pts"]) / len(lp["pts"]))]
     circles = [c for c in drawing["circles"] if inside(*c["c"])]
     arcs = [a_ for a_ in drawing.get("arcs") or () if inside(*a_["pm"])]
+    fills = [f for f in drawing.get("fills") or ()
+             if inside(sum(p[0] for p in f["pts"]) / len(f["pts"]),
+                       sum(p[1] for p in f["pts"]) / len(f["pts"]))]
     texts = [t for t in drawing["texts"] if inside(t["x"], t["y"])]
     inserts = [i for i in drawing.get("inserts", ())
                if inside((i["box"][0] + i["box"][2]) / 2,
@@ -653,12 +695,13 @@ def crop(drawing: dict, region) -> dict:
     xs = [v for s in segs for v in (s[0], s[2])]
     ys = [v for s in segs for v in (s[1], s[3])]
     out = dict(drawing, segs=segs, seg_style=seg_style, loops=loops,
-               circles=circles, arcs=arcs, texts=texts,
+               circles=circles, arcs=arcs, texts=texts, fills=fills,
                inserts=inserts,
                extents=([min(xs), min(ys), max(xs), max(ys)] if xs
                         else [x0, y0, x1, y1]),
                layers=sorted({s[4] for s in segs} | {t["layer"] for t in texts}
-                             | {lp["layer"] for lp in loops}),
+                             | {lp["layer"] for lp in loops}
+                             | {f["layer"] for f in fills}),
                region=[x0, y0, x1, y1])
     if len(_crops) > 16:
         _crops.clear()

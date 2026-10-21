@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.24)
+## 13. What's new since 3.11 (3.12 – 3.25)
 
 The full list, version by version, is in the README. In short:
 
@@ -487,6 +487,12 @@ The full list, version by version, is in the README. In short:
 - Basement windows kept between the natural ground and the ground floor.
 - A level written on the plan holds until a dividing line and the next level text.
 - Terrace and balcony railings only where the CAD writes RAIL or BALCONY.
+
+**3.25 — cleaner plans**
+- U-turn standard stairs, their landings out to the stair hall's walls; floor steps 6" / 12".
+- Floors stop where the plan and its level texts end.
+- Walls broken at the column faces, their corners joined cleanly; the LINE layer never read as a wall.
+- Hatched / filled walls taken as RCC structure; an X of hidden lines between columns is an (Islamic, pointed) arch.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

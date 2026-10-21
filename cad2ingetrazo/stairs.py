@@ -104,7 +104,7 @@ def n_risers(H, riser=RISER) -> int:
 
 
 def design(corners, H, flip=False, riser=RISER, going=None,
-           n=None) -> dict:
+           n=None, shape="u") -> dict:
     """Risers, going and kind for a well and a storey height H: risers no
     higher than ``riser``, treads ``going`` deep (11" by default) unless the
     well is too short for them (then as deep as it allows); ``n`` risers
@@ -114,7 +114,10 @@ def design(corners, H, flip=False, riser=RISER, going=None,
     rise = H / n
     want = float(going) if going else None
     straight_run = (n - 1) * (want or GOING_MIN)
-    if L >= straight_run + 0.9 or w < 1.6:
+    # a U-turn by default (two flights side by side, a half landing at the
+    # far end); straight only when asked for and the well is long enough —
+    # or too narrow for two flights
+    if w < 1.6 or (shape == "straight" and L >= straight_run + 0.9):
         g = (L - 0.9) / (n - 1)
         g = min(want, g) if want else min(GOING_MAX, g)
         return {"kind": "straight", "risers": n, "rise": round(rise, 4),
@@ -149,7 +152,8 @@ def redesign(st, new) -> dict:
     if not st.get("traced") and st.get("corners"):
         d = design(st["corners"], H, st.get("flip", False),
                    going=float(new.get("going") or st.get("going", 0.2794)),
-                   n=n)
+                   n=n, shape="straight" if st.get("kind") == "straight"
+                   else "u")
         out.update(kind=d["kind"], going=d["going"])
     else:
         out["going"] = st.get("going")
@@ -266,6 +270,78 @@ def _as_traced(st, fl, lands):
     return out
 
 
+def extend_landings(st, room, reach=1.5) -> int:
+    """The stair's landings carried out to the walls of its stair hall
+    (``room``, the hall's inside outline): each landing grows sideways and
+    on past the flight that ends at it, as far as the walls (``reach`` at
+    most), never over a flight. How many grew."""
+    from shapely.geometry import MultiPoint, Point, Polygon
+    from shapely.ops import unary_union
+    if room is None or room.is_empty or not st.get("landings"):
+        return 0
+    fl = st.get("flights") or []
+    foots = []
+    for f in fl:
+        pts = [tuple(p[:2]) for ln in f["lines"] for p in ln]
+        if not pts:
+            continue
+        d, g = f["d"], float(f.get("g", 0.28))
+        a, b = f["lines"][-1]
+        pts += [(a[0] + d[0] * g, a[1] + d[1] * g),
+                (b[0] + d[0] * g, b[1] + d[1] * g)]
+        foots.append(MultiPoint(pts).convex_hull.buffer(0.005))
+    F = unary_union(foots) if foots else Polygon()
+    inside = room.buffer(-0.005)
+    n = 0
+    count = 0
+    ends = {}
+    for f in fl:
+        count += len(f["lines"])
+        ends[count] = f
+    for lg in st["landings"]:
+        try:
+            L0 = Polygon([tuple(p[:2]) for p in lg["corners"]]).buffer(0)
+            if L0.is_empty:
+                continue
+            f = ends.get(int(lg.get("after", -1)))
+            region = inside.intersection(L0.buffer(reach, join_style=2))
+            if f is not None:            # not back down the flight it ends
+                d = f["d"]
+                back = min(p[0] * d[0] + p[1] * d[1]
+                           for p in L0.exterior.coords) - 0.005
+                c = L0.centroid
+                big = 50.0
+                u = (-d[1], d[0])
+                o = (c.x + d[0] * (back - (c.x * d[0] + c.y * d[1])),
+                     c.y + d[1] * (back - (c.x * d[0] + c.y * d[1])))
+                half = Polygon([(o[0] - u[0] * big, o[1] - u[1] * big),
+                                (o[0] + u[0] * big, o[1] + u[1] * big),
+                                (o[0] + u[0] * big + d[0] * big,
+                                 o[1] + u[1] * big + d[1] * big),
+                                (o[0] - u[0] * big + d[0] * big,
+                                 o[1] - u[1] * big + d[1] * big)])
+                region = region.intersection(half)
+            region = region.difference(F.difference(L0.buffer(0.002)))
+            region = unary_union([region, L0])
+            comp = next((g_ for g_ in getattr(region, "geoms", [region])
+                         if g_.geom_type == "Polygon" and
+                         g_.buffer(0.01).contains(L0.representative_point())),
+                        None)
+            if comp is None or comp.area < L0.area + 0.05:
+                continue
+            comp = comp.buffer(0.002, join_style=2).buffer(-0.002,
+                                                           join_style=2)
+            comp = comp.simplify(0.01)
+            if comp.geom_type != "Polygon":
+                continue
+            lg["corners"] = [[round(x, 4), round(y, 4)]
+                             for x, y in list(comp.exterior.coords)[:-1]]
+            n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
+
+
 def refit(r, H, n_need, mx=MAX_FLIGHT, stt0=None, flip=False) -> dict:
     """The stair ``r`` (the floor below's) made for a storey ``H`` high:
     ``n_need`` risers — the last flight lengthened (or shortened) as
@@ -275,7 +351,8 @@ def refit(r, H, n_need, mx=MAX_FLIGHT, stt0=None, flip=False) -> dict:
     if not r.get("traced"):
         r0 = dict(design(r["corners"], H, r.get("flip", flip),
                          float(stt0.get("stair_riser", 0.1778)),
-                         float(stt0.get("stair_going", 0.2794))),
+                         float(stt0.get("stair_going", 0.2794)),
+                         shape=stt0.get("stair_shape", "u")),
                   corners=r["corners"])
         f0, l0 = as_flights(r0)
         if any(len(f["lines"]) > mx for f in f0):
@@ -429,7 +506,8 @@ def auto(doc, cad=None, flip=False) -> dict:
                 r0 = dict(design(
                     corners, H, flip,
                     float(stt0.get("stair_riser", 0.1778)),
-                    float(stt0.get("stair_going", 0.2794))),
+                    float(stt0.get("stair_going", 0.2794)),
+                    shape=stt0.get("stair_shape", "u")),
                     corners=corners)
                 mx = int(stt0.get("stair_max_flight", MAX_FLIGHT))
                 f0, l0 = as_flights(r0)
@@ -461,6 +539,26 @@ def auto(doc, cad=None, flip=False) -> dict:
         for r in recs:
             r = dict(r, id=uuid.uuid4().hex[:8], level=lv["id"],
                      to=up["id"] if up is not None else None)
+            # the landings out to the stair hall's walls
+            if stt0.get("landing_to_walls", True) and r.get("corners"):
+                try:
+                    cs_ = r["corners"]
+                    cpt = Point(sum(p[0] for p in cs_) / len(cs_),
+                                sum(p[1] for p in cs_) / len(cs_))
+                    hall = next((q["poly"] for q in rooms
+                                 if q["poly"].buffer(0.3).contains(cpt)
+                                 and q["area"] < 80.0), None)
+                    if hall is not None:
+                        if not r.get("traced"):
+                            f0, l0 = as_flights(r)
+                            if l0:
+                                r = dict(_as_traced(r, f0, l0),
+                                         rise=r.get("rise"),
+                                         going=r.get("going"))
+                        extend_landings(r, hall)
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("stairs.extend_landings")
             cs1 = r.get("corners") or []
             if cs1 and kept:
                 r.update(kept.get((lv["id"], round(sum(

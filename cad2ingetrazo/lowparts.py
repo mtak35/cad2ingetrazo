@@ -208,15 +208,10 @@ def analyze(doc, lid, pl, is_line) -> dict:
                               "b": [round(q_[0], 4), round(q_[1], 4)],
                               "t": round(gap, 3)})
         else:
+            # one line alone is an edge (a step, a change of floor, the
+            # paving's), never a wall: only two faces paired, or a closed
+            # strip, make a low wall
             taken[i] = True
-            # one line: a 4½" wall standing on it — inward from its line,
-            # never into the building's walls
-            mid = ln.interpolate(0.5, normalized=True)
-            if not WP.is_empty and WP.buffer(0.02).contains(mid):
-                continue
-            low_walls.append({"a": [round(x0, 4), round(y0, 4)],
-                              "b": [round(x1, 4), round(y1, 4)],
-                              "t": LOW_WALL_T})
     # the platforms' levels: their notes (each part to its nearest), else
     # PLAT_H over what is under them
     notes = []

@@ -3539,6 +3539,24 @@ class Panel(QWidget):
                                 "flight is split, with a landing between "
                                 "(Stairs on all floors makes them again)")
         f.addRow("Most steps in one flight", self.st_maxf)
+        self.st_shape = QComboBox()
+        for k_, lab_ in (("u", "U-turn (two flights, half landing)"),
+                         ("straight", "Straight (where the well is long "
+                          "enough)")):
+            self.st_shape.addItem(lab_, k_)
+        self.st_shape.setToolTip("The flights of a stair the CAD does not "
+                                 "draw step by step; the landings reach the "
+                                 "stair hall's walls")
+        f.addRow("Standard stair", self.st_shape)
+        row2 = QHBoxLayout()
+        self.sp_riser = _spin(0.10, 0.25, 0.1524, 0.0127)     # 6"
+        self.sp_tread = _spin(0.22, 0.60, 0.3048, 0.0127)     # 12"
+        self.sp_riser.setToolTip("Floor steps (the STEP layer, entrance "
+                                 "steps): risers no higher than this")
+        self.sp_tread.setToolTip("Floor steps: the tread")
+        row2.addWidget(self.sp_riser)
+        row2.addWidget(self.sp_tread)
+        f.addRow("Floor steps: riser / tread", row2)
         self.st_nose = _spin(0.0, 0.1, 0.025, 0.005)
         self.st_nose.setToolTip("How far the tread's front edge projects "
                                 "past the riser")
@@ -3772,6 +3790,10 @@ class Panel(QWidget):
         self.st_riser.setValue(float(stt.get("stair_riser", 0.1778)))
         self.st_going.setValue(float(stt.get("stair_going", 0.2794)))
         self.st_maxf.setValue(int(stt.get("stair_max_flight", 14) or 14))
+        self.st_shape.setCurrentIndex(max(self.st_shape.findData(
+            stt.get("stair_shape", "u")), 0))
+        self.sp_riser.setValue(float(stt.get("riser_max", 0.1524)))
+        self.sp_tread.setValue(float(stt.get("tread_ext", 0.3048)))
         self.t_railtext.blockSignals(True)
         self.t_railtext.setChecked(bool(stt.get("rail_needs_text", True)))
         self.t_railtext.blockSignals(False)
@@ -3805,6 +3827,9 @@ class Panel(QWidget):
                                stair_riser=self.st_riser.value(),
                                stair_going=self.st_going.value(),
                                stair_max_flight=self.st_maxf.value(),
+                               stair_shape=self.st_shape.currentData(),
+                               riser_max=self.sp_riser.value(),
+                               tread_ext=self.sp_tread.value(),
                                stair_nosing=self.st_nose.value(),
                                stair_nose_type=self.st_nose_type
                                .currentData(),
