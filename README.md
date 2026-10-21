@@ -417,7 +417,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.18.0
 - **Language** — the 🌐 box beside the extension's name: the panel in the world's ten most spoken languages (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو) — section titles, buttons, check boxes and field labels; tooltips stay English. Remembered.
-- **Update from GitHub** — the ⟳ button beside the name: reads the newest version at github.com/mtak35/cad2ingetrazo and, when it is newer, installs it (the current one kept as a `cad2ingetrazo_backup_<date>` copy); restart IngeTrazo to load it.
+- **Newer version?** — the ⟳ button beside the name reads the version in the IngeTrazo extension catalogue and tells you when it is newer; install it from the Extension Manager.
 - **Numbered sections, closed on every launch** — 1 Import … 13 Plans, sheets and export (1.1 / 1.2 the import settings and layers).
 - **Ground floor outside finishes 1'-0" lower by default** — also in section 6 under «Ground floor slab» («Ground floor outside finishes drop»), and still in section 9.
 - **Foundation platform** (section 6, on by default): with slabs as floors and no ground slab, the ground floor stands on a filled platform (PCC) from the natural ground up under its finishes — the ground F.F.L. (2'-0", with the 2" finish) under the rooms, 1'-0" lower under the verandah / lobby / porch; the ground floor's walls run down to N.G.L. With a basement it becomes a slab like the other floors' (the ground floor slab turns on by itself).
@@ -492,3 +492,6 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
   - the roof plan's glazing on the attic goes;
   - the dome stands over the middle of the riwaqs;
   - a masjid built before is replaced when the build runs again.
+
+## 3.23.3
+- **The ⟳ button only checks for a newer version.** It reads the version listed in the IngeTrazo extension catalogue and tells you when it is newer than yours; you install it from IngeTrazo's Extension Manager, which checks the download against the catalogue's SHA-256. The extension no longer downloads its own code or writes over its folder. (Earlier versions' update copies, `cad2ingetrazo_backup_…`, are still renamed `_cad2ingetrazo_backup_…`, so IngeTrazo never loads them as a second extension.)

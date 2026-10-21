@@ -567,8 +567,8 @@ class Panel(QWidget):
         self._apply_lang()
 
     def check_update(self):
-        """The newest version on GitHub: told, and put in place when asked
-        (it loads at IngeTrazo's next start)."""
+        """Whether the extension catalogue lists a newer version — told
+        only: the Extension Manager installs it."""
         from PySide6.QtWidgets import QMessageBox
         from . import updater as UP
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -577,39 +577,23 @@ class Panel(QWidget):
         except Exception as e:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "CAD2IngeTrazo",
-                                f"Could not reach GitHub ({e}).\n"
-                                f"{UP.PAGE}")
+                                f"Could not read the extension catalogue "
+                                f"({e}).")
             return
         QApplication.restoreOverrideCursor()
         here = getattr(self, "_ver", "") or "0"
         if not UP.newer(remote, here):
             QMessageBox.information(
                 self, "CAD2IngeTrazo",
-                f"CAD2IngeTrazo {here} is the newest version.\n{UP.PAGE}")
+                f"CAD2IngeTrazo {here} is the newest version in the "
+                "extension catalogue.")
             return
-        if QMessageBox.question(
-                self, "CAD2IngeTrazo",
-                f"Version {remote} is out (this one: {here}).\n\nDownload "
-                f"it from {UP.PAGE} and install it now? It loads when "
-                "IngeTrazo starts again; the current version is kept as a "
-                "backup.") != QMessageBox.Yes:
-            return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            bak = UP.install()
-        except Exception as e:  # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            log_error("panel.check_update")
-            QMessageBox.warning(self, "CAD2IngeTrazo",
-                                f"The update failed: {e}")
-            return
-        QApplication.restoreOverrideCursor()
         QMessageBox.information(
             self, "CAD2IngeTrazo",
-            f"CAD2IngeTrazo {remote} is installed — restart IngeTrazo to use "
-            f"it.\n(The previous version is kept in {bak}.)")
+            f"CAD2IngeTrazo {remote} is in the extension catalogue (this one: "
+            f"{here}).\n\nInstall it from IngeTrazo's Extension Manager.\n"
+            f"What's new: {UP.PAGE}")
 
-    # ---- the document ---------------------------------------------------------
     def doc(self):
         return PJ.get(self.vp.scene)
 
@@ -709,8 +693,8 @@ class Panel(QWidget):
         self.lang_box.currentIndexChanged.connect(self._set_lang)
         trow.addWidget(self.lang_box)
         b_up = _btn("⟳", self.check_update,
-                    "Update the extension — the newest CAD2IngeTrazo from "
-                    "github.com/mtak35/cad2ingetrazo")
+                    "Is there a newer CAD2IngeTrazo? (the extension "
+                    "catalogue; updates install from the Extension Manager)")
         b_up.setProperty("c2i_notr", True)
         b_up.setMaximumWidth(34)
         trow.addWidget(b_up)

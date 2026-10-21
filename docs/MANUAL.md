@@ -482,4 +482,4 @@ The full list, version by version, is in the README. In short:
 - Arcades over the selected columns, rows of small arched openings (a clerestory / attic band) and ablaq voussoirs on any arch (section 5).
 
 **The panel**
-- Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that updates the extension from GitHub.
+- Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).
