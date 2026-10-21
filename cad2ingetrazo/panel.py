@@ -3496,9 +3496,11 @@ class Panel(QWidget):
 
     # ---- 7. stairs, terraces, balconies -----------------------------------------
     def _stairs_part(self):
-        box, body = _fold("7  Stairs, terraces and balconies", "stairs",
-                          False)
-        f = _form(body)
+        box, body = _fold("7  Stairs, steps, terraces and balconies",
+                          "stairs", False)
+        f7 = _form(body)
+        s1box, s1body = _fold("7.1  Stairs and steps", "stairs71", False)
+        f = _form(s1body)
         self.st_info = QLabel("")
         self.st_info.setWordWrap(True)
         f.addRow(self.st_info)
@@ -3530,6 +3532,13 @@ class Panel(QWidget):
         row.addWidget(self.st_riser)
         row.addWidget(self.st_going)
         f.addRow("Riser (max) / tread", row)
+        self.st_maxf = QSpinBox()
+        self.st_maxf.setRange(3, 30)
+        self.st_maxf.setValue(14)
+        self.st_maxf.setToolTip("Risers in one flight at most: a longer "
+                                "flight is split, with a landing between "
+                                "(Stairs on all floors makes them again)")
+        f.addRow("Most steps in one flight", self.st_maxf)
         self.st_nose = _spin(0.0, 0.1, 0.025, 0.005)
         self.st_nose.setToolTip("How far the tread's front edge projects "
                                 "past the riser")
@@ -3626,6 +3635,19 @@ class Panel(QWidget):
                       "wrong: the flights, how each turns off its landing, "
                       "the whole stair turned — the landings and railings "
                       "follow (the selected stair, else this level's)"))
+        f7.addRow(s1box)
+        s2box, s2body = _fold("7.2  Terraces and balconies", "terraces72",
+                              False)
+        f = _form(s2body)
+        self.t_railtext = QCheckBox(
+            "Railings only where the CAD writes RAIL or BALCONY")
+        self.t_railtext.setChecked(True)
+        self.t_railtext.setToolTip("Terrace and balcony railings are made "
+                                   "from the CAD only where a text on the "
+                                   "plan names them (RAILING, S.S RAIL, "
+                                   "BALCONY…)")
+        self.t_railtext.toggled.connect(self._rail_text_rule)
+        f.addRow(self.t_railtext)
         f.addRow(QLabel("<i>Terraces (every upper floor):</i>"))
         row = QHBoxLayout()
         self.te_h = _spin(0, 3, 1.0)
@@ -3711,7 +3733,13 @@ class Panel(QWidget):
         row.addWidget(self.ba_t)
         f.addRow("Railing height / thickness", row)
         f.addRow(_btn("Balcony on the selected wall", self._balcony))
+        f7.addRow(s2box)
         self.lay.addWidget(box)
+
+    def _rail_text_rule(self, on):
+        doc = self.doc()
+        doc["settings"]["rail_needs_text"] = bool(on)
+        PJ.store_only(self.vp, doc)
 
     def _parapet_rail(self):
         doc = self.doc()
@@ -3743,6 +3771,10 @@ class Panel(QWidget):
         self.st_waist.setValue(float(stt.get("stair_waist", 0.1524)))
         self.st_riser.setValue(float(stt.get("stair_riser", 0.1778)))
         self.st_going.setValue(float(stt.get("stair_going", 0.2794)))
+        self.st_maxf.setValue(int(stt.get("stair_max_flight", 14) or 14))
+        self.t_railtext.blockSignals(True)
+        self.t_railtext.setChecked(bool(stt.get("rail_needs_text", True)))
+        self.t_railtext.blockSignals(False)
         self.st_nose.setValue(float(stt.get("stair_nosing", 0.025)))
         for cb_, k_, dv_ in ((self.st_nose_type, "stair_nose_type", "square"),
                              (self.st_fin, "stair_fin", "marble")):
@@ -3772,6 +3804,7 @@ class Panel(QWidget):
                                stair_waist=self.st_waist.value(),
                                stair_riser=self.st_riser.value(),
                                stair_going=self.st_going.value(),
+                               stair_max_flight=self.st_maxf.value(),
                                stair_nosing=self.st_nose.value(),
                                stair_nose_type=self.st_nose_type
                                .currentData(),

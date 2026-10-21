@@ -482,3 +482,10 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 
 ## 3.23.3
 - **The ⟳ button only checks for a newer version.** It reads the version listed in the IngeTrazo extension catalogue and tells you when it is newer than yours; you install it from IngeTrazo's Extension Manager, which checks the download against the catalogue's SHA-256. The extension no longer downloads its own code or writes over its folder. (Earlier versions' update copies, `cad2ingetrazo_backup_…`, are still renamed `_cad2ingetrazo_backup_…`, so IngeTrazo never loads them as a second extension.)
+
+## 3.24.0
+- **Section 7 in two folds**: «7.1 Stairs and steps» and «7.2 Terraces and balconies», each with its own settings.
+- **No flight longer than 14 steps** («Most steps in one flight», 7.1). A longer flight is split as evenly as it goes, with a landing between, for stairs traced from the CAD and for standard stairs alike. On a floor added with no plan of its own, the stair from the floor below is made again for the new storey's height: risers no higher than the riser set, the last flight lengthened or a return flight added, flights split at 14 with their landings, and railings carried across the landings and round the well above.
+- **Basement windows over the ground**: a window in a basement's outside wall stays between the natural ground level and the ground floor, under its slab. A window with no room for it there is left out.
+- **Floor levels by the level texts**: a level written on the plan holds for the floor until a dividing line (a step riser, a LINE-layer edge) and another level text are reached. A dividing line that stops short of a wall or of another line is carried on to it, so the areas it bounds close.
+- **Railings only where the CAD names them**: terrace and balcony railings are made only where a text on the plan says RAIL, RAILING, S.S RAIL or BALCONY (switch in 7.2).

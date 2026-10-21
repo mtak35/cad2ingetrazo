@@ -147,4 +147,6 @@ T = [
     "piso", "…ou um retângulo L × P", "…ou mover por X, Y",
     "→ parede maciça", "Idioma", "Atualizar a extensão",
     "Procurar atualizações",
+    # 267
+    'Escadas, degraus, terraços e varandas', 'Escadas e degraus', 'Terraços e varandas', 'Máximo de degraus por lance', 'Guarda-corpos só onde o CAD escreve RAIL ou BALCONY',
 ]

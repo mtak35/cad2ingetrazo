@@ -269,4 +269,9 @@ KEYS = [
     "Language",  # 264
     "Update the extension",  # 265
     "Check for updates",  # 266
+    'Stairs, steps, terraces and balconies',  # 267
+    'Stairs and steps',  # 268
+    'Terraces and balconies',  # 269
+    'Most steps in one flight',  # 270
+    'Railings only where the CAD writes RAIL or BALCONY',  # 271
 ]

@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.23)
+## 13. What's new since 3.11 (3.12 – 3.24)
 
 The full list, version by version, is in the README. In short:
 
@@ -480,6 +480,13 @@ The full list, version by version, is in the README. In short:
 - Minarets (square, octagonal and fluted shafts, corbelled galleries, lantern, cupola, crescent) and chhatris on the parapet (section 8).
 - Domes on a square block with stepped tiers, raised over the roof.
 - Arcades over the selected columns, rows of small arched openings (a clerestory / attic band) and ablaq voussoirs on any arch (section 5).
+
+**3.24 — stairs, basements, levels and railings by the CAD**
+- Section 7 split into «7.1 Stairs and steps» and «7.2 Terraces and balconies».
+- At most 14 steps in a flight, with a landing between the parts; a floor added later gets its stair made again for its height, with landings and railings.
+- Basement windows kept between the natural ground and the ground floor.
+- A level written on the plan holds until a dividing line and the next level text.
+- Terrace and balcony railings only where the CAD writes RAIL or BALCONY.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

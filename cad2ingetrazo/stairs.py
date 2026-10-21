@@ -194,6 +194,130 @@ def steps(st, z0) -> list:
     return out
 
 
+MAX_FLIGHT = 14          # risers in one flight at most: more, a landing
+
+
+def split_flights(flights, landings, maxn=MAX_FLIGHT):
+    """No flight of more than ``maxn`` risers: a longer one is split into
+    flights as even as can be, with a landing between them — straight on,
+    as deep as the flight is wide (0.9 m at least); the stair above it
+    carried on by the landing's depth. (flights, landings, how many
+    landings added)."""
+    maxn = max(int(maxn or MAX_FLIGHT), 3)
+    out_f, out_l = [], []
+    lands = [dict(x) for x in landings or []]
+    shift = [0.0, 0.0]                      # carried on to all above
+    count = 0
+    added = 0
+
+    def mv(p):
+        return [p[0] + shift[0], p[1] + shift[1]]
+    # a landing keeps its place among the risers: moved by what was
+    # inserted below it
+    land_at = sorted(lands, key=lambda x: x.get("after", 0))
+    li = 0
+    for f in flights:
+        lines = [[list(a), list(b)] for a, b in f["lines"]]
+        d = f["d"]
+        w = float(f.get("w", 1.0))
+        g = float(f.get("g", 0.28))
+        n = len(lines)
+        k = int(math.ceil(n / maxn)) if n > maxn and not f.get("winder") \
+            else 1
+        sizes = [n // k + (1 if j < n % k else 0) for j in range(k)]
+        pos = 0
+        for j, sz in enumerate(sizes):
+            # the landings below this run (their «after» within it)
+            while li < len(land_at) and land_at[li].get("after", 0) <= count:
+                L_ = land_at[li]
+                out_l.append(dict(L_, corners=[mv(p) for p in L_["corners"]]))
+                li += 1
+            chunk = [[mv(a), mv(b)] for a, b in lines[pos:pos + sz]]
+            nf = dict(f, lines=chunk)
+            out_f.append(nf)
+            count += sz
+            pos += sz
+            if j < k - 1:                    # a landing, then on
+                D = max(w, 0.9)
+                a, b = chunk[-1]
+                pts = [tuple(a), tuple(b), (a[0] + d[0] * D, a[1] + d[1] * D),
+                       (b[0] + d[0] * D, b[1] + d[1] * D)]
+                out_l.append({"corners": [list(p) for p in _box_along(pts, d)],
+                              "after": count})
+                shift[0] += d[0] * (D - g)
+                shift[1] += d[1] * (D - g)
+                added += 1
+    while li < len(land_at):
+        L_ = land_at[li]
+        out_l.append(dict(L_, corners=[mv(p) for p in L_["corners"]]))
+        li += 1
+    return out_f, out_l, added
+
+
+def _as_traced(st, fl, lands):
+    n = sum(len(f["lines"]) for f in fl)
+    out = dict(st)
+    out.update({"traced": True, "kind": "traced", "flights": [
+        dict({"lines": [[list(a), list(b)] for a, b in f["lines"]],
+              "d": list(f["d"]), "w": f["w"], "g": f["g"]},
+             **({"winder": True} if f.get("winder") else {})) for f in fl],
+        "landings": lands, "risers": n})
+    out["corners"] = outline_of(out)
+    return out
+
+
+def refit(r, H, n_need, mx=MAX_FLIGHT, stt0=None, flip=False) -> dict:
+    """The stair ``r`` (the floor below's) made for a storey ``H`` high:
+    ``n_need`` risers — the last flight lengthened (or shortened) as
+    needed —, then no flight of more than ``mx`` risers (a landing between
+    the parts)."""
+    stt0 = stt0 or {}
+    if not r.get("traced"):
+        r0 = dict(design(r["corners"], H, r.get("flip", flip),
+                         float(stt0.get("stair_riser", 0.1778)),
+                         float(stt0.get("stair_going", 0.2794))),
+                  corners=r["corners"])
+        f0, l0 = as_flights(r0)
+        if any(len(f["lines"]) > mx for f in f0):
+            f1, l1, _n = split_flights(f0, l0, mx)
+            r0 = _as_traced(r0, f1, l1)
+        for k in OWN:
+            if r.get(k):
+                r0[k] = r[k]
+        return r0
+    n0 = int(r.get("risers") or 0)
+    if n0 == n_need and all(len(f["lines"]) <= mx for f in r["flights"]):
+        r["rise"] = round(H / n0, 4)
+        return r
+    fl = [dict(f, lines=[[list(a), list(b)] for a, b in f["lines"]])
+          for f in r["flights"]]
+    have = sum(len(f["lines"]) for f in fl)
+    if n_need < have:                      # fewer: off the top flight(s)
+        cut = have - n_need
+        while cut > 0 and fl:
+            last = fl[-1]["lines"]
+            take = min(cut, len(last) if len(fl) > 1 else len(last) - 2)
+            if take <= 0:
+                break
+            fl[-1]["lines"] = last[:len(last) - take]
+            cut -= take
+            if not fl[-1]["lines"]:
+                fl.pop()
+    fl, lands = complete(fl, n_need, None)
+    have = sum(len(f["lines"]) for f in fl)
+    if n_need > have and fl:               # more: the top flight goes on
+        f = fl[-1]
+        d, g = f["d"], float(f.get("g", 0.28))
+        for _k in range(n_need - have):
+            a, b = f["lines"][-1]
+            f["lines"].append([[a[0] + d[0] * g, a[1] + d[1] * g],
+                               [b[0] + d[0] * g, b[1] + d[1] * g]])
+    fl, lands, _n = split_flights(fl, lands, mx)
+    out = _as_traced(r, fl, lands)
+    out["rise"] = round(H / out["risers"], 4)
+    return out
+
+
 # ---- doing it ---------------------------------------------------------------------------
 def auto(doc, cad=None, flip=False) -> dict:
     """Stairs on every floor, as the plans draw them: the tread lines of
@@ -282,6 +406,8 @@ def auto(doc, cad=None, flip=False) -> dict:
                 except Exception:  # noqa: BLE001
                     from .host import log_error
                     log_error("stairs.winders")
+            fl, lands, _nl = split_flights(
+                fl, lands, int(stt0.get("stair_max_flight", MAX_FLIGHT)))
             n = sum(len(f["lines"]) for f in fl)
             st = {"traced": True, "flights": [
                 dict({"lines": [[list(a), list(b)] for a, b in f["lines"]],
@@ -300,20 +426,36 @@ def auto(doc, cad=None, flip=False) -> dict:
             wells = list(cad.get(lv["id"]) or []) or \
                 from_rooms(arch, lv["id"])
             for corners in wells:
-                recs.append(dict(design(
+                r0 = dict(design(
                     corners, H, flip,
                     float(stt0.get("stair_riser", 0.1778)),
                     float(stt0.get("stair_going", 0.2794))),
-                    corners=corners))
+                    corners=corners)
+                mx = int(stt0.get("stair_max_flight", MAX_FLIGHT))
+                f0, l0 = as_flights(r0)
+                if any(len(f["lines"]) > mx for f in f0):
+                    f1, l1, _nl = split_flights(f0, l0, mx)
+                    r0 = _as_traced(r0, f1, l1)
+                recs.append(r0)
         if not recs and carried and not (doc.get("imports") or {}).get(
                 lv["id"]):                        # the floor below's stair
             # (only on a floor with no plan of its own: one imported that
             # draws no stair has none)
-            recs = [dict(r) for r in carried]
-            for r in recs:
-                if r.get("traced"):
-                    n = r["risers"]
-                    r["rise"] = round(H / n, 4)
+            # (a new floor added over it: the stair made again for this
+            # storey's height — its risers no higher than the riser set,
+            # no flight longer than the most steps set, a landing between)
+            mx = int(stt0.get("stair_max_flight", MAX_FLIGHT))
+            recs = []
+            for r in carried:
+                try:
+                    recs.append(refit(dict(r), H, n_need, mx, stt0, flip))
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("stairs.refit")
+                    r = dict(r)
+                    if r.get("traced"):
+                        r["rise"] = round(H / r["risers"], 4)
+                    recs.append(r)
         if recs:
             carried = recs
         for r in recs:

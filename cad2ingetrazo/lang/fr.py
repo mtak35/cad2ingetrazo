@@ -151,4 +151,6 @@ T = [
     "giron", "…ou un rectangle L × P", "…ou déplacer de X, Y",
     "→ mur plein", "Langue", "Mettre à jour l'extension",
     "Rechercher des mises à jour",
+    # 267
+    'Escaliers, marches, terrasses et balcons', 'Escaliers et marches', 'Terrasses et balcons', 'Marches au plus par volée', 'Garde-corps seulement où le CAD écrit RAIL ou BALCONY',
 ]

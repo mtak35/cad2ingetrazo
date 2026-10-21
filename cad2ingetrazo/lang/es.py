@@ -144,4 +144,6 @@ T = [
     # 260
     "huella", "…o un rectángulo A × P", "…o mover por X, Y", "→ muro sólido",
     "Idioma", "Actualizar la extensión", "Buscar actualizaciones",
+    # 267
+    'Escaleras, gradas, terrazas y balcones', 'Escaleras y gradas', 'Terrazas y balcones', 'Máximo de peldaños por tramo', 'Barandas solo donde el CAD dice RAIL o BALCONY',
 ]

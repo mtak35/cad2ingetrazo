@@ -83,6 +83,8 @@ DEFAULTS = {
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
     "plinth": 0.15,                # m, ground floor above the plot's ground
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
+    "rail_needs_text": True,       # railings only where the CAD writes them
+    "stair_max_flight": 14,        # risers in one flight at most
     "gffl_v": 2,                   # 3.14: +2'-0" the default
     "stair_headroom_cut": True, "stair_head": 2.1336,   # 7'-0" headroom
     "stair_well": "railing", "corner_windows": True, "slab_to_columns": True,
@@ -694,6 +696,87 @@ def _placed_plan(doc, lid):
 CURB_H, CURB_T = 0.1524, 0.0762          # the terrace railing's upstand
 
 
+RAIL_WORDS = re.compile(r"RAIL|RALL|BALCON|GRILL\s*RAIL|PARAPET\s*RAIL",
+                        re.I)
+
+
+def rail_text_points(doc, lid, pl=None) -> list:
+    """[(x, y)] of the CAD's texts on level ``lid`` that name a railing or
+    a balcony («RAILING», «S.S RAIL», «BALCONY»…)."""
+    src = (pl or {}).get("texts") if pl is not None else None
+    if src is None:
+        src = [t for t in doc.get("texts") or [] if t.get("level") == lid]
+    return [(float(t["x"]), float(t["y"])) for t in src
+            if RAIL_WORDS.search(str(t.get("text", "")))]
+
+
+def basement_windows(doc) -> dict:
+    """The windows in a basement's outside walls kept between the natural
+    ground (0) and the ground floor (under its slab): a window that cannot
+    fit there goes. {"moved", "removed"}."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    out = {"moved": 0, "removed": 0}
+    info = S.levels_info(arch, M.elevations)
+    g = next((lv for lv in arch["levels"] if lv.get("kind") == "ground"),
+             None)
+    if g is None:
+        return out
+    z_g = info[g["id"]]["z0"]
+    slab_t = float(doc["settings"].get("slab_t", 0.1524) or 0.1524)
+    # the ground floor read already: its level is the one to keep under
+    # (before that, nothing is taken away — the levels may change yet)
+    final = any(w["level"] == g["id"] for w in arch["walls"])
+    for lv in arch["levels"]:
+        if lv.get("kind") != "basement":
+            continue
+        lid = lv["id"]
+        z0 = info[lid]["z0"]
+        walls = [w for w in arch["walls"] if w["level"] == lid
+                 and not w.get("rail") and W.why_not(w) is None]
+        if not walls:
+            continue
+        try:
+            u_ = unary_union(SE.wall_polys(walls)).buffer(
+                1.0, join_style=2).buffer(-1.0, join_style=2)
+            foot = unary_union([Polygon(q.exterior) for q in
+                                getattr(u_, "geoms", [u_])
+                                if q.geom_type == "Polygon"])
+        except Exception:  # noqa: BLE001
+            continue
+        edge = foot.boundary
+        outer = {w["id"]: w for w in walls if edge.distance(
+            LineString([w["a"], w["b"]]).interpolate(0.5, normalized=True))
+            < float(w.get("t", 0.2)) / 2 + 0.3}
+        keep = []
+        for o in arch["openings"]:
+            w = outer.get(o["wall"])
+            if w is None or o["kind"] != "window":
+                keep.append(o)
+                continue
+            base = z0 + float(w.get("base", 0.0) or 0.0)
+            lo = max(0.0, z0) + 0.15 - base          # over the ground
+            hi = (z_g - slab_t) - 0.05 - base        # under the ground floor
+            if hi - lo < 0.3:
+                if final:
+                    out["removed"] += 1
+                    continue
+                keep.append(o)
+                continue
+            h = min(float(o["h"]), hi - lo)
+            sill = hi - h
+            if abs(sill - float(o.get("sill", 0))) > 0.005 or \
+                    abs(h - float(o["h"])) > 0.005:
+                o["sill"], o["h"] = round(sill, 4), round(h, 4)
+                out["moved"] += 1
+            keep.append(o)
+        arch["openings"] = keep
+    return out
+
+
 def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     """The railings round level ``lid``'s terraces (the slab under it out
     past its walls): along the railing lines the CAD plan draws there
@@ -741,6 +824,16 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
         terr.append(e)
     if not terr:
         return out
+    if st.get("rail_needs_text", True):
+        # a railing only where the CAD writes it (RAILING, BALCONY…): the
+        # terraces with such a text on them or by their edge
+        pts_ = rail_text_points(doc, lid, pl)
+        terr = [e for e in terr if any(
+            SE._poly(e["corners"]).difference(foot).buffer(2.0).contains(
+                Point(x, y)) for x, y in pts_)]
+        out["no_text"] = not terr
+        if not terr:
+            return out
     rk = st.get("parapet_rail", "ss_bars")
     rk = rk if rk and rk != "solid" else "ss_bars"
     rh = float(st.get("rail_h", 1.0668))
@@ -2095,6 +2188,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rrecs = SE.rails_from_cad(pl, lambda n: _match(n, P["rails"]),
                                       lid, rk, float(st.get("rail_h",
                                                             SE.RAIL_H)))
+            if st.get("rail_needs_text", True):   # only where the CAD
+                from shapely.geometry import LineString as _LS2   # says so
+                from shapely.geometry import Point as _Pt2
+                pts_ = rail_text_points(doc, lid, pl)
+                rrecs = [r_ for r_ in rrecs if any(
+                    _LS2([r_["a"], r_["b"]]).distance(_Pt2(x, y)) < 3.0
+                    for x, y in pts_)]
             made_r = M.new_walls(arch["walls"], rrecs)
             n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
                      .startswith("Balcony railing"))
@@ -2535,7 +2635,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         try:                     # one floor at several levels, as noted
             arch["structure"] = [e for e in arch["structure"]
                                  if not (e.get("zone") and e["level"] == lid)]
-            rep["zones"] = slab_zones(doc, lid)
+            rep["zones"] = slab_zones(doc, lid, pl, P)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.slab_zones")
@@ -2552,6 +2652,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.cap_lower_floor")
+    try:                     # a basement's windows over the ground only
+        rep["basement_windows"] = basement_windows(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.basement_windows")
     if st.get("terrace_rails", True):    # railings round its terraces
         try:
             rep["terrace_railings"] = terrace_railings(doc, lid, pl, P)
@@ -5380,7 +5485,7 @@ def note_levels(doc, lid) -> list:
     return out
 
 
-def slab_zones(doc, lid) -> list:
+def slab_zones(doc, lid, pl=None, P=None) -> list:
     """One floor at several levels, as its CAD notes it: each room takes
     the level noted in it; the floor round the rooms is cut by the walls
     into its areas (the hall, the lobby, the verandah, the ablution…) and
@@ -5426,32 +5531,92 @@ def slab_zones(doc, lid) -> list:
     t = float(slabs[0]["t"])
     holes_all = [Polygon(h).buffer(0) for sl in slabs
                  for h in sl.get("holes") or [] if len(h) >= 3]
-    pieces = []                          # (polygon, level, noted)
-    for r in rooms:
-        vs = [v for x, y, v in notes if r.contains(Point(x, y))]
-        if vs:
-            pieces.append((r.intersection(floor), mode(vs)))
-    # the floor round the rooms: its areas, as the walls part them
-    open_ = floor.difference(rooms_u).difference(WP)
-    for comp in getattr(open_, "geoms", [open_]):
-        if comp.geom_type != "Polygon" or comp.area < 0.5:
+    pieces = []                          # (polygon, level)
+    # a level noted holds on its floor until a line parts it from the next
+    # level noted: the step risers, the LINE layer's edges (a platform, a
+    # sunk floor) — the walls and doors do not part the levels
+    div = Polygon()
+    if pl is not None and P is not None:
+        from shapely.geometry import LineString as _LS
+        pats = list(P.get("steps") or []) + list(P.get("lines") or [])
+        lay = pl["layers"]
+        segs_ = [_LS([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+                 if pats and _match(lay[s_[4]], pats)
+                 and math.dist((s_[0], s_[1]), (s_[2], s_[3])) >= 0.3]
+        if segs_:
+            # a line stopping short of a wall or of another line (a step
+            # drawn to the plaster's face, a gap at a door) carried on to
+            # it, up to 1.2 m: the areas it parts are closed
+            from shapely.geometry import Point as _Pt
+            stop = unary_union([WP] + segs_) if not WP.is_empty else \
+                unary_union(segs_)
+            ext_ = []
+            for g_ in segs_:
+                (ax, ay), (bx, by) = g_.coords[0], g_.coords[-1]
+                L_ = math.dist((ax, ay), (bx, by))
+                ux, uy = (bx - ax) / L_, (by - ay) / L_
+                ends = []
+                for (px, py), sg in (((ax, ay), -1), ((bx, by), 1)):
+                    far = (px + sg * ux * 1.2, py + sg * uy * 1.2)
+                    ray = _LS([(px + sg * ux * 0.02, py + sg * uy * 0.02), far])
+                    others = stop.difference(g_.buffer(0.01))
+                    hit = ray.intersection(others)
+                    if hit.is_empty:
+                        ends.append((px, py))
+                        continue
+                    dd = min((_Pt(px, py).distance(q) for q in getattr(
+                        hit, "geoms", [hit])), default=None)
+                    ends.append((px + sg * ux * (dd + 0.03),
+                                 py + sg * uy * (dd + 0.03))
+                                if dd is not None else (px, py))
+                ext_.append(_LS([ends[0], ends[1]]))
+            div = unary_union([g_.buffer(0.03, cap_style=2) for g_ in ext_])
+
+    def parts_of(region):
+        """The region's rooms and its open areas (as the walls part them)."""
+        out_ = []
+        for r in rooms:
+            q = r.intersection(region)
+            if not q.is_empty and q.area >= 0.5:
+                out_.append(q)
+        rest = region.difference(rooms_u).difference(WP)
+        for comp in getattr(rest, "geoms", [rest]):
+            if comp.geom_type == "Polygon" and comp.area >= 0.5:
+                out_.append(comp)
+        return out_
+    regions = floor.difference(div) if not div.is_empty else floor
+    for R in getattr(regions, "geoms", [regions]):
+        if R.geom_type != "Polygon" or R.area < 0.5:
             continue
-        here = [(x, y, v) for x, y, v in notes if comp.contains(Point(x, y))]
+        here = [(x, y, v) for x, y, v in notes if R.buffer(0.05).contains(
+            Point(x, y))]
         if not here:
-            continue
+            continue                     # no note: the floor's own level
         vals = {round(v, 3) for _x, _y, v in here}
         if len(vals) == 1:
-            pieces.append((comp, here[0][2]))
+            pieces.append((R, here[0][2]))
             continue
-        try:                             # each part to its nearest note
-            cells = voronoi_diagram(MultiPoint([(x, y) for x, y, _v in here]),
-                                    envelope=comp.envelope.buffer(5.0))
-            for cell in cells.geoms:
-                vs = [v for x, y, v in here if cell.contains(Point(x, y))]
-                if vs:
-                    pieces.append((cell.intersection(comp), mode(vs)))
-        except Exception:  # noqa: BLE001
-            pieces.append((comp, mode([v for _x, _y, v in here])))
+        for q in parts_of(R):            # several levels, no line between
+            vs = [v for x, y, v in here if q.buffer(0.05).contains(Point(x, y))]
+            if not vs:                   # the nearest note's level
+                c_ = q.representative_point()
+                vs = [min(here, key=lambda n_: c_.distance(
+                    Point(n_[0], n_[1])))[2]]
+            if len({round(v, 3) for v in vs}) > 1 and len(vs) > 1:
+                try:                     # each part to its nearest note
+                    hq = [(x, y, v) for x, y, v in here
+                          if q.buffer(0.05).contains(Point(x, y))]
+                    cells = voronoi_diagram(MultiPoint(
+                        [(x, y) for x, y, _v in hq]),
+                        envelope=q.envelope.buffer(5.0))
+                    for cell in cells.geoms:
+                        cv = [v for x, y, v in hq if cell.contains(Point(x, y))]
+                        if cv:
+                            pieces.append((cell.intersection(q), mode(cv)))
+                    continue
+                except Exception:  # noqa: BLE001
+                    pass
+            pieces.append((q, mode(vs)))
     new = []
     for part, lv in pieces:
         for g in getattr(part, "geoms", [part]):
