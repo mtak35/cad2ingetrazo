@@ -710,16 +710,74 @@ CURB_H, CURB_T = 0.1524, 0.0762          # the terrace railing's upstand
 
 RAIL_WORDS = re.compile(r"RAIL|RALL|BALCON|GRILL\s*RAIL|PARAPET\s*RAIL",
                         re.I)
+TERRACE_WORDS = re.compile(r"TERRACE|TERACE|SIT\s*OUT|BALCON", re.I)
 
 
-def rail_text_points(doc, lid, pl=None) -> list:
+def strict_floor(doc, lid) -> int:
+    """An upper floor's slab as its own CAD plan draws it: inside its walls
+    and the railings round its terraces — no part out past them (a shade
+    over the floor below no plan draws), the terrace out to its railing.
+    The slabs changed."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    lv = level_by_id(arch, lid) or {}
+    if slab_on_top(doc) or lv.get("kind") in ("ground", "basement"):
+        return 0
+    ws = [w for w in arch["walls"] if w["level"] == lid
+          and w.get("kind", "line") == "line" and W.why_not(w) is None
+          and math.dist(w["a"], w["b"]) > 0.05]
+    walls = [w for w in ws if not w.get("rail")]
+    rails = [w for w in ws if w.get("rail") and not str(
+        w.get("name", "")).startswith(AUTO_RAIL)]
+    if not walls:
+        return 0
+    band = unary_union([LineString([w["a"], w["b"]]).buffer(
+        float(w.get("t", 0.1)) / 2 + 0.03, cap_style=2, join_style=2)
+        for w in walls + rails])
+    reach = 1.5
+    u_ = band.buffer(reach, join_style=2).buffer(-reach, join_style=2)
+    allowed = unary_union([Polygon(g.exterior) for g in getattr(
+        u_, "geoms", [u_]) if g.geom_type == "Polygon" and
+        Polygon(g.exterior).area >= 4.0])
+    if allowed.is_empty:
+        return 0
+    n = 0
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid or e.get("roof") or \
+                e.get("zone") or e.get("user") or e.get("top") or \
+                not e.get("corners"):
+            continue
+        sp = SE._poly(e["corners"])
+        new = (sp.union(allowed) if rails else sp).intersection(
+            allowed.buffer(0.02, join_style=2))
+        new = SE._largest(new, sp.representative_point())
+        if new is None or new.area < 1.0 or \
+                abs(new.area - sp.area) < 0.05 and \
+                new.symmetric_difference(sp).area < 0.05:
+            continue
+        e["corners"] = [[round(x, 4), round(y, 4)]
+                        for x, y in SE._ring_pts(new)]
+        hs = [h for h in e.get("holes") or []
+              if new.contains(Polygon(h).representative_point())]
+        e["holes"] = hs
+        n += 1
+    return n
+
+
+def rail_text_points(doc, lid, pl=None, terrace=False) -> list:
     """[(x, y)] of the CAD's texts on level ``lid`` that name a railing or
-    a balcony («RAILING», «S.S RAIL», «BALCONY»…)."""
+    a balcony («RAILING», «S.S RAIL», «BALCONY»…) — with ``terrace`` a
+    terrace too («TERRACE», «BACK TERRACE», «SIT OUT»: a terrace upstairs
+    is railed)."""
     src = (pl or {}).get("texts") if pl is not None else None
     if src is None:
         src = [t for t in doc.get("texts") or [] if t.get("level") == lid]
     return [(float(t["x"]), float(t["y"])) for t in src
-            if RAIL_WORDS.search(str(t.get("text", "")))]
+            if RAIL_WORDS.search(str(t.get("text", ""))) or (
+                terrace and TERRACE_WORDS.search(str(t.get("text", ""))))]
 
 
 def basement_windows(doc) -> dict:
@@ -789,6 +847,98 @@ def basement_windows(doc) -> dict:
     return out
 
 
+def rails_off_stairs(doc) -> int:
+    """The terrace / balcony railings (walls) standing over a stair that
+    climbs to their floor cut back off it — the stair's own railing runs
+    with the flight. How many changed."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from . import stairs as ST_
+    arch = doc["arch"]
+    n = 0
+    for lv in arch["levels"]:
+        lid = lv["id"]
+        sfp = []
+        for st_ in doc.get("stairs") or []:
+            if st_.get("level") == lid:
+                continue
+            fl_, _lg = ST_.as_flights(st_)
+            for f_ in fl_:
+                ls_ = f_.get("lines") or []
+                if len(ls_) < 2:
+                    continue
+                pg = Polygon([tuple(ls_[0][0][:2]), tuple(ls_[0][1][:2]),
+                              tuple(ls_[-1][1][:2]), tuple(ls_[-1][0][:2])])
+                sfp.append(pg.buffer(0))
+        if not sfp:
+            continue
+        SU = unary_union(sfp).buffer(0.2, join_style=2)
+        keep, add = [], []
+        for w in arch["walls"]:
+            if w["level"] != lid or not w.get("rail") or \
+                    not str(w.get("name", "")).startswith(
+                        ("Terrace railing", "Balcony railing")):
+                keep.append(w)
+                continue
+            ln = LineString([w["a"], w["b"]])
+            if not ln.intersects(SU):
+                keep.append(w)
+                continue
+            n += 1
+            g_ = ln.difference(SU)
+            for q in getattr(g_, "geoms", [g_]):
+                if q.geom_type == "LineString" and q.length >= 0.5:
+                    c_ = list(q.coords)
+                    add.append(dict({k: v for k, v in w.items()
+                                     if k not in ("id",)},
+                                    a=[round(c_[0][0], 4), round(c_[0][1], 4)],
+                                    b=[round(c_[-1][0], 4),
+                                       round(c_[-1][1], 4)]))
+        if n:
+            arch["walls"] = keep
+            arch["walls"] += M.new_walls(arch["walls"], add) if add else []
+    return n
+
+
+def _meet_lines(lines, reach=0.35) -> list:
+    """Straight railing runs whose ends stop short of / run past one
+    another at a corner: each carried to where the two lines cross, so the
+    corner closes cleanly (no gap, no overlap)."""
+    ls = [[tuple(a), tuple(b)] for a, b in lines]
+
+    def cross(p, q, r, s_):
+        d1 = (q[0] - p[0], q[1] - p[1])
+        d2 = (s_[0] - r[0], s_[1] - r[1])
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-9:
+            return None
+        t = ((r[0] - p[0]) * d2[1] - (r[1] - p[1]) * d2[0]) / den
+        return (p[0] + d1[0] * t, p[1] + d1[1] * t)
+    for i in range(len(ls)):
+        for ei in (0, 1):
+            best = None
+            for j in range(len(ls)):
+                if j == i:
+                    continue
+                for ej in (0, 1):
+                    dd = math.dist(ls[i][ei], ls[j][ej])
+                    if dd > reach or (best is not None and dd >= best[0]):
+                        continue
+                    x = cross(ls[i][0], ls[i][1], ls[j][0], ls[j][1])
+                    if x is None:
+                        continue
+                    if math.dist(x, ls[i][ei]) > reach + 0.1 or \
+                            math.dist(x, ls[j][ej]) > reach + 0.1:
+                        continue
+                    best = (dd, j, ej, x)
+            if best is not None:
+                _d, j, ej, x = best
+                ls[i][ei] = (round(x[0], 4), round(x[1], 4))
+                ls[j][ej] = (round(x[0], 4), round(x[1], 4))
+    return [(a, b) for a, b in ls if math.dist(a, b) > 0.05]
+
+
 def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     """The railings round level ``lid``'s terraces (the slab under it out
     past its walls): along the railing lines the CAD plan draws there
@@ -839,7 +989,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     if st.get("rail_needs_text", True):
         # a railing only where the CAD writes it (RAILING, BALCONY…): the
         # terraces with such a text on them or by their edge
-        pts_ = rail_text_points(doc, lid, pl)
+        pts_ = rail_text_points(doc, lid, pl, terrace=True)
         terr = [e for e in terr if any(
             SE._poly(e["corners"]).difference(foot).buffer(2.0).contains(
                 Point(x, y)) for x, y in pts_)]
@@ -852,6 +1002,7 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     ch_ = float(st.get("terrace_curb_h", 0.3048) or CURB_H)  # the upstand
     # the railing lines the plan draws round the terraces
     lines = []
+    rail_lines = []                  # those on the rail layers, whole
     if pl is None and lid in (doc.get("imports") or {}):
         try:
             pl, P = _placed_plan(doc, lid)
@@ -861,10 +1012,11 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
         lay = pl["layers"]
         zone = unary_union([SE._poly(e["corners"]) for e in terr]).buffer(0.4)
         near_walls = foot.buffer(0.3)
-        segs = []
+        segs, rsegs = [], []
+        reach_ = foot.buffer(8.0, join_style=2)
         for s_ in pl["segs"]:
-            if not (_match(lay[s_[4]], P["windows"]) or
-                    _match(lay[s_[4]], P.get("rails") or [])):
+            is_r = _match(lay[s_[4]], P.get("rails") or [])
+            if not (_match(lay[s_[4]], P["windows"]) or is_r):
                 continue
             L = LineString([(s_[0], s_[1]), (s_[2], s_[3])])
             if L.length < 0.5:
@@ -873,12 +1025,25 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
             if min(ang, 90.0 - ang) > 4.0:
                 continue
             m_ = L.interpolate(0.5, normalized=True)
-            if near_walls.contains(m_) or not zone.contains(m_):
+            if near_walls.contains(m_):
                 continue
-            segs.append(s_)
+            if is_r and reach_.contains(m_):
+                rsegs.append(s_)         # drawn as a railing: as drawn
+            elif zone.contains(m_):
+                segs.append(s_)
         for a, b, spread, _n in CW._clusters(segs, gap=0.3):
             if _m.dist(a, b) >= 0.8:
                 lines.append((a, b))
+        for a, b, spread, _n in CW._clusters(rsegs, gap=0.3):
+            if _m.dist(a, b) >= 0.5:
+                rail_lines.append((a, b))
+    # the railing lines: the rail layer's run on to meet (their corners)
+    rail_lines = _meet_lines(rail_lines, 0.35)
+    lines = rail_lines + [ln for ln in lines if not any(
+        LineString(ln).buffer(0.25).contains(LineString(r_).interpolate(
+            0.5, normalized=True)) or LineString(r_).buffer(0.25).contains(
+            LineString(ln).interpolate(0.5, normalized=True))
+        for r_ in rail_lines)]
     # the terrace cut back to its railing lines (nothing beyond them)
     for a, b in lines:
         L = _m.dist(a, b)
@@ -933,7 +1098,11 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     keep_ = []
     edge_ = unary_union([g.exterior for g in getattr(left, "geoms", [left])
                          if g.geom_type == "Polygon"]).buffer(0.15)
+    for a, b in rail_lines:              # the rail layer's: as drawn
+        keep_.append((tuple(a), tuple(b)))
     for a, b in lines:                   # each along the terrace's edge
+        if (a, b) in rail_lines:
+            continue
         g_ = LineString([a, b]).intersection(left.buffer(0.12,
                                                          join_style=2))
         g_ = g_.intersection(edge_)
@@ -943,6 +1112,35 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
             c_ = list(q.coords)
             keep_.append((tuple(c_[0]), tuple(c_[-1])))
     lines = keep_
+    # never over a stair coming up to this floor: its own railing runs
+    # with the flight (one at this floor's height would float over it)
+    try:
+        from . import stairs as ST_
+        sfp = []
+        for st_ in doc.get("stairs") or []:
+            if st_.get("level") == lid:
+                continue
+            fl_, _lg = ST_.as_flights(st_)
+            for f_ in fl_:
+                ls_ = f_.get("lines") or []
+                if len(ls_) < 2:
+                    continue
+                sfp.append(Polygon([tuple(ls_[0][0]), tuple(ls_[0][1]),
+                                    tuple(ls_[-1][1]), tuple(ls_[-1][0])])
+                           .buffer(0))
+        if sfp:
+            SU = unary_union(sfp).buffer(0.2, join_style=2)
+            cut_ = []
+            for a, b in lines:
+                g_ = LineString([a, b]).difference(SU)
+                for q in getattr(g_, "geoms", [g_]):
+                    if q.geom_type == "LineString" and q.length >= 0.5:
+                        c_ = list(q.coords)
+                        cut_.append((tuple(c_[0]), tuple(c_[-1])))
+            out["off_stairs"] = len(lines) - len(cut_)
+            lines = cut_
+    except Exception:  # noqa: BLE001
+        pass
     recs = []
     for a, b in lines:
         recs.append({"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
@@ -955,8 +1153,9 @@ def terrace_railings(doc, lid, pl=None, P=None) -> dict:
     out["lines"] = len(recs)
     made = M.new_walls(arch["walls"], recs)
     arch["walls"] += made
-    # every other free edge of the terraces: railed too
-    for e in terr:
+    # every other free edge of the terraces: railed too — unless the plan
+    # draws its railings (then only those: the CAD followed strictly)
+    for e in ([] if lines else terr):
         for a, b in SE.free_edges(doc, e):
             L = _m.dist(a, b)
             if L < 0.3:
@@ -2582,10 +2781,19 @@ def _outer_loops(pieces, gap=1.25, least=20.0, extra=()):
         closed = [Polygon(g.exterior) for g in getattr(u, "geoms", [u])
                   if g.geom_type == "Polygon" and g.interiors]
         for comp in getattr(raw_u.buffer(0.3), "geoms", [raw_u.buffer(0.3)]):
-            if any(c.contains(comp.representative_point()) for c in closed):
-                continue
+            if any(c.intersection(comp).area > 0.5 * comp.area
+                   for c in closed):
+                continue                 # (mostly in a closed block)
             hull = comp.convex_hull.buffer(-0.3, join_style=2)
             if hull.is_empty or hull.area < least:
+                continue
+            # a block its walls close at a wider reach: that outline, not
+            # the convex one (which runs past the plan's own walls)
+            near = raw_u.intersection(comp).buffer(
+                3.0, join_style=2).buffer(-3.0, join_style=2)
+            if any(Polygon(g_.exterior).area >= 0.75 * hull.area
+                   for g_ in getattr(near, "geoms", [near])
+                   if g_.geom_type == "Polygon"):
                 continue
             walls_len = raw_u.intersection(comp).area / 0.2
             if walls_len >= 0.6 * hull.length and \
@@ -3363,6 +3571,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.terrace_railings")
+    if st.get("floor_strict", True):    # the floor as its plan draws it
+        try:
+            rep["strict_floor"] = strict_floor(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.strict_floor")
     if st.get("cad_furniture", False):    # its furniture and fixtures
         try:
             from . import furnish as FU
@@ -4646,6 +4860,48 @@ SINGLE_TYPES = ("hinged", "main", "glass", "alu_glass", "louvre", "glazed",
                 "pocket", "folding")
 DOUBLE_TYPES = ("hinged", "main", "glass", "alu_glass", "louvre", "glazed",
                 "pocket")
+
+
+def opening_convert(doc, oid, kind) -> tuple:
+    """An opening made a door, a window, a plain opening (no door) or a
+    piece of curtain wall (the wall cut at its jambs, that part glazed
+    floor to top, its grid kept). (the record changed / the new curtain
+    wall, None) or (None, why)."""
+    arch = doc["arch"]
+    o = next((x for x in arch["openings"] if x.get("id") == oid), None)
+    if o is None:
+        return None, "no such opening"
+    if kind in ("door", "window", "void"):
+        if o["kind"] == kind:
+            return o, None
+        new = dict(opening_as(dict(o), kind, doc["settings"]),
+                   w=o["w"], pos=o["pos"], id=o["id"])
+        if kind == "door":
+            new["sill"] = 0.0
+        if kind != "void":
+            new.pop("grille", None)
+        why = check_record(doc, "opening", new)
+        if why:
+            return None, why
+        o.clear()
+        o.update(new)
+        return o, None
+    if kind != "curtain":
+        return None, "unknown type"
+    wid = o["wall"]
+    s0 = float(o["pos"]) - float(o["w"]) / 2
+    s1 = float(o["pos"]) + float(o["w"]) / 2
+    arch["openings"] = [x for x in arch["openings"] if x is not o]
+    pid, why = split_wall(doc, wid, s0, s1)
+    if why:
+        arch["openings"].append(o)
+        return None, why
+    to_curtain(doc, [pid])
+    part = next((x for x in arch["walls"] if x["id"] == pid), None)
+    if part is not None:
+        L = math.dist(part["a"], part["b"])
+        part["grid"] = round(max(0.6, L / max(1, round(L / 1.2))), 4)
+    return part, None
 
 
 def to_curtain(doc, wall_ids) -> tuple:
@@ -7563,6 +7819,11 @@ def cad_steps(doc, lid) -> list:
                     if tow is None or q.distance(bld) < tow[1]:
                         tow = ((nv[0] * sg, nv[1] * sg), q.distance(bld))
                 dv = tow[0]
+                if len(offs) >= 2:       # several lines: up from the
+                    # outermost toward the innermost (the landing's side)
+                    o_in, o_out = offs[0][0], offs[-1][0]
+                    sg_ = 1.0 if o_in > o_out else -1.0
+                    dv = (nv[0] * sg_, nv[1] * sg_)
                 for rank, (_o, ln) in enumerate(offs):
                     (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
                     poly = Polygon([(x0, y0), (x1, y1),
@@ -7895,14 +8156,41 @@ def platform_parts(doc) -> dict:
         if not cs_.get("own"):
             c = cs_["zone"].representative_point()
             surf = elev + floor_offset_at(doc, lid, (c.x, c.y)) + fin
-            H = surf - zg
+            # down to what is at their foot (a porch, a verandah lower by
+            # the drop, the ground) — just past the outermost line
+            # as many risers as it draws, each the riser set (6"): its
+            # foot that much lower — the porch / paving it lands on taken
+            # to that level too (no made-up drop beside drawn steps)
+            foot_z = max(zg, surf - cs_["n"] * rmax_)
+            if surf - foot_z < 0.05:
+                foot_z = zg
+            try:
+                feet_ = []
+                for lns_, dv_, tr_ in cs_.get("fams") or []:
+                    ln_ = lns_[-1]
+                    (x0_, y0_), (x1_, y1_) = ln_.coords[0], ln_.coords[-1]
+                    feet_.append(Polygon([
+                        (x0_, y0_), (x1_, y1_),
+                        (x1_ - dv_[0] * 0.4, y1_ - dv_[1] * 0.4),
+                        (x0_ - dv_[0] * 0.4, y0_ - dv_[1] * 0.4)]))
+                fu_ = unary_union(feet_) if feet_ else None
+                if fu_ is not None and foot_z > zg + 0.01:
+                    for k2_, (pg2_, t2_) in enumerate(out["pieces"]):
+                        if pg2_.intersects(fu_) and t2_ < surf - 0.05 and \
+                                abs(t2_ - foot_z) < 0.6 and \
+                                not R.buffer(-0.05).contains(
+                                    pg2_.representative_point()):
+                            out["pieces"][k2_] = (pg2_, foot_z - fin)
+            except Exception:  # noqa: BLE001
+                pass
+            H = surf - foot_z
             if H < 0.05:
                 continue
             r_ = H / cs_["n"]
             out["steps"].append((
                 f"Entrance steps (CAD) {k_} ({cs_['n']} risers)",
                 [(pc, surf - rank * r_, None, r_) for pc, rank in
-                 cs_["strips"] if surf - rank * r_ - zg > 0.01]))
+                 cs_["strips"] if surf - rank * r_ - foot_z > 0.01]))
             continue
         # the steps' own layer: whole riser lines, from the level at one
         # end of the run to the level at the other (a mimber's: up from
@@ -7986,13 +8274,16 @@ def platform_parts(doc) -> dict:
     cad_lines = [ln for cs_ in csets for ln in cs_["lines"]]
     if not st.get("entry_steps", True):
         return out
+    # the CAD draws its entrance steps: those only (none made up at the
+    # other doors out — the plan followed strictly)
+    invent = not (csets and st.get("steps_cad_only", True))
     rmax = max(float(st.get("riser_max", 0.1524) or 0.1524), 0.10)
     tread = max(float(st.get("tread_ext", 0.3048) or 0.3048), 0.22)
     solid = unary_union([G, WP])
     byid = {w["id"]: w for w in walls}
     made = []                                 # (edge point, direction)
     n_ = 0
-    for o in arch["openings"]:
+    for o in (arch["openings"] if invent else []):
         w = byid.get(o.get("wall"))
         if w is None or o.get("kind") != "door" or \
                 w.get("kind", "line") != "line":

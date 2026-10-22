@@ -166,7 +166,8 @@ FIELDS = {
              ("bot_att", "Bottom", "choice", ("slab", "free")),
              ("height", "Height", "height", (0.1, 50.0)),
              ("base", "Base offset", "len", (-5.0, 10.0))],
-    "opening": [("kind", "Type", "choice", ("door", "window", "void")),
+    "opening": [("kind", "Type", "choice", ("door", "window", "void",
+                                            "curtain")),
                 ("w", "Width", "len", (0.2, 20.0)),
                 ("h", "Height", "len", (0.2, 20.0)),
                 ("sill", "Sill", "len", (0.0, 20.0)),
@@ -2601,6 +2602,11 @@ class Panel(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             r = PJ.terrace_railings(doc, lid)
+            try:
+                PJ.strict_floor(doc, lid)
+                PJ.rails_off_stairs(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel._terrace_rails strict")
         except Exception as e:  # noqa: BLE001
             log_error("panel._terrace_rails")
             self.flash(f"Not made — {e}")
@@ -2609,6 +2615,11 @@ class Panel(QWidget):
             QApplication.restoreOverrideCursor()
         n = r["lines"] + r["edges"]
         if not n:
+            if r.get("no_text"):
+                self.flash("No RAIL, BALCONY or TERRACE text on this "
+                           "level's terraces — untick «Railings only where "
+                           "the CAD writes…» (7.2) to rail every terrace")
+                return
             self.flash("No terrace on this level (no slab under it out past "
                        "its walls)")
             return
@@ -3765,7 +3776,7 @@ class Panel(QWidget):
                               False)
         f = _form(s2body)
         self.t_railtext = QCheckBox(
-            "Railings only where the CAD writes RAIL or BALCONY")
+            "Railings only where the CAD writes RAIL, BALCONY or TERRACE")
         self.t_railtext.setChecked(True)
         self.t_railtext.setToolTip("Terrace and balcony railings are made "
                                    "from the CAD only where a text on the "
@@ -3862,9 +3873,31 @@ class Panel(QWidget):
         self.lay.addWidget(box)
 
     def _rail_text_rule(self, on):
+        """The rule switched: every upper floor's terrace railings made
+        again by it at once (off: every terrace railed, as detected)."""
         doc = self.doc()
         doc["settings"]["rail_needs_text"] = bool(on)
-        PJ.store_only(self.vp, doc)
+        n = 0
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for lv in doc["arch"]["levels"]:
+                if lv.get("kind") in ("ground", "basement"):
+                    continue
+                try:
+                    r = PJ.terrace_railings(doc, lv["id"])
+                    n += r.get("lines", 0) + r.get("edges", 0)
+                    PJ.strict_floor(doc, lv["id"])
+                except Exception:  # noqa: BLE001
+                    log_error("panel._rail_text_rule")
+            try:
+                PJ.rails_off_stairs(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel rails_off_stairs")
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.commit(doc, f"Terrace railings made again: {n} run(s) — " + (
+            "only where the CAD names them" if on else
+            "on every terrace detected"))
 
     def _parapet_rail(self):
         doc = self.doc()
@@ -5691,6 +5724,13 @@ class Panel(QWidget):
         if sel[0] == "wall":
             new = PJ.wall_attach(doc, rec, new.pop("top_att", None),
                                  new.pop("bot_att", None), new)
+        if sel[0] == "opening" and new["kind"] == "curtain":
+            part, why = PJ.opening_convert(doc, rec["id"], "curtain")
+            if why:
+                self.flash(f"Not changed — {why}")
+                return
+            self.commit(doc, "Opening made a curtain wall")
+            return
         if sel[0] == "opening" and new["kind"] != rec.get("kind"):
             # a door made a window (or back, or an opening one): that
             # type's own height, sill and type
@@ -5900,6 +5940,21 @@ class Panel(QWidget):
         if sel[0] == "wall" and rec.get("type") == "curtain":
             sub.addAction("Add door in this curtain wall…",
                           lambda: self.cw_door_dialog(sel[1]))
+            here = self._cursor_along_wall(rec)
+            if here is not None:
+                gm = sub.addMenu("Glass door in the panel here")
+                for k_, lab_ in PJ.CW_DOOR_STYLES:
+                    gm.addAction(lab_, lambda k=k_, s=here:
+                                 self._cw_panel_door(sel[1], k, s))
+        if sel[0] == "opening":
+            om = sub.addMenu("Make it a…")
+            for k_, lab_ in (("door", "Door"), ("window", "Window"),
+                             ("void", "Opening (no door)"),
+                             ("curtain", "Curtain wall (glazed)")):
+                if k_ == rec.get("kind"):
+                    continue
+                om.addAction(lab_, lambda k=k_: self._convert_opening(
+                    sel[1], k))
         try:
             from . import components as CP
             tk = CP.key_of(doc, sel[0], rec)
@@ -6213,6 +6268,65 @@ class Panel(QWidget):
         dlg.adjustSize()
         _place_on_screen(dlg, QCursor.pos())
         dlg.exec()
+
+    def _cursor_along_wall(self, w):
+        """Where along wall ``w`` (m from its start) the mouse is: the
+        mouse ray met with the wall's vertical plane, or None."""
+        try:
+            from PySide6.QtGui import QCursor
+            vp = self.vp
+            pos = vp.mapFromGlobal(QCursor.pos())
+            o, d = vp._pixel_to_ray(float(pos.x()), float(pos.y()))
+            if o is None or d is None:
+                return None
+            a, b = w["a"], w["b"]
+            L = math.dist(a, b)
+            if L < 1e-6:
+                return None
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            nx, ny = -uy, ux
+            ox, oy = float(o[0]), float(o[1])
+            dx, dy = float(d[0]), float(d[1])
+            den = dx * nx + dy * ny
+            if abs(den) < 1e-9:
+                return None
+            t = ((a[0] - ox) * nx + (a[1] - oy) * ny) / den
+            px, py = ox + dx * t, oy + dy * t
+            s = (px - a[0]) * ux + (py - a[1]) * uy
+            return s if -0.05 <= s <= L + 0.05 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _cw_panel_door(self, wall_id, style, s):
+        """A glass door swapped in for the curtain wall's panel at ``s``
+        (one bay of its grid), as Revit swaps a panel for a door."""
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wall_id)
+        if w is None:
+            return
+        from .engine import walls as W_
+        L = float(W_.centre(w).L)
+        nv = max(1, int(round(L / max(float(w.get("grid", 1.5) or 1.5),
+                                      0.3))))
+        bay = L / nv
+        k = min(nv - 1, max(0, int(s // bay)))
+        rec, why = PJ.add_cw_door(doc, wall_id, style, bay,
+                                  (k + 0.5) * bay)
+        if why:
+            self.flash(f"Not added — {why}")
+            return
+        self.commit(doc, "Glass door in the curtain wall's panel")
+
+    def _convert_opening(self, oid, kind):
+        doc = self.doc()
+        rec, why = PJ.opening_convert(doc, oid, kind)
+        if why:
+            self.flash(f"Not changed — {why}")
+            return
+        self.commit(doc, {"door": "Opening made a door",
+                          "window": "Opening made a window",
+                          "void": "Opening made a plain opening (no door)",
+                          "curtain": "Opening made a curtain wall"}[kind])
 
     def cw_door_dialog(self, wall_id):
         """A door for a curtain wall: its type, leaves, width (one bay or

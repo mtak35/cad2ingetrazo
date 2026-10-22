@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.26.1)
+## 13. What's new since 3.11 (3.12 – 3.27)
 
 The full list, version by version, is in the README. In short:
 
@@ -506,6 +506,12 @@ The full list, version by version, is in the README. In short:
 - Crossed hidden lines: pointed (Islamic) arches by default, cut into a wall already across the gap.
 - Duplicate walls (a window band over a drawn wall) merged; railings beside steps / inside the building kept, none on a wall.
 - A landing at the top of traced stairs; the entrance porch floored; square pedestals for twin columns between planters.
+
+**3.27 — railings, floors, steps and openings by the CAD**
+- Terraces named on the plan (TERRACE, BALCONY…) are railed along the RAIL layer's lines as drawn, corners met; the 7.2 switch remakes them at once; no railing over a stair.
+- Upper floors' slabs stop at their walls and terrace railings; the roof follows the top floor's walls.
+- Thresholds in doorways without doors; CAD entrance steps read riser by riser from the outermost line, down to the porch they land on.
+- Right-click an opening ▸ «Make it a…» door / window / opening / curtain wall; right-click a curtain wall ▸ «Glass door in the panel here».
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

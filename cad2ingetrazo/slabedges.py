@@ -753,7 +753,8 @@ def _mrr_sides(p):
 
 
 def threshold_faces(doc, lid, z0, t, level_at=None, tops=None) -> list:
-    """A granite threshold in every door opening of the level: the door's
+    """A granite threshold in every door opening of the level (and every
+    doorway with no door, down to the floor): the door's
     width by the wall's thickness, its top flush with the finished floor
     (the higher of the two rooms it joins when they differ), down to the
     slab. ``level_at(pt)`` → (slab top, finish top) at a point; without it
@@ -765,8 +766,11 @@ def threshold_faces(doc, lid, z0, t, level_at=None, tops=None) -> list:
     out = []
     for o in arch["openings"]:
         w = by.get(o["wall"])
-        if w is None or o["kind"] != "door" or \
-                w.get("kind", "line") != "line" or float(o.get("sill", 0)) > 0.05:
+        # a door — and an opening with no door, down to the floor (a
+        # doorway, an arch): the same granite threshold
+        if w is None or o["kind"] not in ("door", "void") or \
+                w.get("kind", "line") != "line" or \
+                float(o.get("sill", 0) or 0) > 0.05 or w.get("rail"):
             continue
         seg = W.centre(w)
         n = (-seg.u[1], seg.u[0])

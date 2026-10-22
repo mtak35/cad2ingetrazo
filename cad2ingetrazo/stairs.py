@@ -719,6 +719,11 @@ def auto(doc, cad=None, flip=False) -> dict:
                 cut += _cut(arch, lv["id"], well)
             elif up is not None:
                 cut += _cut(arch, up["id"], well)
+    try:                       # no terrace railing floating over a flight
+        PJ.rails_off_stairs(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs rails_off_stairs")
     return {"stairs": made, "cuts": cut, "traced": traced_n}
 
 
