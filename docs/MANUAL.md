@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.27)
+## 13. What's new since 3.11 (3.12 – 3.28)
 
 The full list, version by version, is in the README. In short:
 
@@ -512,6 +512,11 @@ The full list, version by version, is in the README. In short:
 - Upper floors' slabs stop at their walls and terrace railings; the roof follows the top floor's walls.
 - Thresholds in doorways without doors; CAD entrance steps read riser by riser from the outermost line, down to the porch they land on.
 - Right-click an opening ▸ «Make it a…» door / window / opening / curtain wall; right-click a curtain wall ▸ «Glass door in the panel here».
+
+**3.28 — curtain walls, arches, stairs, columns**
+- Curtain walls on the finished floor (a solid base under them), mullions each side of their doors, a transom at the door head; corner windows → curtain wall or a glass door in a panel (right-click).
+- Arch types in the Head field of doors and windows.
+- Stairs start on the ground / platform at their foot; ground-floor columns run down to the ground.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

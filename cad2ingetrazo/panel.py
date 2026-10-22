@@ -180,10 +180,11 @@ FIELDS = {
                   "pocket", "folding", "rolling", "garage", "casement",
                   "fixed", "louvre", "top-hung")),
                 ("leaves", "Leaves (single / double)", "choice", (1, 2)),
-                ("head", "Head", "choice", ("flat", "transom", "arch")),
-                ("arch", "Arch shape (head: arch)", "choice",
-                 ("semi", "segmental", "elliptical", "pointed", "ogee",
-                  "horseshoe", "multifoil", "trefoil", "tudor")),
+                ("head", "Head (flat, transom or an arch type)", "choice",
+                 ("flat", "transom", "arch_semi", "arch_segmental",
+                  "arch_elliptical", "arch_pointed", "arch_ogee",
+                  "arch_horseshoe", "arch_multifoil", "arch_trefoil",
+                  "arch_tudor")),
                 ("grille", "CNC jali in it (pattern)", "choice",
                  ("none", "cnc", "cnc_square", "cnc_round", "cnc_hex",
                   "cnc_star", "cnc_lattice")),
@@ -320,6 +321,8 @@ CHOICE_LABELS.update({k: lab for k, lab in _S_PT.PANEL_TYPES
 CHOICE_LABELS.update({k: lab for k, lab in _S_PT.HANDLE_TYPES
                       if k != "auto"})
 CHOICE_LABELS.update({k: lab for k, lab, _r in _S_PT.ARCHES})
+CHOICE_LABELS.update({"arch_" + k: "Arch — " + lab
+                      for k, lab, _r in _S_PT.ARCHES})
 CHOICE_LABELS.update({"cnc": "CNC jali — diamonds", "none": "None",
                       "cnc_square": "CNC jali — squares",
                       "cnc_round": "CNC jali — round holes",
@@ -5605,6 +5608,8 @@ class Panel(QWidget):
                        "level" else "free",
                        bot_att="slab" if abs(float(rec.get("base", 0.0) or
                                                    0.0)) < 1e-4 else "free")
+        if kind == "opening" and rec.get("head") == "arch":
+            rec = dict(rec, head="arch_" + str(rec.get("arch") or "semi"))
         for key, label, typ, opt in FIELDS.get(kind, []):
             if typ == "choice":
                 w = QComboBox()
@@ -5741,11 +5746,14 @@ class Panel(QWidget):
         if sel[0] == "stair":           # riser / tread / steps re-laid
             from . import stairs as ST_
             new = ST_.redesign(rec, new)
+        if sel[0] == "opening" and str(new.get("head", "")).startswith(
+                "arch_"):                # an arch type picked: arched now
+            new["arch"] = str(new["head"])[5:]
+            new["head"] = "arch"
         if sel[0] == "opening" and new.get("head") != "arch" and (
-                new.get("arch") != rec.get("arch")
-                or (new.get("ring") not in (None, "none")
-                    and new.get("ring") != rec.get("ring"))):
-            new["head"] = "arch"        # an arch shape picked: arched now
+                new.get("ring") not in (None, "none")
+                and new.get("ring") != rec.get("ring")):
+            new["head"] = "arch"        # voussoirs picked: arched now
         if sel[0] == "opening":
             PJ.fit_head(new)            # a transom / arch: a full leaf under
         why = PJ.check_record(doc, sel[0], new) if sel[0] != "opening" else \
@@ -5946,15 +5954,16 @@ class Panel(QWidget):
                 for k_, lab_ in PJ.CW_DOOR_STYLES:
                     gm.addAction(lab_, lambda k=k_, s=here:
                                  self._cw_panel_door(sel[1], k, s))
-        if sel[0] == "opening":
-            om = sub.addMenu("Make it a…")
-            for k_, lab_ in (("door", "Door"), ("window", "Window"),
-                             ("void", "Opening (no door)"),
-                             ("curtain", "Curtain wall (glazed)")):
-                if k_ == rec.get("kind"):
-                    continue
-                om.addAction(lab_, lambda k=k_: self._convert_opening(
-                    sel[1], k))
+        if sel[0] == "wall" and rec.get("cwin"):
+            sub.addAction("Corner window → curtain wall (floor to top)",
+                          lambda: self._cwin_to_cw(sel[1]))
+            here = self._cursor_along_wall(rec)
+            if here is not None:
+                gm = sub.addMenu("Glass door in the corner window here")
+                for k_, lab_ in PJ.CW_DOOR_STYLES:
+                    gm.addAction(lab_, lambda k=k_, s=here:
+                                 self._cwin_door(sel[1], k, s))
+
         try:
             from . import components as CP
             tk = CP.key_of(doc, sel[0], rec)
@@ -5988,6 +5997,8 @@ class Panel(QWidget):
                     sel, k_))
                 a_.setCheckable(True)
                 a_.setChecked(rec.get("kind") == k_)
+            mc.addAction("Curtain wall (glazed, doors in its panels)",
+                         lambda: self._make_opening(sel[1], "curtain"))
             if rec["kind"] == "door":
                 types = S_.DOOR_STYLES
             else:
@@ -6317,7 +6328,38 @@ class Panel(QWidget):
             return
         self.commit(doc, "Glass door in the curtain wall's panel")
 
-    def _convert_opening(self, oid, kind):
+    def _cwin_to_cw(self, wid):
+        doc = self.doc()
+        ids = PJ.cornerwin_to_curtain(doc, wid)
+        if not ids:
+            self.flash("Not a corner window")
+            return
+        self.commit(doc, f"Corner window made a curtain wall ({len(ids)} "
+                         f"legs) — right-click it to put a door in a panel")
+
+    def _cwin_door(self, wid, style, s):
+        """A glass door in a corner window: the window made a curtain wall
+        floor to top, the door in the panel clicked (its mullions on the
+        door's jambs)."""
+        doc = self.doc()
+        if not PJ.cornerwin_to_curtain(doc, wid):
+            self.flash("Not a corner window")
+            return
+        w = PJ.find_record(doc, "wall", wid)
+        from .engine import walls as W_
+        L = float(W_.centre(w).L)
+        nv = max(1, int(round(L / max(float(w.get("grid", 1.2)), 0.3))))
+        bay = L / nv
+        k = min(nv - 1, max(0, int(s // bay)))
+        rec, why = PJ.add_cw_door(doc, wid, style, max(bay, 0.9),
+                                  (k + 0.5) * bay)
+        if why:
+            self.flash(f"Not added — {why}")
+            return
+        self.commit(doc, "Glass door in the corner window (now a curtain "
+                         "wall)")
+
+    def _make_opening(self, oid, kind):
         doc = self.doc()
         rec, why = PJ.opening_convert(doc, oid, kind)
         if why:

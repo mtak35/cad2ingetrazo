@@ -937,8 +937,28 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
         return []
     gv = max(float(w.get("grid", 1.5) or 1.5), 0.3)
     gh = max(float(w.get("tgrid", 1.5) or 1.5), 0.3)
-    nv = max(1, int(round(L / gv)))
     H = top - b
+    # the mullion lines: on each door's jambs, the rest of the wall shared
+    # out evenly (about ``grid`` apart) between them — the grid meets the
+    # doors, as a curtain wall's door is set in it
+    marks = [0.0, L]
+    mw_ = 0.06                                # (the mullion's face)
+    if w.get("kind", "line") == "line":
+        for o in ops:
+            # a mullion each side of the door, its face on the door's
+            # frame (the door between two mullions, as Revit sets it)
+            for s_ in (float(o["pos"]) - float(o["w"]) / 2 - mw_ / 2,
+                       float(o["pos"]) + float(o["w"]) / 2 + mw_ / 2):
+                if 0.05 < s_ < L - 0.05:
+                    marks.append(s_)
+    marks = sorted(marks)
+    grid_s = [marks[0]]
+    for a_, b_ in zip(marks, marks[1:]):
+        if b_ - a_ < 0.05:
+            continue
+        k_ = max(1, int(round((b_ - a_) / gv)))
+        grid_s += [a_ + (b_ - a_) * i / k_ for i in range(1, k_ + 1)]
+    nv = len(grid_s) - 1
     # a lower and an upper panel (their heights), the vision glass between
     # on the transom grid
     low = min(max(float(w.get("cw_low", 0.0) or 0.0), 0.0), H * 0.6)
@@ -949,12 +969,22 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
     zs = [b] + ([mid0] if low > 0.02 else []) + \
         [mid0 + (mid1 - mid0) * j / nm for j in range(1, nm)] + \
         ([mid1] if up > 0.02 else []) + [top]
+    # a transom at its doors' heads, the bays beside them too (the door's
+    # head carried along the wall — the grid set out from the door)
+    for o in ops:
+        if o.get("kind") != "door":
+            continue
+        zh_ = z0 + float(o.get("sill", 0.0)) + float(o["h"])
+        if b + 0.3 < zh_ < top - 0.2:
+            zs = [z for z in zs if abs(z - zh_) > 0.25 or z in (b, top)]
+            zs.append(zh_)
+    zs = sorted(set(round(z, 5) for z in zs))
     nh = len(zs) - 1
     spandrel = (w.get("cw_fill") or "glass") == "spandrel"
     mw, md = 0.06, 0.15                       # mullion face, depth
     tw = 0.06                                 # transom height
     out = []
-    pts = [seg.at(k / nv) for k in range(nv + 1)]
+    pts = [seg.at(sg / L) for sg in grid_s]
     spans = [(float(o["pos"]) - float(o["w"]) / 2,
               float(o["pos"]) + float(o["w"]) / 2,
               z0 + float(o.get("sill", 0.0)),
@@ -983,7 +1013,7 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
         return [q for q in parts if q[1] - q[0] > 0.01 and q[3] - q[2] > 0.01]
     straight = w.get("kind", "line") == "line"
     for k in range(nv + 1):                   # mullions
-        f = k / nv
+        f = grid_s[k] / L
         p = seg.at(f)
         t = seg.tangent(f)
         n = (-t[1], t[0])
@@ -1000,7 +1030,7 @@ def curtain_wall(w: dict, seg, ops: list, z0: float, b: float,
             continue
         u = ((c[0] - a[0]) / Lc, (c[1] - a[1]) / Lc)
         n = (-u[1], u[0])
-        sa = L * k / nv
+        sa = grid_s[k]
 
         def cut(za, zb):
             box_ = (sa + mw / 2, sa + Lc - mw / 2, za, zb)
@@ -2139,7 +2169,19 @@ def build(doc: dict, elevations) -> list[dict]:
                                              bool(w.get("cj_b"))))
             elif w.get("type") == "curtain":       # glass on a grid
                 seg = W.centre(w)
-                faces = curtain_wall(w, seg, ops, z0, b, top)
+                # standing on the finished floor (its doors on their
+                # thresholds), not on the slab under the finish
+                lft_ = [_lifted(o, lifts) for o in ops]
+                fin_ = float(doc.get("_fin_t", 0.0) or 0.0)
+                # its doors' thresholds set the finished floor it stands on
+                for o in ops:
+                    if o.get("id") in lifts:
+                        fin_ = max(fin_, float(lifts[o["id"]]))
+                bcw = max(b, z0 + fin_)
+                faces = curtain_wall(w, seg, lft_, z0, bcw, top)
+                if bcw - b > 0.01:       # the wall under it (a plinth down
+                    for pc in pieces:    # through the platform, the slab's
+                        faces += W.solid(pc, b, bcw)       # edge) — solid
                 for o in ops:
                     parts = opening_parts(_lifted(o, lifts), seg, z0)
                     if parts:
@@ -2204,6 +2246,10 @@ def build(doc: dict, elevations) -> list[dict]:
             sh = FIT_SHRINK if c.get("fit") else SHRINK
             piece = {"outer": _ccw(column_outline(c, sh)), "holes": []}
             bot = z0 + float(c.get("base", 0.0)) + SHRINK   # its base
+            if abs(float(c.get("base", 0.0) or 0.0)) < 1e-6:
+                # down as the walls go (on the ground: to the outside
+                # floor / the ground — a porch column stands on it)
+                bot -= _down(doc, {"base": 0.0}, li)
             if top - bot < 0.05:
                 continue
             out.append(dict(_el(c, lid, W.solid(piece, bot, top)),

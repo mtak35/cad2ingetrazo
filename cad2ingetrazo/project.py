@@ -2758,7 +2758,7 @@ def _parking_slab(walls, segs, blocks, ratio=0.4):
     return out
 
 
-def _outer_loops(pieces, gap=1.25, least=20.0, extra=()):
+def _outer_loops(pieces, gap=1.25, least=20.0, extra=(), names=None):
     """Every building block's outer contour: the wall pieces closed over
     their door / window gaps (up to 2·``gap``), each block of
     ``least`` m² or more."""
@@ -2798,13 +2798,31 @@ def _outer_loops(pieces, gap=1.25, least=20.0, extra=()):
             walls_len = raw_u.intersection(comp).area / 0.2
             if walls_len >= 0.6 * hull.length and \
                     raw_u.intersection(comp).area <= 0.35 * hull.area:
+                if names is not None:
+                    # only the parts of it the plan names (a lobby, a car
+                    # porch): an unnamed corner outside is not the floor
+                    from shapely.geometry import Point as _Pn
+                    add_ = hull.difference(u)
+                    keep_ = [g_ for g_ in getattr(add_, "geoms", [add_])
+                             if g_.geom_type == "Polygon" and any(
+                                 g_.buffer(0.3).contains(_Pn(x_, y_))
+                                 for x_, y_ in names)]
+                    hull = unary_union([u.intersection(hull)] + keep_)
                 u = unary_union([u, hull])
     except Exception:  # noqa: BLE001
         pass
     for g in sorted(getattr(u, "geoms", [u]), key=lambda p: -p.area):
         # the block's whole outline counts (its rooms inside, not only the
         # walls' own area): a small ablution block closes a floor too
-        if g.geom_type == "Polygon" and Polygon(g.exterior).area >= least:
+        big_ = g.geom_type == "Polygon" and \
+            Polygon(g.exterior).area >= least
+        if not big_ and names and g.geom_type == "Polygon" and \
+                Polygon(g.exterior).area >= 2.0:
+            # a small block of its own the plan names (a guard room)
+            from shapely.geometry import Point as _Pb
+            big_ = any(Polygon(g.exterior).contains(_Pb(x_, y_))
+                       for x_, y_ in names)
+        if big_:
             try:                  # without the slivers of the joints
                 from . import slabedges as _SE
                 out.append([tuple(q) for q in _SE._ring_pts(g)])
@@ -3060,6 +3078,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project rails_from_cad")
+    # the plan's dashed (projection) lines: the slab ABOVE this floor (a
+    # porch roof, a shade) — the floor carried out to them only when slabs
+    # are drawn on top of their floor; a floor stays as its plan draws it
     if st.get("slab_extend_cad", True):
         try:
             edge_lines += SE.dashed_lines(pl)
@@ -3222,8 +3243,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                         0.02))
                 except Exception:  # noqa: BLE001
                     continue
+            try:                 # the spaces the plan names
+                nm_ = [(float(t_["x"]), float(t_["y"]))
+                       for t_ in pl.get("texts") or []
+                       if re.search(r"[A-Z]{3}", str(t_.get("text", "")))
+                       and not re.match(r"^\s*(UP|DN|DOWN)\b",
+                                        str(t_.get("text", "")), re.I)]
+            except Exception:  # noqa: BLE001
+                nm_ = None
             blocks = _outer_loops([pc for ps in plans.values() for pc in ps],
-                                  extra=cpolys)
+                                  extra=cpolys, names=nm_)
             # a parking floor: the drive and the ramps under the slab too —
             # a close hull round the walls, the bays and the ramps
             pk = [s_ for s_ in pl["segs"] if _match(lay[s_[4]], P["parking"])
@@ -3400,8 +3429,48 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         mine_s = [e for e in arch["structure"]
                   if e["type"] == "slab" and e["level"] == lid
                   and not e.get("zone")]
+        # (a floor on the ground is not carried out to the columns round
+        # it — a porch's, a car porch's: only what its plan draws)
+        on_grade_ = not slab_on_top(doc) and (level_by_id(arch, lid) or {})\
+            .get("kind") in ("ground", "basement")
         if st.get("slab_to_columns", True):
+            before_ = {id(s_): SE._poly(s_["corners"]) for s_ in mine_s}
             rep["slab_columns"] = SE.extend_slabs_to_columns(doc, mine_s)
+            if on_grade_:
+                # a floor on the ground carried out to its columns only
+                # over the spaces the plan names there (an entrance lobby,
+                # a car porch) — no unnamed corner outside
+                from shapely.geometry import Point as _Pq
+                from shapely.ops import unary_union as _uq
+                nmq = [(float(t_["x"]), float(t_["y"]))
+                       for t_ in pl.get("texts") or []
+                       if re.search(r"[A-Z]{3}", str(t_.get("text", "")))
+                       and not re.match(r"^\s*(UP|DN|DOWN)\b",
+                                        str(t_.get("text", "")), re.I)]
+                try:             # the CAD's steps part one space from
+                    stp_ = _uq([pc_ for cs_ in cad_steps(doc, lid)   # the
+                                for pc_, _r in cs_["strips"]]        # next
+                               ).buffer(0.02)
+                except Exception:  # noqa: BLE001
+                    stp_ = None
+                for s_ in mine_s:
+                    b_ = before_.get(id(s_))
+                    if b_ is None:
+                        continue
+                    a_ = SE._poly(s_["corners"])
+                    add_ = a_.difference(b_)
+                    if stp_ is not None and not stp_.is_empty:
+                        add_ = add_.difference(stp_)
+                    keep_ = [g_ for g_ in getattr(add_, "geoms", [add_])
+                             if g_.geom_type == "Polygon" and g_.area > 0.2
+                             and any(g_.buffer(0.2).contains(_Pq(x_, y_))
+                                     for x_, y_ in nmq)]
+                    new_ = _uq([b_] + keep_).buffer(
+                        0.005, join_style=2).buffer(-0.005, join_style=2)
+                    new_ = SE._largest(new_, b_.representative_point())
+                    if new_ is not None and new_.area > 1.0:
+                        s_["corners"] = [[round(x, 4), round(y, 4)]
+                                         for x, y in SE._ring_pts(new_)]
         for s_ in mine_s:
             SE.tidy_slab(s_)
     except Exception:  # noqa: BLE001
@@ -4862,6 +4931,31 @@ DOUBLE_TYPES = ("hinged", "main", "glass", "alu_glass", "louvre", "glazed",
                 "pocket")
 
 
+def cornerwin_to_curtain(doc, wid) -> list:
+    """A corner window made a curtain wall, floor to top round its corner
+    (each leg a curtain wall, its grid about 4'-0", the corner post kept
+    as the legs meet) — so doors can go into its panels. The legs' ids."""
+    arch = doc["arch"]
+    w = next((x for x in arch["walls"] if x.get("id") == wid), None)
+    if w is None or not w.get("cwin"):
+        return []
+    cid = w["cwin"]
+    ids = []
+    for x in arch["walls"]:
+        if x.get("cwin") != cid:
+            continue
+        for k in ("cwin", "cwin_h", "cw_low"):
+            x.pop(k, None)
+        x["type"] = "curtain"
+        L = math.dist(x["a"], x["b"])
+        x["grid"] = round(max(0.6, L / max(1, round(L / 1.2))), 4)
+        x["cw_low"] = 0.0
+        ids.append(x["id"])
+    arch["openings"] = [o for o in arch["openings"]
+                        if not (o["wall"] in ids and o["kind"] == "window")]
+    return ids
+
+
 def opening_convert(doc, oid, kind) -> tuple:
     """An opening made a door, a window, a plain opening (no door) or a
     piece of curtain wall (the wall cut at its jambs, that part glazed
@@ -5861,11 +5955,16 @@ def _groups(arch, doc=None):
         from .host import log_error
         log_error("project.door_lifts")
         arch["_door_lift"] = {}
+    if doc is not None:          # the floor finish: a curtain wall's foot
+        st_ = doc.get("settings") or {}
+        arch["_fin_t"] = float(st_.get("finish_t", 0.0508) or 0.0) \
+            if st_.get("finish_on", True) else 0.0
     try:
         elems = S.build(arch, M.elevations)
     finally:
         arch.pop("_ramps", None)
         arch.pop("_door_lift", None)
+        arch.pop("_fin_t", None)
     # 0: the lines where two walls meet — hidden (clean junctions)
     seam = {}
     try:
@@ -7402,6 +7501,20 @@ def floor_top_at(doc, lid, pt) -> float:
     if lv.get("kind") == "ground":
         if slab_on_top(doc) or ground_slab_on(doc):
             return z + fin
+        if platform_on(doc):          # what the foundation platform makes
+            try:                      # there — else the ground itself
+                pp_ = platform_parts(doc)
+                q_ = Point(pt)
+                tops_ = [t_ + fin for pg_, t_ in pp_["pieces"]
+                         if pg_.buffer(0.03).contains(q_)]
+                for _n, ps_ in pp_["steps"]:      # (finished tops)
+                    tops_ += [p_[1] for p_ in ps_
+                              if p_[0].buffer(0.01).contains(q_)]
+                if tops_:
+                    return max(tops_)
+                return plot_top(doc)
+            except Exception:  # noqa: BLE001
+                pass
         ez = entrance_zone(doc, lid)
         if ez is not None and ez.buffer(0.02).contains(Point(pt)):
             return z + fin
