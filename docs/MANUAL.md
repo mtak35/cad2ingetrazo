@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.29)
+## 13. What's new since 3.11 (3.12 – 3.30)
 
 The full list, version by version, is in the README. In short:
 
@@ -524,6 +524,12 @@ The full list, version by version, is in the README. In short:
 - WCs → «Toilet unit», basins → «Vanity» (also oval basins drawn loose); LIGHT / ELE layers → ceiling lamps and AC layers → diffusers in the false ceiling (made when missing); DRESS rooms / layer → library wardrobes.
 - The stair cut symbol (slant break line) is ignored when tracing stairs.
 - 3.29.1: ducts drawn as crossed boxes cut the slab (no false arches); shower glass no longer makes walls; the slab runs under corridors open to balconies; one lift per LIFT text with its door to the lobby; 45° fixtures read correctly.
+
+**3.30 — floor, ceilings, lift lobby, columns**
+- The floor slab follows the plan's closed lines (balconies to their railings, no pockets); missed and single-line walls are made.
+- False ceilings over halls and corridors too; a False ceiling toolbar menu with more types (cove, coffered, baffles, slats, open-cell, stretch, ACP, mineral tiles).
+- Round LED panel lights and stepped 4-way diffusers; two-leaf lift doors with the cladding carried over them.
+- Column type: structural / architectural.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

@@ -131,7 +131,7 @@ def analyze(doc, lid, pl, entries=None) -> dict:
         except Exception:  # noqa: BLE001
             entries = []
     steps = (("slab cuts", _text_cuts), ("shower glass", _shower_glass),
-             ("cladding", _cladding), ("lift", _lift),
+             ("lift", _lift), ("cladding", _cladding),
              ("lights", _lights), ("AC diffusers", _diffusers),
              ("wardrobes", _wardrobes))
     for name, fn in steps:
@@ -270,7 +270,14 @@ def _runs(segs, gap=0.3, min_len=0.25):
 def _shower_glass(doc, lid, pl, rooms, entries) -> int:
     from shapely.geometry import Point
     lay = pl["layers"]
-    baths = [r for r in rooms if BATH_ROOM.search(str(r["name"]))]
+    fixes = []
+    for ins in pl.get("inserts") or ():      # a room with its WC / basin
+        if FIX_WORDS.search(str(ins.get("name", ""))) or \
+                FIX_WORDS.search(str(ins.get("layer", ""))):
+            x_, y_, _a, _b = _box_c(ins)
+            fixes.append(Point(x_, y_))
+    baths = [r for r in rooms if BATH_ROOM.search(str(r["name"])) or (
+        r["area"] <= 25.0 and any(r["poly"].contains(p_) for p_ in fixes))]
     if not baths:
         return 0
     n = 0
@@ -472,6 +479,64 @@ def _cladding(doc, lid, pl, rooms, entries) -> int:
                     else round(float(w.get("height") or 3.0), 4)),
              "wall": w["id"]})
         n += 1
+    _join_over_doors(doc, lid)
+    return n
+
+
+def _join_over_doors(doc, lid) -> int:
+    """Cladding strips each side of a lift door on the same wall face
+    joined into one run over the door: a portal, the panels carried
+    across above the door's head."""
+    recs = [f for f in doc.get("fitout") or [] if f.get("level") == lid
+            and f.get("kind") == "clad"]
+    doors = [f for f in doc.get("fitout") or [] if f.get("level") == lid
+             and f.get("kind") == "liftdoor"]
+    if len(recs) < 2 or not doors:
+        return 0
+    n = 0
+    groups = {}
+    for f in recs:
+        groups.setdefault((f.get("wall"), tuple(f.get("n") or ())), []).append(f)
+    for _k, fs in groups.items():
+        if len(fs) < 2:
+            continue
+        a0 = fs[0]["a"]
+        u = _seg_dir(fs[0]["a"], fs[0]["b"])
+
+        def t_of(p):
+            return (p[0] - a0[0]) * u[0] + (p[1] - a0[1]) * u[1]
+        spans = sorted(((min(t_of(f["a"]), t_of(f["b"])),
+                         max(t_of(f["a"]), t_of(f["b"])), f) for f in fs),
+                       key=lambda q: q[0])
+        merged = [list(spans[0])]
+        merged[0].append([])
+        for s0, s1, f in spans[1:]:
+            m = merged[-1]
+            gap0, gap1 = m[1], s0
+            dr = next((d for d in doors if gap1 - gap0 >= 0.5 and
+                       gap0 - 0.2 <= t_of(d["c"]) <= gap1 + 0.2 and
+                       abs((d["c"][0] - a0[0]) * u[1] -
+                           (d["c"][1] - a0[1]) * u[0]) < 0.6), None)
+            if dr is not None and gap1 - gap0 <= 2.2:
+                m[3].append([gap0, gap1, float(dr.get("h", 2.1336)) + 0.06])
+                m[1] = max(m[1], s1)
+                m.append(f)
+            else:
+                merged.append([s0, s1, f, []])
+        for m in merged:
+            if not m[3]:
+                continue
+            base = m[2]
+            for extra in m[4:]:
+                doc["fitout"].remove(extra)
+            t0, t1 = m[0], m[1]
+            base["a"] = [round(a0[0] + u[0] * t0, 4),
+                         round(a0[1] + u[1] * t0, 4)]
+            base["b"] = [round(a0[0] + u[0] * t1, 4),
+                         round(a0[1] + u[1] * t1, 4)]
+            base["gaps"] = [[round(g0 - t0, 4), round(g1 - t0, 4),
+                             round(zh, 4)] for g0, g1, zh in m[3]]
+            n += 1
     return n
 
 
@@ -600,7 +665,6 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
     if not cars:
         return 0
     car_e = _pick_named(entries, ["elevator"])
-    door_e = _pick_named(entries, ["elevator door"])
     arch = doc["arch"]
     walls = [w for w in arch["walls"] if w["level"] == lid
              and w.get("kind", "line") == "line" and "a" in w
@@ -677,13 +741,15 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
                     "kind": "void", "wall": w["id"], "pos": round(pos, 4),
                     "w": ow, "h": 2.1336, "sill": 0.0, "swing": "left",
                     "face": 1, "style": "", "lift": True}])
-            if door_e is not None:
-                q = (cw.p0[0] + u[0] * pos, cw.p0[1] + u[1] * pos)
-                _furn_rec(doc, lid, door_e, "liftdoor", q[0], q[1],
-                          back_to(-nd[0], -nd[1]), r,
-                          fit=[ow + 0.15, 0.215], fit_free=True,
-                          fit_h=2.1336)
-                n += 1
+            # the landing door: its frame and two centre-opening leaves
+            q = (cw.p0[0] + u[0] * pos, cw.p0[1] + u[1] * pos)
+            doc.setdefault("fitout", []).append(
+                {"id": _new_id(), "level": lid, "kind": "liftdoor",
+                 "c": [round(q[0], 4), round(q[1], 4)],
+                 "u": [round(u[0], 4), round(u[1], 4)],
+                 "n": [round(-nd[0], 4), round(-nd[1], 4)],
+                 "w": ow, "h": 2.1336, "t": round(float(w["t"]), 4)})
+            n += 1
         # the shaft: through this floor's slab
         g = r["poly"] if r is not None and r["area"] <= 12.0 else \
             m.buffer(0.1, join_style=2)
@@ -813,11 +879,6 @@ def _lights(doc, lid, pl, rooms, entries) -> int:
     pts = _dedupe(pts, 0.12)
     if not pts:
         return 0
-    lamp = _pick_named(entries, ["ceiling lamp"], "Lights")
-    strip = _pick_named(entries, ["fluorescent strip",
-                                  "fluorescent light"], "Lights") or lamp
-    if lamp is None:
-        return 0
     n = 0
     placed = False
     floor = _floor_poly(doc, lid)
@@ -829,9 +890,19 @@ def _lights(doc, lid, pl, rooms, entries) -> int:
             _need_ceiling(doc, lid)
             placed = True
         h = ceiling_h(doc, lid, r, 2.4384)
-        e = strip if (W_ > 0 and L / max(W_, 1e-6) > 2.5 and L >= 0.5) \
-            else lamp
-        _furn_rec(doc, lid, e, "lamp", x, y, rot, r, hang=round(h, 4))
+        linear = W_ > 0 and L / max(W_, 1e-6) > 2.5 and L >= 0.5
+        # a slim LED panel set in the ceiling: round (a downlight / a
+        # surface panel, 12" across by default), or a linear one
+        d = min(max(L if L > 0.12 else 0.30, 0.15), 0.60)
+        doc.setdefault("fitout", []).append(
+            {"id": _new_id(), "level": lid, "kind": "light",
+             "x": round(x, 4), "y": round(y, 4),
+             "shape": "linear" if linear else "round",
+             "d": round(d, 4) if not linear else round(min(W_, 0.3), 4),
+             "l": round(min(L, 2.4), 4) if linear else round(d, 4),
+             "rot": round(rot, 3),
+             "room": (r.get("rec") or {}).get("id"),
+             "hang": round(h, 4)})
         n += 1
     return n
 
@@ -1094,8 +1165,11 @@ def _wardrobes(doc, lid, pl, rooms, entries) -> int:
 GLASS_COL = (0.72, 0.86, 0.90)
 CHROME = (0.78, 0.79, 0.81)
 ACP_COL = (0.74, 0.76, 0.78)
-DIFF_COL = (0.93, 0.93, 0.93)
-DIFF_DARK = (0.35, 0.36, 0.38)
+DIFF_COL = (0.86, 0.87, 0.88)
+DIFF_DARK = (0.30, 0.31, 0.33)
+LIGHT_RIM = (0.96, 0.96, 0.96)
+LIFT_LEAF = (0.70, 0.71, 0.73)
+LIGHT_FACE = (1.0, 0.99, 0.94)
 
 
 def _box_faces(cx, cy, ux, uy, l, d, z0, z1):
@@ -1235,52 +1309,159 @@ def groups(doc):
                 nH = max(int(math.ceil((z1 - z0) / CLAD_HP)), 1)
                 hp = (z1 - z0) / nH
                 gap = 0.008
+                gaps_ = f.get("gaps") or []
                 for i in range(nW):
-                    t = wp * (i + 0.5)
-                    cx = a[0] + u[0] * t + nx * CLAD_T / 2
-                    cy = a[1] + u[1] * t + ny * CLAD_T / 2
-                    for j in range(nH):
-                        fs += _box_faces(cx, cy, u[0], u[1], wp - gap,
-                                         CLAD_T, z0 + hp * j + gap / 2,
-                                         z0 + hp * (j + 1) - gap / 2)
+                    ti0, ti1 = wp * i, wp * (i + 1)
+                    # the panel cut where a door is: beside it full
+                    # height, over it from the door's head up
+                    cuts = sorted([(max(g0, ti0), min(g1, ti1), zh)
+                                   for g0, g1, zh in gaps_
+                                   if g0 < ti1 and g1 > ti0])
+                    parts, cur = [], ti0
+                    for c0, c1, zh in cuts:
+                        if c0 > cur:
+                            parts.append((cur, c0, 0.0))
+                        parts.append((c0, c1, zh))
+                        cur = c1
+                    if cur < ti1:
+                        parts.append((cur, ti1, 0.0))
+                    for p0_, p1_, zmin in parts:
+                        if p1_ - p0_ < 0.01:
+                            continue
+                        t = (p0_ + p1_) / 2
+                        cx = a[0] + u[0] * t + nx * CLAD_T / 2
+                        cy = a[1] + u[1] * t + ny * CLAD_T / 2
+                        for j in range(nH):
+                            zb = z0 + hp * j + gap / 2
+                            zt = z0 + hp * (j + 1) - gap / 2
+                            zb = max(zb, z0 + zmin)
+                            if zt - zb < 0.01:
+                                continue
+                            fs += _box_faces(cx, cy, u[0], u[1],
+                                             p1_ - p0_ - (gap if p0_ == ti0
+                                                          or p1_ == ti1
+                                                          else 0.0),
+                                             CLAD_T, zb, zt)
                 grp(f, "Aluminium cladding (ACP)", fs, ACP_COL, 1.0,
                     "IfcCovering")
-            elif k == "diffuser":
+            elif k == "liftdoor":
+                cx, cy = f["c"]
+                ux, uy = f["u"]
+                nx, ny = f["n"]            # toward the lobby
+                w_, h_ = float(f["w"]), float(f.get("h", 2.1336))
+                t_ = float(f.get("t", 0.2))
+                z0 = z + fin
+                face = t_ / 2               # the lobby face
+                steel, leaves, dark = [], [], []
+                fw, fd = 0.06, 0.05         # the frame's face, its depth
+                for sgn in (-1, 1):         # jambs
+                    jx = cx + ux * sgn * (w_ / 2 + fw / 2) + nx * (face +
+                                                                fd / 2)
+                    jy = cy + uy * sgn * (w_ / 2 + fw / 2) + ny * (face +
+                                                                fd / 2)
+                    steel += _box_faces(jx, jy, ux, uy, fw, fd, z0,
+                                        z0 + h_ + fw)
+                hx = cx + nx * (face + fd / 2)
+                hy = cy + ny * (face + fd / 2)
+                steel += _box_faces(hx, hy, ux, uy, w_ + 2 * fw, fd,
+                                    z0 + h_, z0 + h_ + fw)       # head
+                steel += _box_faces(cx + nx * face, cy + ny * face, ux, uy,
+                                    w_, 0.12, z0, z0 + 0.012)    # sill
+                for sgn in (-1, 1):         # the two leaves, meeting at
+                    lx_ = cx + ux * sgn * w_ / 4 + nx * (face - 0.04)
+                    ly_ = cy + uy * sgn * w_ / 4 + ny * (face - 0.04)
+                    leaves += _box_faces(lx_, ly_, ux, uy, w_ / 2 - 0.004,
+                                         0.03, z0 + 0.012, z0 + h_)
+                dark += _box_faces(cx + nx * (face - 0.023),
+                                   cy + ny * (face - 0.023), ux, uy, 0.006,
+                                   0.002, z0 + 0.012, z0 + h_)   # the joint
+                grp(f, "Lift landing door · frame", steel, CHROME, 1.0,
+                    "IfcDoor")
+                grp(dict(f, id=f["id"] + "l"), "Lift landing door · leaves",
+                    leaves, LIFT_LEAF, 1.0, "IfcDoor")
+                grp(dict(f, id=f["id"] + "j"), "Lift landing door · joint",
+                    dark, DIFF_DARK, 1.0, "IfcDoor")
+            elif k in ("diffuser", "light"):
                 rooms = rooms_of.get(lid)
                 if rooms is None:
                     rooms = rooms_of[lid] = _rooms(arch, lid)
                 r = _room_at(rooms, f["x"], f["y"])
                 h = ceiling_h(doc, lid, r, float(f.get("hang", 2.4384)))
                 zc = z + h
-                lx, ly = float(f["lx"]), float(f["ly"])
-                ang = math.radians(float(f.get("rot", 0.0)))
-                u = (math.cos(ang), math.sin(ang))
                 from shapely.geometry import Point
+                from shapely.geometry import box as _bx
                 from shapely import affinity
+                ang = float(f.get("rot", 0.0))
+
+                def placed(g_):
+                    g_ = affinity.rotate(g_, ang, origin=(0, 0))
+                    return affinity.translate(g_, f["x"], f["y"])
+                if k == "light":
+                    body, face = [], []
+                    if f.get("shape") == "linear":
+                        L_, D_ = float(f.get("l", 1.2)), float(f.get("d",
+                                                                    0.15))
+                        out_ = placed(_bx(-L_ / 2, -D_ / 2, L_ / 2, D_ / 2))
+                        in_ = placed(_bx(-L_ / 2 + 0.012, -D_ / 2 + 0.012,
+                                         L_ / 2 - 0.012, D_ / 2 - 0.012))
+                    else:
+                        R_ = float(f.get("d", 0.3)) / 2
+                        out_ = Point(f["x"], f["y"]).buffer(R_, 6)
+                        in_ = Point(f["x"], f["y"]).buffer(R_ - 0.014, 6)
+                    # the white body, the opal face just under it (light:
+                    # one solid each)
+                    body += _poly_faces(out_, zc - 0.028, zc)
+                    face += _poly_faces(in_, zc - 0.034, zc - 0.028)
+                    grp(f, "LED panel light", body, LIGHT_RIM, 1.0,
+                        "IfcLightFixture")
+                    grp(dict(f, id=f["id"] + "f"), "LED panel light · face",
+                        face, LIGHT_FACE, 1.0, "IfcLightFixture")
+                    continue
+                lx, ly = float(f["lx"]), float(f["ly"])
                 fs, dk = [], []
                 if f.get("round"):
-                    rr = lx / 2
-                    fs += _poly_faces(Point(f["x"], f["y"]).buffer(rr, 24),
-                                      zc - 0.012, zc - 0.001)
-                    for k_ in (0.75, 0.5, 0.25):
-                        ring = Point(f["x"], f["y"]).buffer(rr * k_, 24) \
-                            .difference(Point(f["x"], f["y"])
-                                        .buffer(rr * k_ - 0.012, 24))
-                        dk += _poly_faces(ring, zc - 0.016, zc - 0.012)
+                    R_ = lx / 2
+                    n_ = 4
+                    for k_ in range(n_):
+                        r0 = R_ * (1 - k_ / n_)
+                        r1 = R_ * (1 - (k_ + 1) / n_)
+                        ring = Point(f["x"], f["y"]).buffer(r0, 6)
+                        if r1 > 0.01:
+                            ring = ring.difference(Point(f["x"], f["y"])
+                                                   .buffer(r1, 6))
+                        z1_ = zc - 0.004 - 0.014 * k_
+                        fs += _poly_faces(ring, z1_ - 0.010, z1_)
+                        if r1 > 0.01:
+                            gap_ = Point(f["x"], f["y"]).buffer(
+                                r1 + 0.006, 6).difference(
+                                Point(f["x"], f["y"]).buffer(r1, 6))
+                            dk += _poly_faces(gap_, z1_ - 0.011, z1_ - 0.009)
                 else:
-                    fs += _box_faces(f["x"], f["y"], u[0], u[1], lx, ly,
-                                     zc - 0.012, zc - 0.001)
-                    from shapely.geometry import box as _bx
-                    for k_ in (0.8, 0.6, 0.4):
-                        ring = _bx(-lx * k_ / 2, -ly * k_ / 2, lx * k_ / 2,
-                                   ly * k_ / 2).difference(
-                            _bx(-lx * k_ / 2 + 0.012, -ly * k_ / 2 + 0.012,
-                                lx * k_ / 2 - 0.012, ly * k_ / 2 - 0.012))
-                        ring = affinity.rotate(ring, math.degrees(ang),
-                                               origin=(0, 0))
-                        ring = affinity.translate(ring, f["x"], f["y"])
-                        dk += _poly_faces(ring, zc - 0.016, zc - 0.012)
-                grp(f, "AC diffuser", fs, DIFF_COL, 1.0, "IfcAirTerminal")
+                    # a square 4-way diffuser: its frame, then rings stepping
+                    # down to the centre cone, dark slots between them
+                    n_ = 5
+                    for k_ in range(n_):
+                        a0 = 1 - k_ / n_
+                        a1 = 1 - (k_ + 1) / n_
+                        ring = _bx(-lx * a0 / 2, -ly * a0 / 2, lx * a0 / 2,
+                                   ly * a0 / 2)
+                        if k_ < n_ - 1:
+                            ring = ring.difference(_bx(
+                                -lx * a1 / 2, -ly * a1 / 2, lx * a1 / 2,
+                                ly * a1 / 2))
+                        z1_ = zc - 0.004 - 0.016 * k_
+                        fs += _poly_faces(placed(ring), z1_ - 0.012, z1_)
+                        if k_ < n_ - 1:
+                            gap_ = _bx(-lx * a1 / 2 - 0.008,
+                                       -ly * a1 / 2 - 0.008,
+                                       lx * a1 / 2 + 0.008,
+                                       ly * a1 / 2 + 0.008).difference(_bx(
+                                           -lx * a1 / 2, -ly * a1 / 2,
+                                           lx * a1 / 2, ly * a1 / 2))
+                            dk += _poly_faces(placed(gap_), z1_ - 0.013,
+                                              z1_ - 0.011)
+                grp(f, "AC diffuser (4-way)", fs, DIFF_COL, 1.0,
+                    "IfcAirTerminal")
                 grp(dict(f, id=f["id"] + "s"), "AC diffuser slots", dk,
                     DIFF_DARK, 1.0, "IfcAirTerminal")
         except Exception:  # noqa: BLE001

@@ -68,6 +68,30 @@ def install(app, dock, panel) -> None:
     c.toggled.connect(lambda on: panel.set_cad_lines(on))
     tb.addAction(c)
     panel._tb_cad = c
+    # false ceilings: a type for the rooms selected (or the whole level)
+    try:
+        from PySide6.QtWidgets import QMenu, QToolButton
+
+        from . import ceilings as CE
+        fb = QToolButton(tb)
+        fb.setText("False ceiling")
+        fb.setToolTip("False ceiling: pick a type — for the rooms (or "
+                      "ceilings) selected in the model, else for every "
+                      "room of the level picked in the panel")
+        fb.setPopupMode(QToolButton.InstantPopup)
+        m = QMenu(fb)
+        for k, lab, *_r in CE.TYPES:
+            act = m.addAction(lab)
+            act.triggered.connect(lambda _c=False, kk=k:
+                                  panel.apply_ceiling(kk))
+        m.addSeparator()
+        act = m.addAction("No false ceiling")
+        act.triggered.connect(lambda _c=False: panel.apply_ceiling("none"))
+        fb.setMenu(m)
+        tb.addWidget(fb)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("toolbar false ceiling menu")
     tb.show()
     try:
         dock.setWindowIcon(icon())

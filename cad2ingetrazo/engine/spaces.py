@@ -77,10 +77,72 @@ def found(walls: list[dict], solids=()) -> list[dict]:
                     out.append({"poly": r, "area": r.area,
                                 "perimeter": r.exterior.length,
                                 "at": (at.x, at.y)})
+    if polys and solids is not None:
+        try:
+            out += _open_rooms(polys, out)
+        except Exception:  # noqa: BLE001
+            pass
     out.sort(key=lambda r: -r["area"])
     if len(_cache) > 64:
         _cache.clear()
     _cache[key] = out
+    return out
+
+
+#: CAD2IngeTrazo: a room left open by a wide gap (an archway, a duct
+#: between two walls, a window band no wall holds) closed at this reach;
+#: what is still open inside the building's outline (a hall, a lobby, a
+#: corridor) a room of its own
+CLOSE_WIDE = 0.7
+OUTLINE_GAP = 1.25
+
+
+def _open_rooms(polys, found_) -> list:
+    from shapely.geometry import Polygon
+    from shapely.ops import polylabel, unary_union
+    U = unary_union(polys)
+    u1 = U.buffer(CLOSE, join_style=2).buffer(-CLOSE, join_style=2)
+    big = U.buffer(OUTLINE_GAP, join_style=2).buffer(-OUTLINE_GAP,
+                                                    join_style=2)
+    outline = unary_union([Polygon(g.exterior) for g in getattr(
+        big, "geoms", [big]) if g.geom_type == "Polygon" and
+        Polygon(g.exterior).area >= 20.0])
+    if outline.is_empty:
+        return []
+    have = unary_union([r["poly"] for r in found_]) if found_ else Polygon()
+    rest = outline.difference(u1).difference(have.buffer(0.01))
+    if rest.is_empty or rest.area < 2.0:
+        return []
+    out = []
+
+    def add(r):
+        try:
+            at = polylabel(r, tolerance=0.05)
+        except Exception:  # noqa: BLE001
+            at = r.representative_point()
+        out.append({"poly": r, "area": r.area,
+                    "perimeter": r.exterior.length, "at": (at.x, at.y),
+                    "open": True})
+    # rooms closed at the wider reach
+    u2 = U.buffer(CLOSE_WIDE, join_style=2).buffer(-CLOSE_WIDE,
+                                                   join_style=2)
+    for g in getattr(u2, "geoms", [u2]):
+        if g.geom_type != "Polygon":
+            continue
+        for ring in g.interiors:
+            piece = Polygon(ring).intersection(rest)
+            for r in getattr(piece, "geoms", [piece]):
+                if r.geom_type == "Polygon" and r.area >= 2.0 and \
+                        not r.buffer(-0.3).is_empty:
+                    add(r)
+    if out:
+        rest = rest.difference(unary_union([r["poly"] for r in out])
+                               .buffer(0.01))
+    # what is left inside the outline: a hall, a corridor, a lobby
+    for r in getattr(rest, "geoms", [rest]):
+        if r.geom_type == "Polygon" and r.area >= 2.0 and \
+                not r.buffer(-0.35).is_empty:
+            add(r)
     return out
 
 

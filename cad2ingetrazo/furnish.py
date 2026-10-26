@@ -45,6 +45,9 @@ KINDS = {
                [("Living room", ["coffee table"])]),
     "desk": (r"DESK|WORK.?STATION|STUDY|ESCRITORIO",
              [("Office", ["desk"])]),
+    "sidetable": (r"BEDSIDE|BED.?SIDE|SIDE.?TABLE|NIGHT.?STAND|^B[-. ]?S$|"
+                  r"NIGHT.?TABLE|MESILLA",
+                  [("Bedroom", ["bedside table"])]),
     "wardrobe": (r"WARD|\bROBE|CLOSET|CUPBOARD|ALMIRAH|ARMARIO",
                  [("Bedroom", ["wardrobe"])]),
     "ksink": (r"K.?SINK|KITCHEN.?SINK|\bSINK|FREGADERO",
@@ -82,6 +85,7 @@ NOT_WORDS = {
                "marble", "technical", "planters"),
     "coffee": ("square",),
     "wardrobe": ("angle", "corner", "blue"),
+    "sidetable": ("blue",),
     "ksink": ("cabinet",),
     "stove": ("propane", "large", "induction", "deep fryer"),
     "fridge": ("chest",),
@@ -155,8 +159,14 @@ def classify(name: str, layer: str, L: float, W: float, use: str):
     if use in ("bed", "dress"):
         if _in(L, 1.85, 3.3) and _in(W, 0.85, 2.6):   # (with side tables)
             return "bed"
+        if use == "bed" and _in(L, 0.3, 0.7) and _in(W, 0.3, 0.7) and \
+                L / W < 1.45:
+            return "sidetable"        # a small square by the bed
         if _in(L, 0.9, 3.2) and _in(W, 0.45, 0.75):
             return "wardrobe"
+    if use not in ("bath", "kitchen", "dining", "living", "office") and \
+            _in(L, 1.9, 3.0) and _in(W, 1.35, 2.6) and L / W < 1.6:
+        return "bed"                  # a double bed, whatever the room's name
     if use == "living":
         if _in(L, 1.4, 3.4) and _in(W, 0.7, 1.15):
             return "sofa"
@@ -182,7 +192,7 @@ def _fits(kind, L, W) -> bool:
            "bathtub": (1.2, 2.0, 0.55, 1.0), "sofa": (1.2, 3.6, 0.6, 2.2),
            "armchair": (0.5, 1.2, 0.5, 1.2), "chair": (0.3, 0.8, 0.3, 0.8),
            "dining": (0.6, 3.5, 0.6, 1.6), "desk": (0.8, 2.4, 0.4, 1.2),
-           "wardrobe": (0.6, 3.5, 0.4, 0.9), "ksink": (0.4, 1.4, 0.35, 0.7),
+           "wardrobe": (0.6, 3.5, 0.4, 0.9), "sidetable": (0.3, 0.75, 0.3, 0.75), "ksink": (0.4, 1.4, 0.35, 0.7),
            "stove": (0.4, 1.0, 0.4, 0.8), "fridge": (0.5, 1.0, 0.5, 1.0),
            "tree": (0.3, 12.0, 0.3, 12.0)}.get(kind)
     return lim is None or (_in(L, lim[0], lim[1]) and _in(W, lim[2], lim[3]))
@@ -309,7 +319,7 @@ def cad_blocks(doc, lid) -> list:
 
 #: kinds that stand with their back to a wall (the library's models face
 #: −Y: their back is their +Y side)
-WALL_KINDS = {"bed", "wc", "basin", "sofa", "armchair", "wardrobe", "tv",
+WALL_KINDS = {"bed", "sidetable", "wc", "basin", "sofa", "armchair", "wardrobe", "tv",
               "cabinet", "fridge", "stove", "ksink", "desk", "shower",
               "bathtub"}
 
@@ -495,6 +505,25 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                       else {})}
             doc["furniture"].append(rec)
             got[kind] = got.get(kind, 0) + 1
+        try:                 # a small square by a bed: its bedside table
+            beds = [f for f in doc["furniture"] if f["level"] == lid
+                    and f.get("kind") == "bed" and f.get("cad")]
+            st_e = pick("sidetable", 0.45, 0.45, entries, cache)
+            for f in doc["furniture"]:
+                if f["level"] != lid or f.get("kind") != "chair" or \
+                        not f.get("cad") or st_e is None:
+                    continue
+                if any(math.dist((f["x"], f["y"]), (b["x"], b["y"])) < 1.6
+                       for b in beds):
+                    f.update(kind="sidetable", key=st_e["key"],
+                             name=st_e["name"])
+                    if st_e.get("entry"):
+                        f["entry"] = st_e["entry"]
+                    got["chair"] = got.get("chair", 1) - 1
+                    got["sidetable"] = got.get("sidetable", 0) + 1
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("furnish.bedside")
         if only is None or "basin" in only:
             try:             # basins drawn as an oval, not a block
                 pl_ = cad_plan(doc, lid)

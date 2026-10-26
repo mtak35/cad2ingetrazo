@@ -641,14 +641,22 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
         return {"ldim": [d_[0] * k, d_[1] * k]} if d_ else {}
 
     def _lc(i):
-        """The block's own middle, in the model."""
+        """The block's own middle, in the model, and its own outline (its
+        box in its axes, turned): a block turned 45° does not reach over
+        the walls beside it."""
         m_ = i.get("lmid")
-        if not m_:
+        d_ = i.get("ldim")
+        if not m_ or not d_:
             return {}
         a_ = math.radians(i["rot"])
-        wx = i["x"] + math.cos(a_) * m_[0] - math.sin(a_) * m_[1]
-        wy = i["y"] + math.sin(a_) * m_[0] + math.cos(a_) * m_[1]
-        return {"lc": T(wx, wy)}
+        ca, sa = math.cos(a_), math.sin(a_)
+
+        def w_(lx, ly):
+            return T(i["x"] + ca * lx - sa * ly, i["y"] + sa * lx + ca * ly)
+        hx, hy = d_[0] / 2, d_[1] / 2
+        oc = [w_(m_[0] + sx * hx, m_[1] + sy * hy)
+              for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        return {"lc": w_(m_[0], m_[1]), "ocorners": oc}
     inserts = [dict(i, x=T(i["x"], i["y"])[0], y=T(i["x"], i["y"])[1],
                     rot=i["rot"] + rot_deg, corners=box(i["box"]),
                     **_ld(i), **_lc(i))

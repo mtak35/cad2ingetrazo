@@ -424,6 +424,10 @@ def _gap_kind(mid, width, u, t, context):
                     continue            # a half leaf sweeps its own half
                 sw[k] += L
                 fc[k] += L if across > 0 else -L
+    # glazed across in several lines (a window's frame and glass): a
+    # window, whatever swings beside it (the next room's door)
+    if glaze >= 2.5 * width:
+        return ("window", 0, 0)
     # a swing first (a door's closed leaf also lies along the wall): one
     # leaf only up to a single door's width; wider, a leaf at each jamb
     if width <= SINGLE_LEAF_MAX and max(swing) >= 0.6 * width:

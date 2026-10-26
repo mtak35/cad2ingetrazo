@@ -146,6 +146,7 @@ def _form(parent):
 #: what the «Selected element» part shows, per kind:
 #: (key, label, kind, options / range)
 from . import matlib as _ML  # noqa: E402
+from .ceilings import TYPES as _CE_TYPES  # noqa: E402
 FIELDS = {
     "wall": [("type", "Wall type", "choice", ("solid", "curtain")),
              ("glass", "Curtain wall glass", "choice",
@@ -206,7 +207,9 @@ FIELDS = {
                 ("glass", "Glass type", "choice",
                  ("clear", "double", "lowe", "grey", "bronze", "green",
                   "blue_ref", "silver_ref", "frosted"))],
-    "column": [("shape", "Shape", "choice", ("rect", "round")),
+    "column": [("role", "Column type", "choice",
+                ("structural", "architectural")),
+               ("shape", "Shape", "choice", ("rect", "round")),
                ("w", "Width / Ø", "len", (0.05, 5.0)),
                ("d", "Depth", "len", (0.05, 5.0)),
                ("angle", "Angle", "deg", (-360.0, 360.0)),
@@ -264,8 +267,7 @@ FIELDS = {
     "room": [("size", "Size (width × length)", "info", None),
              ("name", "Room name", "text", None),
              ("ceiling", "False ceiling", "choice",
-              ("level", "none", "gypsum", "tiles", "pop", "wood", "pvc",
-               "metal")),
+              ("level", "none") + tuple(t_[0] for t_ in _CE_TYPES)),
              ("ceiling_h", "Ceiling height from floor", "len", (2.0, 8.0)),
              ("finish", "Floor finish thickness", "len", (0.0, 0.3)),
              ("fz", "Floor sunk (−) / raised (+)", "len", (-3.0, 3.0)),
@@ -291,7 +293,9 @@ def _choice_labels() -> dict:
     out.update({k: lab for k, lab, _c in S_.GLASS_TYPES})
     from . import ceilings as CE_
     out.update({t[0]: t[1] for t in CE_.TYPES})
-    out.update({"level": "As the level"})
+    out.update({"level": "As the level",
+                "structural": "Structural (RCC, carries load)",
+                "architectural": "Architectural (casing / decorative)"})
     try:
         from . import stairs as ST_
         out.update({k: lab for k, lab, _c in ST_.FINISHES })
@@ -4444,6 +4448,42 @@ class Panel(QWidget):
         self.commit(doc, f"False ceiling ({self.fc_kind.currentText()}, "
                          f"{len_txt(self.fc_h.value())} over the floor) on "
                          f"{len(lids)} level(s)")
+
+    def apply_ceiling(self, kind):
+        """A false ceiling of ``kind`` ("none": no ceiling) in the rooms
+        selected (or their ceilings), else on the whole level picked."""
+        from . import ceilings as CE
+        doc = self.doc()
+        rids = [i for k, i in self._selected_all() if k in ("room",
+                                                             "ceiling")]
+        lab = "No false ceiling" if kind == "none" else CE.label(kind)
+        if rids:
+            n = 0
+            for rid in rids:
+                rec = PJ.room_record(doc, rid)
+                if rec is None:
+                    continue
+                rec["ceiling"] = kind
+                n += 1
+            self.commit(doc, f"{lab}: {n} room(s)")
+            return
+        lid, _lv = self.level()
+        if not lid:
+            self.flash("Pick a level at the top, or select rooms / "
+                       "ceilings in the model")
+            return
+        if kind == "none":
+            CE.remove_level(doc, lid)
+        else:
+            h = float(((doc.get("ceilings") or {}).get(lid) or {}).get(
+                "h", self.fc_h.value() if hasattr(self, "fc_h")
+                else CE.DEFAULT_H))
+            CE.set_level(doc, lid, kind, h)
+        if hasattr(self, "fc_kind") and kind != "none":
+            i = self.fc_kind.findData(kind)
+            if i >= 0:
+                self.fc_kind.setCurrentIndex(i)
+        self.commit(doc, f"{lab} on the level")
 
     def _ceiling_remove(self):
         from . import ceilings as CE

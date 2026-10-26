@@ -448,7 +448,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
                            # it, into the ground; his ask 2026-10-03)
                            base=min(max(float(e.get("base", 0.0)), -20.0),
                                     20.0))
-                for k_ in ("pier", "round_lib"):  # a pier box; a round
+                if e.get("role") in ("structural", "architectural"):
+                    rec["role"] = e["role"]      # (his ask 2026-10-26)
+                for k_ in ("pier", "round_lib", "mass"):  # a pier box; a round
                     if e.get(k_):                # column of the library
                         rec[k_] = e[k_]
                 try:                             # a round column's shaft

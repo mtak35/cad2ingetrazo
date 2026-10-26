@@ -299,6 +299,8 @@ def extend_landings(st, room, reach=1.5) -> int:
         count += len(f["lines"])
         ends[count] = f
     for lg in st["landings"]:
+        if lg.get("arrival") or lg.get("top"):
+            continue                 # the floor above's own slab is there
         try:
             L0 = Polygon([tuple(p[:2]) for p in lg["corners"]]).buffer(0)
             if L0.is_empty:
@@ -1006,10 +1008,16 @@ def groups(doc, z_of, layer_of):
     [(faces, colour)…] of its railing)]."""
     stt = doc.get("settings") or {}
     out = []
+    roofed = {s_["level"] for s_ in doc["arch"]["structure"]
+              if s_["type"] == "slab" and s_.get("roof")}
     for st in doc.get("stairs") or []:
         z0 = z_of.get(st["level"])
         if z0 is None:
             continue
+        if not st.get("to") and st["level"] not in roofed and \
+                not stt.get("top_stair", False):
+            continue        # the top floor's stair, no roof over it: up to
+            #                 nothing (it is made when the roof is)
         e = eff(st, stt)
         fin_t = float(stt.get("stair_fin_t", 0.02))
         try:                  # finished floor to finished floor: the floor
@@ -1147,6 +1155,20 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
     if flights and flights[-1]["lines"]:
         ln = flights[-1]["lines"][-1]
         arr = LineString([tuple(ln[0][:2]), tuple(ln[1][:2])])
+    # the stair of the floor above starting at the edge of this opening:
+    # its first tread left open (the way on up)
+    starts = []
+    for s2 in doc.get("stairs") or []:
+        if s2.get("level") != st["to"] or s2 is st:
+            continue
+        try:
+            f2, _l2 = as_flights(s2)
+            if f2 and f2[0]["lines"]:
+                ln = f2[0]["lines"][0]
+                starts.append(LineString([tuple(ln[0][:2]),
+                                          tuple(ln[1][:2])]))
+        except Exception:  # noqa: BLE001
+            continue
     out = []
     for hp in holes:
         pts = list(hp.exterior.coords)[:-1]
@@ -1165,6 +1187,8 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
                 seg = seg.difference(walls.buffer(0.12))
             if arr is not None:
                 seg = seg.difference(arr.buffer(0.35))
+            for st_ln in starts:
+                seg = seg.difference(st_ln.buffer(0.35))
             for g in getattr(seg, "geoms", [seg]):
                 if g.geom_type != "LineString" or g.length < 0.3:
                     continue
@@ -1508,7 +1532,10 @@ def trace(segs, words=()):
             cand.append((round(ang) % 180, round(L / 0.05), a, b))
     groups = {}
     for ang, lk, a, b in cand:
-        groups.setdefault((ang, lk), []).append((a, b))
+        # (one flight's treads may be drawn a little longer or shorter —
+        # the first ones run to the wall, the rest stop at the stringer:
+        # grouped by direction, the lengths kept close in the runs below)
+        groups.setdefault((ang, 0), []).append((a, b))
     flights = []
     split = []
     for (ang, lk), lines in groups.items():
@@ -1544,7 +1571,9 @@ def trace(segs, words=()):
                 s = r[0] - run[-1][0]
                 prev = run[-1][0] - run[-2][0] if len(run) > 1 else s
                 ok = 0.18 <= s <= 0.40 and abs(s - prev) < 0.04 and \
-                    abs(r[1] - run[-1][1]) < 0.10
+                    abs(r[1] - run[-1][1]) < 0.10 and \
+                    abs(math.dist(r[2], r[3]) -
+                        math.dist(run[-1][2], run[-1][3])) < 0.16
             if ok:
                 run.append(r)
                 continue

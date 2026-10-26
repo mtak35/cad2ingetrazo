@@ -567,3 +567,14 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Lifts from the LIFT layer**: one car per LIFT text, sized to the car drawn round it. Its door faces the open lobby side, and an opening is cut in the shaft wall for it. No railing goes round lift wells and ducts.
 - **Fixtures turned 45°**: blocks are measured in their own axes, so a WC on a diagonal wall is read as a WC (not a square). WB blocks are basins. Blocks far from the floor's walls are left out (when a floor was imported without picking its region).
 - **Lights and AC from this kind of drawing**: unnamed symbols on the ELECTRICAL layer, out in the rooms, become ceiling lamps. Diffusers drawn in loose lines on the AC layer are read too. Halls the walls leave open get theirs, and the short cladding strips beside lift doors are kept.
+
+## 3.30.0
+- **Floor slab as the plan draws it**: the slab stops at the lines the plan closes. Balconies run out to their railings (curves followed), and nothing fills the gaps between balconies or the pockets open to the outside. Outdoor names (side passage, lawn, drive…) never pull the floor out there.
+- **Walls as drawn**: a wall the line-pairing missed (broken where another wall crosses it, e.g. two bedrooms back to back) is made from its two lines. A partition drawn as one line, wall to wall, becomes a 4½" wall.
+- **Shower glass in every bathroom**: rooms holding WC / basin blocks count as bathrooms, so their glass cabins are made too. Doors placed where the plan draws glazing are made windows.
+- **Bedside tables**: small squares beside a bed (and B-S blocks) are bedside tables, not chairs. A double bed is read whatever its room is named.
+- **Staircase**: the top floor's stair is not drawn climbing to nothing when no roof is over it. With a roof, its well is cut and railed. Tread lines broken by the cut symbol or notes are made whole.
+- **False ceilings everywhere inside**: halls, corridors and lobbies the rooms leave open get the level's ceiling (not the shafts, wells or balconies). New types: mineral fibre 600×600, 2'×4' lay-in, gypsum with cove / bulkhead, coffered, aluminium baffles, timber slats, open-cell grid, stretch, ACP. Pick them from the new **False ceiling** toolbar menu (for the selected rooms, or the whole level) or in Selected element.
+- **Ceiling lights and AC diffusers**: round slim LED panels (linear for long symbols) flush in the ceiling, and square 4-way diffusers with stepped louvres.
+- **Lift lobby**: each lift's landing door is a stainless frame with two centre-opening leaves (not one block). The ACP cladding strips each side of a door are joined across above its head.
+- **Columns: structural or architectural** (Selected element ▸ Column type). Architectural columns take the wall finish, carry no load (IFC), and get no footing.
