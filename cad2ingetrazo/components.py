@@ -117,6 +117,15 @@ def type_of(kind: str, rec: dict, walls: dict | None = None):
         nm = str(rec.get("name", ""))
         what = "Parapet" if nm.startswith("Terrace") else "Wall"
         return "wall", f"wall|{what}|{t}", f"{what} {_len(rec['t'])}"
+    if kind == "column" and rec.get("role") == "architectural":
+        st_ = rec.get("astyle") or ("round_smooth" if rec.get("shape") ==
+                                    "round" else "square_smooth")
+        lab = {"round_smooth": "round smooth", "round_fluted": "round fluted",
+               "corinthian": "Corinthian", "square_smooth": "square smooth"
+               }.get(st_, st_)
+        return "column", f"column|arch|{st_}|{_mm(rec['w'])}|" \
+            f"{_mm(rec.get('d') or rec['w'])}", \
+            f"Architectural column, {lab} {_len(rec['w'])}"
     if kind == "column":
         if rec.get("shape") == "poly":
             sig = ",".join(f"{_mm(p[0])}:{_mm(p[1])}"
@@ -130,7 +139,7 @@ def type_of(kind: str, rec: dict, walls: dict | None = None):
                 f"Round column Ø{_len(rec['w'])}"
         a, b = sorted((_mm(rec["w"]), _mm(rec["d"])))
         return "column", f"column|rect|{a}|{b}", \
-            f"Column {_len(a / 1000)} × {_len(b / 1000)}"
+            f"RCC column {_len(a / 1000)} × {_len(b / 1000)}"
     if kind == "beam":
         return "beam", f"beam|{_mm(rec['w'])}|{_mm(rec['h'])}", \
             f"Beam {_len(rec['w'])} × {_len(rec['h'])}"

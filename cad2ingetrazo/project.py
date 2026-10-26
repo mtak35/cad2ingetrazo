@@ -6561,8 +6561,45 @@ def _groups(arch, doc=None):
         tag = {KEY: {"type": e["kind"], "id": e["id"], "level": e["level"],
                      **({"okind": e["okind"]} if e.get("okind") else {}),
                      **({"ctype": tkey, "mark": t["mark"]} if t else {})}}
+        if e["kind"] == "column" and \
+                (cols_by.get(e["id"]) or {}).get("role") == "architectural":
+            # an architectural column: its style drawn (base, shaft,
+            # capital) — not the structural box
+            try:
+                from . import colstyle as CS
+                c_ = cols_by[e["id"]]
+                zz = [q[2] for f_ in e["faces"]
+                      for q in (f_["loop"] if isinstance(f_, dict) else f_)]
+                parts_ = CS.faces(c_, S.column_outline(c_, 0.0), min(zz),
+                                  max(zz))
+                fl_ = []
+                for fs_, col_ in parts_:
+                    for f_ in fs_:
+                        d_ = dict(f_) if isinstance(f_, dict) else {
+                            "loop": f_, "holes": []}
+                        d_["color"] = col_
+                        fl_.append(d_)
+                g = Group(_mesh_of(fl_), name=name)
+                g.component = False
+                g.material = {"color": CS.WHITE, "opacity": 1.0,
+                              "name": "GRC / plaster, painted"}
+                g.layer = level_layer(names[e["level"]])
+                g.ifc = {"class": "IfcColumn", "name": name,
+                         "predefined": "USERDEFINED",
+                         "object_type": "Architectural column",
+                         "load_bearing": False}
+                g.ext = {KEY: {"type": "column", "id": e["id"],
+                               "level": e["level"],
+                               **({"ctype": tkey, "mark": t["mark"]}
+                                  if t else {})}}
+                out.append(g)
+                continue
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project._groups architectural column")
         if not (t and t.get("lib")) and e["kind"] == "column" and \
-                st_.get("round_lib", True) and not cols_lib_off:
+                (cols_by.get(e["id"]) or {}).get("role") != "architectural" \
+                and st_.get("round_lib", True) and not cols_lib_off:
             c_ = cols_by.get(e["id"])
             if c_ is not None and c_.get("shape") == "round":
                 # a round column: the IngeTrazo library's column, its shaft
@@ -6639,6 +6676,9 @@ def _groups(arch, doc=None):
                      "object_type": "Architectural column",
                      "load_bearing": False}
         elif e["kind"] == "column" and cls:
+            # a structural column: bare RCC (plain section, concrete)
+            g.material = {"color": (0.66, 0.66, 0.64), "opacity": 1.0,
+                          "name": "RCC (structural)"}
             g.ifc = dict(g.ifc or {}, load_bearing=True,
                          object_type="Structural column")
         g.ext = {KEY: {"type": e["kind"], "id": e["id"], "level": e["level"],

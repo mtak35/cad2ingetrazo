@@ -209,6 +209,9 @@ FIELDS = {
                   "blue_ref", "silver_ref", "frosted"))],
     "column": [("role", "Column type", "choice",
                 ("structural", "architectural")),
+               ("astyle", "Architectural style", "choice",
+                ("round_smooth", "round_fluted", "corinthian",
+                 "square_smooth")),
                ("shape", "Shape", "choice", ("rect", "round")),
                ("w", "Width / Ø", "len", (0.05, 5.0)),
                ("d", "Depth", "len", (0.05, 5.0)),
@@ -295,7 +298,11 @@ def _choice_labels() -> dict:
     out.update({t[0]: t[1] for t in CE_.TYPES})
     out.update({"level": "As the level",
                 "structural": "Structural (RCC, carries load)",
-                "architectural": "Architectural (casing / decorative)"})
+                "architectural": "Architectural (casing / decorative)",
+                "round_smooth": "Round smooth (base, capital)",
+                "round_fluted": "Round fluted",
+                "corinthian": "Fluted, Corinthian capital",
+                "square_smooth": "Square smooth (plinth, cap)"})
     try:
         from . import stairs as ST_
         out.update({k: lab for k, lab, _c in ST_.FINISHES })
@@ -4407,12 +4414,23 @@ class Panel(QWidget):
                       "One at each end of each wall selected"))
         f.addRow(_btn("Remove the chhatris", lambda: self._mn_clear(
             "chhatris"), "Every chhatri goes"))
+        self.lay.addWidget(box)
+        # ---- 8A. false ceiling (a section of its own) ----
         from . import ceilings as CE_
-        f.addRow(QLabel("<i>False ceiling (every room of a level):</i>"))
+        box, body = _fold("8A  False ceiling", "ceiling", False)
+        f = _form(body)
+        f.addRow(QLabel("<i>Pick a type, then apply it to the rooms "
+                        "selected in the model, the level picked at the "
+                        "top, or every level (also on the toolbar: "
+                        "«False ceiling…»).</i>"))
         self.fc_kind = QComboBox()
         for k, lab, *_r in CE_.TYPES:
             self.fc_kind.addItem(lab, k)
         f.addRow("Type", self.fc_kind)
+        f.addRow(_btn("Apply to the selected rooms",
+                      lambda: self.apply_ceiling(self.fc_kind.currentData()),
+                      "The rooms (or ceilings) selected in the model take "
+                      "this type; nothing selected: the level picked"))
         self.fc_h = _spin(2.0, 8.0, CE_.DEFAULT_H, 0.0254)    # 8'-0"
         self.fc_h.setToolTip("The ceiling's underside over the finished "
                              "floor (8'-0\" by default)")

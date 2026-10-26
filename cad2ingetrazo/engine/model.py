@@ -450,6 +450,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
                                     20.0))
                 if e.get("role") in ("structural", "architectural"):
                     rec["role"] = e["role"]      # (his ask 2026-10-26)
+                if e.get("astyle") in ("round_smooth", "round_fluted",
+                                       "corinthian", "square_smooth"):
+                    rec["astyle"] = e["astyle"]
                 for k_ in ("pier", "round_lib", "mass"):  # a pier box; a round
                     if e.get(k_):                # column of the library
                         rec[k_] = e[k_]

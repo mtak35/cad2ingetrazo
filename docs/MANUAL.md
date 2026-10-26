@@ -533,3 +533,8 @@ The full list, version by version, is in the README. In short:
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).
+
+## 3.31.0
+- **False ceiling has its own section** in the panel (**8A  False ceiling**, below Roof): pick the type, then apply it to the rooms selected in the model, the level picked, or every level; Remove takes them off. The toolbar **False ceiling…** menu offers the same types.
+- **Ceiling types as built on site**, each with its own form: Gypsum (plain board); POP (a tray: border band, raised centre, cornice and a hidden cove LED glow); Wooden planks; PVC panels; Metal 600×600 tiles; Glass (back-lit panels in a gypsum frame); Fabric / cloth (draped folds inside a gypsum border); Mineral fibre 600×600 with flush light panels; Combination (gypsum border, wooden centre). The earlier types stay (2×2 / 2×4 grid, cove, coffered, baffles, slats, open-cell, stretch, ACP, metal linear strips).
+- **Architectural columns are their own object**, not a renamed RCC column: plinth, moulded base, shaft and capital, in four styles (Selected element ▸ Architectural style): round smooth, round fluted, fluted with Corinthian capital, square smooth (plinth and cap). Finished in white plaster, no load (IFC), no footing. **Structural columns** stay plain RCC prisms (rectangular or circular) in concrete grey, labelled "RCC column".

@@ -13,20 +13,26 @@ import re
 
 #: key → (label, thickness m, colour rgba, grid m (0 = plain), grid colour)
 TYPES = [
-    ("gypsum", "Gypsum board (plain)", 0.0125, (0.96, 0.96, 0.95, 1.0), 0.0,
-     None),
+    ("gypsum", "Gypsum false ceiling (plain board)", 0.0125,
+     (0.96, 0.96, 0.95, 1.0), 0.0, None),
+    ("pop", "POP false ceiling (tray, cornice, cove light)", 0.020,
+     (0.98, 0.97, 0.94, 1.0), 0.0, None),
+    ("wood", "Wooden false ceiling (planks)", 0.018, (0.62, 0.45, 0.30, 1.0),
+     0.1524, (0.48, 0.34, 0.22, 1.0)),
+    ("pvc", "PVC false ceiling (panels)", 0.010, (0.95, 0.95, 0.97, 1.0),
+     0.2032, (0.82, 0.83, 0.85, 1.0)),
+    ("metal", "Metal false ceiling (600×600 tiles)", 0.012,
+     (0.84, 0.85, 0.86, 1.0), 0.6, (0.62, 0.63, 0.65, 1.0)),
+    ("glass", "Glass false ceiling (back-lit panels)", 0.010,
+     (0.93, 0.96, 1.0, 1.0), 0.6, (0.40, 0.42, 0.45, 1.0)),
+    ("fabric", "Fabric / cloth false ceiling (draped)", 0.004,
+     (0.86, 0.70, 0.48, 1.0), 0.3, (0.78, 0.62, 0.40, 1.0)),
+    ("mineral", "Mineral fibre false ceiling (600×600, light panels)", 0.016,
+     (0.97, 0.97, 0.96, 1.0), 0.6, (0.80, 0.80, 0.80, 1.0)),
+    ("combo", "Combination ceiling (gypsum border, wooden centre)", 0.0125,
+     (0.97, 0.97, 0.96, 1.0), 0.1524, (0.62, 0.45, 0.30, 1.0)),
     ("tiles", "Acoustic tiles 2'×2' on a T-grid", 0.016,
      (0.93, 0.93, 0.91, 1.0), 0.6096, (0.70, 0.71, 0.72, 1.0)),
-    ("pop", "Plaster of Paris (POP)", 0.020, (0.98, 0.97, 0.94, 1.0), 0.0,
-     None),
-    ("wood", "Timber panels", 0.018, (0.62, 0.45, 0.30, 1.0), 0.1524,
-     (0.48, 0.34, 0.22, 1.0)),
-    ("pvc", "PVC panels", 0.010, (0.95, 0.95, 0.97, 1.0), 0.2032,
-     (0.82, 0.83, 0.85, 1.0)),
-    ("metal", "Metal linear strips", 0.015, (0.80, 0.81, 0.83, 1.0), 0.1016,
-     (0.55, 0.56, 0.58, 1.0)),
-    ("mineral", "Mineral fibre tiles 600×600 (Armstrong)", 0.016,
-     (0.97, 0.97, 0.96, 1.0), 0.6, (0.88, 0.88, 0.88, 1.0)),
     ("grid24", "Lay-in tiles 2'×4' on a T-grid", 0.016,
      (0.95, 0.95, 0.94, 1.0), 0.6096, (0.72, 0.73, 0.74, 1.0)),
     ("cove", "Gypsum with cove / bulkhead (hidden light)", 0.0125,
@@ -43,7 +49,11 @@ TYPES = [
      0.0, None),
     ("acp", "Aluminium composite panels", 0.006, (0.86, 0.87, 0.88, 1.0),
      1.2192, (0.60, 0.61, 0.63, 1.0)),
+    ("metal_linear", "Metal linear strips", 0.015, (0.80, 0.81, 0.83, 1.0),
+     0.1016, (0.55, 0.56, 0.58, 1.0)),
 ]
+LIGHT = (1.0, 0.93, 0.72, 1.0)        # the cove's glow, a lit panel
+WOOD = (0.62, 0.45, 0.30, 1.0)
 #: types with no board: strips hung in rows (depth m, width m)
 OPEN_KINDS = {"baffle": (0.10, 0.02), "slats": (0.05, 0.04),
               "opencell": (0.05, 0.012)}
@@ -109,6 +119,76 @@ def faces(poly, z, kind) -> list:
             for q in getattr(mid, "geoms", [mid]):
                 if q.geom_type == "Polygon" and q.area > 0.05:
                     out.append((_slab(q, z, z + t), col))
+            continue
+        if kind in ("pop", "combo", "glass"):
+            # a tray: a band round the room, the middle raised (POP: its
+            # cornice and the cove light; glass: lit panels in a frame;
+            # combination: wooden planks in the middle)
+            bw = 0.6 if kind != "glass" else 0.5
+            mid = p.buffer(-bw, join_style=2)
+            band = p.difference(mid) if not mid.is_empty else p
+            for q in getattr(band, "geoms", [band]):
+                if q.geom_type == "Polygon" and q.area > 0.01:
+                    out.append((_slab(q, z, z + t), BY["gypsum"][3]))
+            up = 0.10 if kind != "glass" else 0.06
+            for q in getattr(mid, "geoms", [mid]):
+                if q.geom_type != "Polygon" or q.area < 0.05:
+                    continue
+                cc = WOOD if kind == "combo" else col
+                out.append((_slab(q, z + up, z + up + t), cc))
+                ring = q.buffer(0.02, join_style=2).difference(q)  # fascia
+                out.append((_slab(ring, z, z + up), BY["gypsum"][3]))
+                if kind == "pop":
+                    glow = q.difference(q.buffer(-0.05, join_style=2))
+                    out.append((_slab(glow, z + up - 0.012, z + up - 0.002),
+                                LIGHT))
+                    corn = p.difference(p.buffer(-0.06, join_style=2))
+                    out.append((_slab(corn, z - 0.05, z), col))   # cornice
+                if kind == "combo":
+                    out.append((_grid(q, z + up, grid), gcol))
+                if kind == "glass":
+                    out.append((_grid(q, z + up, grid), gcol))
+            continue
+        if kind == "fabric":
+            # cloth drawn into folds: strips hanging low and high by turns
+            # in the middle, a plain band round it
+            mid = p.buffer(-0.45, join_style=2)
+            band = p.difference(mid) if not mid.is_empty else p
+            for q in getattr(band, "geoms", [band]):
+                if q.geom_type == "Polygon" and q.area > 0.01:
+                    out.append((_slab(q, z, z + 0.0125), BY["gypsum"][3]))
+            from shapely.geometry import box as _bx
+            for q in getattr(mid, "geoms", [mid]):
+                if q.geom_type != "Polygon" or q.area < 0.05:
+                    continue
+                x0, y0, x1, y1 = q.bounds
+                x, k = x0, 0
+                while x < x1:
+                    st = q.intersection(_bx(x, y0, x + 0.15, y1))
+                    sag = 0.07 if k % 2 == 0 else 0.03
+                    for s_ in getattr(st, "geoms", [st]):
+                        if s_.geom_type == "Polygon" and s_.area > 1e-4:
+                            out.append((_slab(s_, z + 0.08 - sag,
+                                              z + 0.08 - sag + t),
+                                        col if k % 2 == 0 else gcol))
+                    x += 0.15
+                    k += 1
+                out.append((_slab(q, z + 0.09, z + 0.10), gcol))  # behind
+            continue
+        if kind == "mineral":          # tiles on a grid, some lit panels
+            out.append((_slab(p, z, z + t), col))
+            out.append((_grid(p, z, grid), gcol))
+            from shapely.geometry import box as _bx
+            x0, y0, x1, y1 = p.bounds
+            yy = y0 + 1.2
+            while yy < y1 - 0.6:
+                xx = x0 + 1.2
+                while xx < x1 - 0.6:
+                    lp = _bx(xx + 0.02, yy + 0.02, xx + 0.58, yy + 0.58)
+                    if p.buffer(-0.05).contains(lp):
+                        out.append((_slab(lp, z - 0.006, z - 0.001), LIGHT))
+                    xx += 1.8
+                yy += 1.8
             continue
         if kind == "coffered":         # a board with ribs hung under it
             out.append((_slab(p, z, z + t), col))
