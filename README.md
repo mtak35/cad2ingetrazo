@@ -559,3 +559,11 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **AC diffusers**: squares, rectangles, circles and blocks on the AC / HVAC / DIFFUSER layers become square, linear or round ceiling diffusers set in the false ceiling.
 - **Wardrobes**: rectangles on the DRESS / WARDROBE layer, and rooms named DRESS (or a DRESS text in a room), get library wardrobes along their walls, clear of the doors.
 - Panel ▸ 12 (components): «Fit-out from the CAD» switch and «Read again».
+
+## 3.29.1
+- **Ducts are not arches**: a duct drawn as a crossed box between two walls (wider than any wall, or with a DUCT / SHAFT / VOID / LIFT text in it) is cut through the slab. It is no longer read as an arch with a 2' thick wall across it.
+- **Shower glass is not a wall**: glass lines in a bathroom that were read as a window (the GLASS layer among the windows) no longer make a thin wall with a window in it. The glass partition is made instead, and the shower's door (drawn on the DOOR layer) becomes its glass door. An unnamed room holding WC / basin blocks counts as a bathroom.
+- **The floor slab under the corridor**: a corridor or lobby open to a balcony, closed only by railings and single wall lines, is now under the floor slab (only areas the plan names, e.g. CORRIDOR or BEDROOM, are added). Upper floors keep their lift core and lobby.
+- **Lifts from the LIFT layer**: one car per LIFT text, sized to the car drawn round it. Its door faces the open lobby side, and an opening is cut in the shaft wall for it. No railing goes round lift wells and ducts.
+- **Fixtures turned 45°**: blocks are measured in their own axes, so a WC on a diagonal wall is read as a WC (not a square). WB blocks are basins. Blocks far from the floor's walls are left out (when a floor was imported without picking its region).
+- **Lights and AC from this kind of drawing**: unnamed symbols on the ELECTRICAL layer, out in the rooms, become ceiling lamps. Diffusers drawn in loose lines on the AC layer are read too. Halls the walls leave open get theirs, and the short cladding strips beside lift doors are kept.

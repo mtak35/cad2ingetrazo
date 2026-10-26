@@ -718,7 +718,7 @@ RAIL_WORDS = re.compile(r"RAIL|RALL|BALCON|GRILL\s*RAIL|PARAPET\s*RAIL",
 TERRACE_WORDS = re.compile(r"TERRACE|TERACE|SIT\s*OUT|BALCON", re.I)
 
 
-def strict_floor(doc, lid) -> int:
+def strict_floor(doc, lid, pl=None, P=None) -> int:
     """An upper floor's slab as its own CAD plan draws it: inside its walls
     and the railings round its terraces — no part out past them (a shade
     over the floor below no plan draws), the terrace out to its railing.
@@ -739,14 +739,38 @@ def strict_floor(doc, lid) -> int:
         w.get("name", "")).startswith(AUTO_RAIL)]
     if not walls:
         return 0
-    band = unary_union([LineString([w["a"], w["b"]]).buffer(
+    pieces = [LineString([w["a"], w["b"]]).buffer(
         float(w.get("t", 0.1)) / 2 + 0.03, cap_style=2, join_style=2)
-        for w in walls + rails])
+        for w in walls + rails]
+    # curved walls and railings (a balcony's), the columns
+    for w in arch["walls"]:
+        if w["level"] != lid or w.get("kind", "line") == "line":
+            continue
+        try:
+            c_ = W.centre(w)
+            pieces.append(LineString([c_.at(i / 24) for i in range(25)])
+                          .buffer(float(w.get("t", 0.1)) / 2 + 0.03))
+        except Exception:  # noqa: BLE001
+            continue
+    for c_ in arch["structure"]:
+        if c_.get("type") == "column" and c_.get("level") == lid:
+            try:
+                pieces.append(Polygon(S.column_outline(c_, 0.0)).buffer(0.03))
+            except Exception:  # noqa: BLE001
+                continue
+    band = unary_union(pieces)
     reach = 1.5
     u_ = band.buffer(reach, join_style=2).buffer(-reach, join_style=2)
     allowed = unary_union([Polygon(g.exterior) for g in getattr(
         u_, "geoms", [u_]) if g.geom_type == "Polygon" and
         Polygon(g.exterior).area >= 4.0])
+    try:                 # the blocks the walls close (as the slab is made)
+        ol_ = _outer_loops([], extra=[band])
+        if ol_:
+            allowed = unary_union([allowed] + [Polygon(o).buffer(0)
+                                               for o in ol_])
+    except Exception:  # noqa: BLE001
+        pass
     if allowed.is_empty:
         return 0
     n = 0
@@ -2304,6 +2328,84 @@ def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:
     return out
 
 
+def wall_masses(doc, lid, pl, P) -> int:
+    """Solid pieces of wall drawn as a closed outline on the wall layer
+    (a thick pier, the wedge where two walls meet at an angle, a corridor
+    wall's jog) that no wall or column fills: each made a column of that
+    shape, so the wall runs on unbroken as drawn. How many."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import polygonize, unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    lay = pl["layers"]
+    ls = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+          if _match(lay[s_[4]], P["walls"])
+          and math.hypot(s_[2] - s_[0], s_[3] - s_[1]) > 0.01]
+    if len(ls) < 3:
+        return 0
+    try:
+        faces = list(polygonize(unary_union(ls)))
+    except Exception:  # noqa: BLE001
+        return 0
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and W.why_not(w) is None]
+    solids = []
+    try:
+        solids += list(SE.wall_polys(walls))
+    except Exception:  # noqa: BLE001
+        pass
+    for c in arch["structure"]:
+        if c.get("type") == "column" and c.get("level") == lid:
+            try:
+                from shapely.geometry import Polygon as _Pg
+                solids.append(_Pg(S.column_outline(c, 0.0)).buffer(0))
+            except Exception:  # noqa: BLE001
+                pass
+    SU = unary_union(solids) if solids else None
+    texts = [Point(t["x"], t["y"]) for t in pl.get("texts") or ()]
+    # door swings / leaves: a face they cross is a doorway, not a mass
+    dl = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+          if _match(lay[s_[4]], P["doors"])]
+    DU = unary_union(dl) if dl else None
+    recs = []
+    for g in faces:
+        if not 0.08 <= g.area <= 3.0:
+            continue
+        r = g.minimum_rotated_rectangle
+        cs = list(r.exterior.coords)[:4]
+        e1, e2 = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+        lo, hi = min(e1, e2), max(e1, e2)
+        if lo > 1.0 or hi > 4.0 or lo < 0.1:
+            continue                    # a room / closet, or a wall's strip
+        if SU is not None and SU.intersection(g).area > 0.3 * g.area:
+            continue                    # a wall / column there already
+        if any(g.contains(t) for t in texts):
+            continue                    # a duct, a shaft (named)
+        if DU is not None and DU.intersection(g).length > 0.05:
+            continue
+        # a mass touches the walls (it carries them on): two sides at least
+        if SU is not None and g.buffer(0.05).intersection(SU).area < \
+                0.04 * g.length:
+            continue
+        c_ = g.centroid
+        sp = g.simplify(0.005)
+        pts = [[round(x - c_.x, 4), round(y - c_.y, 4)]
+               for x, y in list(sp.exterior.coords)[:-1]]
+        xs = [q[0] for q in pts]
+        ys = [q[1] for q in pts]
+        recs.append({"type": "column", "level": lid,
+                     "x": round(c_.x, 4), "y": round(c_.y, 4),
+                     "shape": "poly", "w": round(max(xs) - min(xs), 3),
+                     "d": round(max(ys) - min(ys), 3), "angle": 0.0,
+                     "anchor": "centre", "base": 0.0, "pts": pts,
+                     "height": "level", "fit": False, "mass": True})
+    if not recs:
+        return 0
+    arch["structure"] += M.new_elements(arch["structure"], recs)
+    return len(recs)
+
+
 def arches_between(doc, lid, pl, P) -> int:
     """An X in hidden (dashed) lines drawn between two columns, or a column
     and a wall end, with no wall across: an arch there (the plan's way to
@@ -2365,6 +2467,15 @@ def arches_between(doc, lid, pl, P) -> int:
             e1, e2 = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
             lo, hi = min(e1, e2), max(e1, e2)
             if lo < 0.08 or hi < 0.6:
+                continue
+            # a duct / shaft drawn as a crossed box (wider than a wall, or
+            # named by its text): a slab opening, not an arch
+            if lo > 0.5 or any(
+                    box.buffer(0.3).contains(Point(t_["x"], t_["y"])) and
+                    re.search(r"DUCT|SHAFT|VOID|O\.?T\.?S|SKY|LIFT|P\.?D\b",
+                              str(t_.get("text", "")), re.I)
+                    for t_ in pl.get("texts") or ()):
+                used |= {i, j}
                 continue
             if not WU.is_empty and box.intersection(WU).area > 0.3 * box.area:
                 # a wall already across (a gap closed up, a plain opening
@@ -3256,8 +3367,57 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                                         str(t_.get("text", "")), re.I)]
             except Exception:  # noqa: BLE001
                 nm_ = None
+            # railings and glazing drawn round a balcony or a lobby left
+            # open to it close the floor too (thin pieces, near the walls)
+            try:
+                from shapely.geometry import LineString as _Ls
+                from shapely.ops import unary_union as _uuo
+                wpu_ = _uuo([Polygon(pc["outer"]).buffer(0)
+                             for ps in plans.values() for pc in ps])
+                reach_ = wpu_.buffer(2.5)
+                thin_ = []
+                for s_ in pl["segs"]:
+                    ln_ = lay[s_[4]]
+                    if not (_match(ln_, P.get("rails") or []) or
+                            _match(ln_, P["windows"]) or
+                            _match(ln_, P["walls"])):
+                        continue
+                    L_ = _Ls([(s_[0], s_[1]), (s_[2], s_[3])])
+                    if L_.length > 0.02 and reach_.contains(L_):
+                        thin_.append(L_.buffer(0.06))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project slab thin pieces")
+                thin_ = []
             blocks = _outer_loops([pc for ps in plans.values() for pc in ps],
                                   extra=cpolys, names=nm_)
+            if thin_ and nm_:
+                # only the parts they close that the plan names (a
+                # corridor, a room open to a balcony): no paving outside
+                try:
+                    from shapely.geometry import Point as _Pt
+                    b1_ = _outer_loops([pc for ps in plans.values()
+                                        for pc in ps],
+                                       extra=cpolys + [_uuo(thin_)],
+                                       names=nm_)
+                    u0_ = _uuo([Polygon(b_).buffer(0) for b_ in blocks]) \
+                        if blocks else Polygon()
+                    u1_ = _uuo([Polygon(b_).buffer(0) for b_ in b1_])
+                    add_ = u1_.difference(u0_.buffer(0.01))
+                    keep_ = [g_ for g_ in getattr(add_, "geoms", [add_])
+                             if g_.geom_type == "Polygon" and g_.area > 0.5
+                             and any(g_.contains(_Pt(x_, y_))
+                                     for x_, y_ in nm_)]
+                    if keep_:
+                        uu_ = _uuo([u0_] + [g_.buffer(0.02) for g_ in keep_])
+                        uu_ = uu_.buffer(-0.02, join_style=2)
+                        blocks = [[tuple(q_) for q_ in list(
+                            g_.exterior.coords)[:-1]]
+                            for g_ in getattr(uu_, "geoms", [uu_])
+                            if g_.geom_type == "Polygon" and g_.area >= 2.0]
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("project slab named closure")
             # a parking floor: the drive and the ramps under the slab too —
             # a close hull round the walls, the bays and the ramps
             pk = [s_ for s_ in pl["segs"] if _match(lay[s_[4]], P["parking"])
@@ -3647,10 +3807,21 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             log_error("project.terrace_railings")
     if st.get("floor_strict", True):    # the floor as its plan draws it
         try:
-            rep["strict_floor"] = strict_floor(doc, lid)
+            rep["strict_floor"] = strict_floor(doc, lid, pl, P)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.strict_floor")
+    try:                       # wall pieces drawn as solid outlines
+        rep["wall_masses"] = wall_masses(doc, lid, pl, P)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.wall_masses")
+    try:                       # a shower's glass read as a window: no wall
+        from . import fitout as FO
+        rep["shower_walls"] = FO.shower_walls(doc, lid, pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.shower_walls")
     if st.get("cad_furniture", False):    # its furniture and fixtures
         try:
             from . import furnish as FU
@@ -4277,7 +4448,10 @@ def opening_parapets(doc) -> int:
                          curb_h=round(ch_, 4), curb_t=CURB_T,
                          curb_d=round(cd, 4))
             recs.append(r)
-    man = [Polygon(m["pts"]).buffer(0) for m in doc.get("man_shafts") or []]
+    # (a lift well, a duct read from the CAD: walled round, no railing)
+    man = [Polygon(m["pts"]).buffer(0) for m in doc.get("man_shafts") or []
+           if not (m.get("auto") == "lift" or m.get("auto") and re.search(
+               r"DUCT|SHAFT|P\.?\s?D", str(m.get("note", "")), re.I))]
     frozen = {tuple(k) for k in st.get("rail_frozen") or []}
     stairs_up = [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
                  for s_ in doc.get("stairs") or []          # up to the roof

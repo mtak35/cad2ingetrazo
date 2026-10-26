@@ -150,7 +150,7 @@ def analyze(doc, lid, pl, entries=None) -> dict:
 def clear(doc, lid) -> None:
     """The fit-out an earlier import of the level made: gone."""
     doc["fitout"] = [f for f in doc.get("fitout") or []
-                     if f.get("level") != lid]
+                     if f.get("level") != lid or f.get("src") == "wall"]
     doc["furniture"] = [f for f in doc.get("furniture") or []
                         if not (f.get("src") == "fitout"
                                 and f.get("level") == lid)]
@@ -320,6 +320,104 @@ def _shower_glass(doc, lid, pl, rooms, entries) -> int:
     return n
 
 
+FIX_WORDS = re.compile(r"FIX|SANIT|PLUMB|TOILET|BATH|\bWC\b|\bWB\b|BASIN|"
+                       r"COMMODE|SHOWER|\bER\b", re.I)
+
+
+def shower_walls(doc, lid, pl) -> int:
+    """Glass lines read as a window (a GLASS layer among the windows')
+    that made a thin wall with a window inside a bathroom — the shower's
+    glass: that wall and its window taken out (the glass partition is
+    made instead). How many."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    from .engine import spaces
+    from .engine import walls as W
+    lay = pl["layers"]
+    gl = [LineString([(s[0], s[1]), (s[2], s[3])]) for s in pl["segs"]
+          if GLASS_LAYER.search(lay[s[4]])
+          and not re.search(r"WINDOW|\bWIN\b|VENT", lay[s[4]], re.I)]
+    if not gl:
+        return 0
+    G = unary_union(gl).buffer(0.08)
+    arch = doc["arch"]
+    doc["fitout"] = [f for f in doc.get("fitout") or []
+                     if not (f.get("level") == lid and f.get("src") == "wall")]
+    cands = []
+    for w in arch["walls"]:
+        if w["level"] != lid or w.get("rail") or \
+                w.get("kind", "line") != "line" or float(w["t"]) > 0.16:
+            continue
+        try:
+            c = W.centre(w)
+        except Exception:  # noqa: BLE001
+            continue
+        cl = LineString([c.p0, c.p1])
+        if cl.length < 0.2:
+            continue
+        # its glass, and its door (the shower's door: an opening there)
+        u = _seg_dir(tuple(c.p0), tuple(c.p1))
+        doors = [o for o in arch["openings"] if o.get("wall") == w["id"]
+                 and o.get("kind") in ("door", "void", "window")]
+        cov = cl.intersection(G)
+        for o in doors:
+            p0 = float(o["pos"]) - float(o["w"]) / 2
+            p1 = float(o["pos"]) + float(o["w"]) / 2
+            cov = cov.union(LineString([
+                (c.p0[0] + u[0] * p0, c.p0[1] + u[1] * p0),
+                (c.p0[0] + u[0] * p1, c.p0[1] + u[1] * p1)]))
+        if cov.length < 0.8 * cl.length or \
+                cl.intersection(G).length < 0.25:
+            continue
+        cands.append((w, cl))
+    if not cands:
+        return 0
+    fixes = []
+    for ins in pl.get("inserts") or ():
+        if FIX_WORDS.search(str(ins.get("name", ""))) or \
+                FIX_WORDS.search(str(ins.get("layer", ""))):
+            x, y, _dx, _dy = _box_c(ins)
+            fixes.append(Point(x, y))
+    n = 0
+    for w, cl in cands:
+        keep = list(arch["walls"])
+        arch["walls"] = [q for q in arch["walls"] if q is not w]
+        try:
+            rooms = spaces.of_level(arch, lid)
+        except Exception:  # noqa: BLE001
+            rooms = []
+        mid = cl.interpolate(0.5, normalized=True)
+        r = next((q for q in rooms if q["poly"].buffer(0.02).contains(mid)),
+                 None)
+        bath = r is not None and r["area"] <= 25.0 and (
+            BATH_ROOM.search(str(r["name"])) or
+            any(r["poly"].contains(p) for p in fixes))
+        if not bath:
+            arch["walls"] = keep
+            continue
+        # its door: a glass door in the partition, where the door was
+        c = W.centre(w)
+        u = _seg_dir(tuple(c.p0), tuple(c.p1))
+        for o in arch["openings"]:
+            if o.get("wall") != w["id"] or o.get("kind") != "door":
+                continue
+            p0 = float(o["pos"]) - float(o["w"]) / 2
+            p1 = float(o["pos"]) + float(o["w"]) / 2
+            doc.setdefault("fitout", []).append(
+                {"id": _new_id(), "level": lid, "kind": "glass",
+                 "src": "wall",
+                 "a": [round(c.p0[0] + u[0] * p0, 4),
+                       round(c.p0[1] + u[1] * p0, 4)],
+                 "b": [round(c.p0[0] + u[0] * p1, 4),
+                       round(c.p0[1] + u[1] * p1, 4)],
+                 "h": GLASS_H, "door": [0.0, round(p1 - p0, 4)]})
+        arch["openings"] = [o for o in arch["openings"]
+                            if o.get("wall") != w["id"]]
+        n += 1
+    return n
+
+
 # ---- aluminium cladding -----------------------------------------------------
 def _cladding(doc, lid, pl, rooms, entries) -> int:
     from shapely.geometry import LineString, Point
@@ -334,7 +432,7 @@ def _cladding(doc, lid, pl, rooms, entries) -> int:
              and w.get("kind", "line") == "line" and "a" in w
              and not w.get("rail")]
     n = 0
-    for a, b in _runs(segs, gap=0.2, min_len=0.3):
+    for a, b in _runs(segs, gap=0.12, min_len=0.15):
         u = _seg_dir(a, b)
         mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
         best = None
@@ -428,79 +526,169 @@ def _furn_rec(doc, lid, e, kind, x, y, rot, room=None, fit=None, **kw):
     return r
 
 
-def _lift(doc, lid, pl, rooms, entries) -> int:
-    from shapely.geometry import Point
-
-    from .furnish import back_to
-    lifts = [r for r in rooms if LIFT_ROOM.search(str(r["name"]))
-             and 1.2 <= r["area"] <= 12.0]
-    # a «LIFT» text in a room the walls close
+def _cars(pl, rooms):
+    """The lift cars: closed outlines on a LIFT layer (1–8 m²), else the
+    rooms named LIFT. [(shapely polygon, room or None)]."""
+    from shapely.geometry import Polygon
+    out = []
+    for lp in pl.get("loops") or ():
+        if not LIFT_ROOM.search(str(lp["layer"])) or len(lp["pts"]) < 4:
+            continue
+        try:
+            g = Polygon(lp["pts"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if g.is_empty or not 1.0 <= g.area <= 8.0:
+            continue
+        m = g.minimum_rotated_rectangle
+        if g.area < 0.75 * m.area:
+            continue
+        if any(o.buffer(0.05).contains(g) or g.buffer(0.05).contains(o)
+               for o, _r in out):
+            continue
+        c = g.centroid
+        out.append((m, _room_at(rooms, c.x, c.y)))
+    if out:
+        return out
+    # a car drawn in loose lines on the LIFT layer: the outline round
+    # each LIFT text
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.ops import polygonize, unary_union
+        lay = pl["layers"]
+        ll = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+              for s_ in pl["segs"] if LIFT_ROOM.search(lay[s_[4]])]
+        faces = list(polygonize(unary_union(ll))) if ll else []
+        for t in pl.get("texts") or ():
+            if not LIFT_ROOM.search(str(t.get("text", ""))):
+                continue
+            p_ = Point(float(t["x"]), float(t["y"]))
+            fs = [g for g in faces if 1.0 <= g.area <= 8.0
+                  and g.buffer(0.05).contains(p_)]
+            if not fs:
+                continue
+            g = min(fs, key=lambda q: q.area)
+            if any(o.buffer(0.05).contains(g.centroid) for o, _r in out):
+                continue
+            m = g.minimum_rotated_rectangle
+            out.append((m, _room_at(rooms, m.centroid.x, m.centroid.y)))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("fitout._cars lines")
+    if out:
+        return out
+    seen = []
+    for r in rooms:
+        if LIFT_ROOM.search(str(r["name"])) and 1.2 <= r["area"] <= 12.0:
+            seen.append(r)
     for t in pl.get("texts") or ():
         if LIFT_ROOM.search(str(t.get("text", ""))):
             r = _room_at(rooms, float(t["x"]), float(t["y"]))
             if r is not None and 1.2 <= r["area"] <= 12.0 and \
-                    all(r is not q for q in lifts):
-                lifts.append(r)
-    if not lifts:
+                    all(r is not q for q in seen):
+                seen.append(r)
+    return [(r["poly"].minimum_rotated_rectangle, r) for r in seen]
+
+
+def _lift(doc, lid, pl, rooms, entries) -> int:
+    from shapely.geometry import LineString, Point
+
+    from .engine import model as M
+    from .engine import walls as W
+    from .furnish import back_to
+    cars = _cars(pl, rooms)
+    if not cars:
         return 0
-    car = _pick_named(entries, ["elevator"])
-    door = _pick_named(entries, ["elevator door"])
-    ops = _openings_xy(doc, lid)
+    car_e = _pick_named(entries, ["elevator"])
+    door_e = _pick_named(entries, ["elevator door"])
+    arch = doc["arch"]
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and w.get("kind", "line") == "line" and "a" in w
+             and not w.get("rail")]
+    lift_rooms = [r for _m, r in cars if r is not None]
+    floor = _floor_poly(doc, lid)
+    wall_u = _wall_union(doc, lid)
     n = 0
-    for r in lifts:
-        poly = r["poly"]
-        mrr = poly.minimum_rotated_rectangle
-        cs = list(mrr.exterior.coords)[:-1]
-        e0 = (cs[0], cs[1])
-        e1 = (cs[1], cs[2])
-        c = poly.centroid
-        # the opening on its edge: the lobby's side
-        edge = poly.exterior
-        op = None
-        for q, w_, u, o, w in ops:
-            if edge.distance(Point(q)) <= float(w["t"]) / 2 + 0.12 and (
-                    op is None or w_ > op[1]):
-                op = (q, w_, u, o, w)
-        if op is not None:
-            q = op[0]
-            nd = (q[0] - c.x, q[1] - c.y)
-            L_ = math.hypot(*nd) or 1.0
-            nd = (nd[0] / L_, nd[1] / L_)
-            # square to the wall: its normal toward the opening
-            u = op[2]
-            nn = (-u[1], u[0])
-            if nn[0] * nd[0] + nn[1] * nd[1] < 0:
-                nn = (-nn[0], -nn[1])
-            nd = nn
-        else:
-            ux = _seg_dir(*e0)
-            nd = (-ux[1], ux[0])
-        # the well's sides across / along the door's facing
-        a_ = math.dist(*e0)
-        b_ = math.dist(*e1)
-        ue0 = _seg_dir(*e0)
-        along_e0 = abs(ue0[0] * nd[1] - ue0[1] * nd[0]) > 0.7
-        width, depth = (a_, b_) if along_e0 else (b_, a_)
-        if car is not None:
-            _furn_rec(doc, lid, car, "lift", c.x, c.y,
+    for m, r in cars:
+        cs = list(m.exterior.coords)[:4]
+        c = m.centroid
+        best = None
+        for k in range(4):
+            a, b = cs[k], cs[(k + 1) % 4]
+            mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            v = (mid[0] - c.x, mid[1] - c.y)
+            L_ = math.hypot(*v) or 1.0
+            nd = (v[0] / L_, v[1] / L_)
+            # the wall the car's side faces, within reach
+            ray = LineString([mid, (mid[0] + nd[0] * 0.9,
+                                    mid[1] + nd[1] * 0.9)])
+            hit = None
+            for w in walls:
+                try:
+                    cw = W.centre(w)
+                except Exception:  # noqa: BLE001
+                    continue
+                wl = LineString([cw.p0, cw.p1])
+                x = wl.intersection(ray)
+                if x.is_empty or x.geom_type != "Point":
+                    continue
+                dd = Point(mid).distance(x)
+                if hit is None or dd < hit[0]:
+                    hit = (dd, w, cw, x)
+            probe = Point(mid[0] + nd[0] * 1.5, mid[1] + nd[1] * 1.5)
+            if floor is None or not floor.contains(probe):
+                continue                  # outside the building
+            if any(m2.buffer(0.3).contains(probe) for m2, _r in cars):
+                continue                  # the next shaft
+            pr = _room_at(rooms, probe.x, probe.y)
+            if pr is not None and (any(pr is q for q in lift_rooms) or
+                                   LIFT_ROOM.search(str(pr["name"]))):
+                continue
+            # the lobby: the most open side
+            score = wall_u.distance(probe) if wall_u is not None else 0.0
+            if best is None or score > best[0]:
+                best = (score, nd, hit, math.dist(a, b), mid)
+        if best is None:              # no lobby found: the long side
+            a, b = cs[0], cs[1]
+            mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            v = (mid[0] - c.x, mid[1] - c.y)
+            L_ = math.hypot(*v) or 1.0
+            best = (0, (v[0] / L_, v[1] / L_), None, math.dist(a, b), mid)
+        _s, nd, hit, width, mid = best
+        depth = 2 * math.hypot(mid[0] - c.x, mid[1] - c.y)
+        if car_e is not None:
+            _furn_rec(doc, lid, car_e, "lift", c.x, c.y,
                       back_to(-nd[0], -nd[1]), r,
-                      fit=[max(width - 0.1, 0.8), max(depth - 0.1, 0.8)],
+                      fit=[max(width - 0.05, 0.8), max(depth - 0.05, 0.8)],
                       fit_free=True)
             n += 1
-        if door is not None and op is not None:
-            q, w_, u, o, w = op
-            ow = max(min(w_, width), 0.8)
-            off = float(w["t"]) / 2 - 0.11
-            # its back toward the car, its face to the lobby (−Y front)
-            _furn_rec(doc, lid, door, "liftdoor",
-                      q[0] - nd[0] * max(off, 0.0),
-                      q[1] - nd[1] * max(off, 0.0),
-                      back_to(-nd[0], -nd[1]), r, fit=[ow + 0.15, 0.215],
-                      fit_free=True, fit_h=float(o.get("h", 2.1) or 2.1))
-            n += 1
-        # the well: through this floor's slab
-        pts = [[round(x, 4), round(y, 4)]
-               for x, y in list(poly.buffer(-0.01).exterior.coords)[:-1]]
+        ow = round(min(max(width * 0.55, 0.8), 1.2), 3)
+        if hit is not None:
+            _dd, w, cw, x = hit
+            u = _seg_dir(tuple(cw.p0), tuple(cw.p1))
+            pos = (x.x - cw.p0[0]) * u[0] + (x.y - cw.p0[1]) * u[1]
+            wl_ = math.dist(cw.p0, cw.p1)
+            pos = min(max(pos, ow / 2 + 0.05), wl_ - ow / 2 - 0.05)
+            # the landing door's opening in the shaft wall (unless drawn)
+            have = [o for o in arch["openings"] if o.get("wall") == w["id"]
+                    and abs(float(o["pos"]) - pos) < (float(o["w"]) + ow) / 2]
+            if not have and wl_ > ow + 0.1:
+                arch["openings"] += M.new_openings(arch["openings"], [{
+                    "kind": "void", "wall": w["id"], "pos": round(pos, 4),
+                    "w": ow, "h": 2.1336, "sill": 0.0, "swing": "left",
+                    "face": 1, "style": "", "lift": True}])
+            if door_e is not None:
+                q = (cw.p0[0] + u[0] * pos, cw.p0[1] + u[1] * pos)
+                _furn_rec(doc, lid, door_e, "liftdoor", q[0], q[1],
+                          back_to(-nd[0], -nd[1]), r,
+                          fit=[ow + 0.15, 0.215], fit_free=True,
+                          fit_h=2.1336)
+                n += 1
+        # the shaft: through this floor's slab
+        g = r["poly"] if r is not None and r["area"] <= 12.0 else \
+            m.buffer(0.1, join_style=2)
+        pts = [[round(x_, 4), round(y_, 4)]
+               for x_, y_ in list(g.buffer(-0.01).exterior.coords)[:-1]]
         doc.setdefault("man_shafts", []).append(
             {"id": _new_id(), "level": lid, "through": False, "pts": pts,
              "auto": "lift", "up": False, "own": True, "note": "LIFT"})
@@ -508,6 +696,43 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
 
 
 # ---- the ceiling's lights and AC diffusers ----------------------------------
+def _floor_poly(doc, lid):
+    """The level's floor (its slabs, else its walls' outline): shapely or
+    None — a light / diffuser in a hall the walls leave open still has a
+    ceiling over it."""
+    from shapely.geometry import MultiPoint, Polygon
+    from shapely.ops import unary_union
+
+    from . import project as PJ
+    try:
+        ss = [s for s in PJ._floor_slabs(doc, lid) if not s.get("roof")] + \
+            [s for s in doc["arch"]["structure"] if s["type"] == "slab"
+             and s["level"] == lid and not s.get("roof")]
+        g = unary_union([Polygon(s["corners"]).buffer(0) for s in ss])
+        if not g.is_empty:
+            return g
+        pts = [tuple(p) for w in doc["arch"]["walls"] if w["level"] == lid
+               and "a" in w for p in (w["a"], w["b"])]
+        return MultiPoint(pts).convex_hull if len(pts) >= 3 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class _NoRoom(dict):
+    """A place on the floor no room closes round (a hall open to a
+    corridor): the level's ceiling height over it."""
+
+
+def _place_room(rooms, floor, x, y):
+    from shapely.geometry import Point
+    r = _room_at(rooms, x, y)
+    if r is not None:
+        return r
+    if floor is not None and floor.contains(Point(x, y)):
+        return _NoRoom(name="", area=0.0)
+    return None
+
+
 def _need_ceiling(doc, lid):
     from . import ceilings as CE
     if lid not in (doc.get("ceilings") or {}):
@@ -520,6 +745,8 @@ def ceiling_h(doc, lid, room, fallback=None):
     from . import ceilings as CE
     from . import project as PJ
     c = None
+    if isinstance(room, _NoRoom):
+        room = None
     if room is not None:
         try:
             c = CE.room_ceiling(doc, lid, PJ.room_key(lid, room))
@@ -536,23 +763,46 @@ def ceiling_h(doc, lid, room, fallback=None):
     return float(c["h"])
 
 
+def _wall_union(doc, lid):
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    from .engine import walls as W
+    ws = [w for w in doc["arch"]["walls"] if w["level"] == lid
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and W.why_not(w) is None]
+    try:
+        return unary_union(SE.wall_polys(ws)) if ws else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _lights(doc, lid, pl, rooms, entries) -> int:
+    from shapely.geometry import Point as _Pt
     lay_ok = lambda L: bool(LIGHT_LAYER.search(L))  # noqa: E731
+    wall_u = _wall_union(doc, lid)
     pts = []
     for ins in pl.get("inserts") or ():
         L = str(ins.get("layer", ""))
         nm = str(ins.get("name", ""))
         if NOT_LIGHT.search(nm):
             continue
-        if not (lay_ok(L) or (ELEC_LAYER.search(L) and LIGHT_NAME.search(nm))
-                or LIGHT_NAME.search(nm) and not re.search(
-                    r"WALL|BRACKET|GARDEN|STREET|BOLLARD", nm, re.I)):
+        elec = bool(ELEC_LAYER.search(L)) and not lay_ok(L)
+        if not (lay_ok(L) or elec or LIGHT_NAME.search(nm) and not re.search(
+                r"WALL|BRACKET|GARDEN|STREET|BOLLARD", nm, re.I)):
             continue
         if NOT_LIGHT.search(L) and not lay_ok(L):
             continue
         x, y, dx, dy = _box_c(ins)
         if max(dx, dy) > 1.8:
             continue
+        if elec and not LIGHT_NAME.search(nm):
+            # an unnamed symbol on the electrical layer: a ceiling point
+            # when small and out in the room (sockets, switches sit at
+            # the walls)
+            if max(dx, dy) > 0.45 or wall_u is None or \
+                    wall_u.distance(_Pt(x, y)) < 0.3:
+                continue
         pts.append((x, y, max(dx, dy), min(dx, dy), float(ins.get("rot",
                                                                   0.0))))
     for ci in pl.get("circles") or ():
@@ -570,8 +820,9 @@ def _lights(doc, lid, pl, rooms, entries) -> int:
         return 0
     n = 0
     placed = False
+    floor = _floor_poly(doc, lid)
     for x, y, L, W_, rot in pts:
-        r = _room_at(rooms, x, y)
+        r = _place_room(rooms, floor, x, y)
         if r is None:
             continue
         if not placed:
@@ -627,6 +878,40 @@ def _diffusers(doc, lid, pl, rooms, entries) -> int:
         swap = abs(ang) > 1e-6 and False
         del swap
         items.append((c.x, c.y, a_, b_, ang, False))
+    try:                     # diffusers drawn in loose lines: their
+        from shapely.geometry import LineString      # outermost outlines
+        from shapely.ops import polygonize, unary_union
+        lay = pl["layers"]
+        acl = [LineString([(s[0], s[1]), (s[2], s[3])]) for s in pl["segs"]
+               if AC_LAYER.search(lay[s[4]])]
+        if acl:
+            # the faces the symbol's lines make (rings, diagonals) merged:
+            # one outline per diffuser
+            gs = [g for g in polygonize(unary_union(acl)) if g.area <= 6.0]
+            mg = unary_union([g.buffer(0.002) for g in gs]) if gs else None
+            outer = [g.buffer(-0.002) for g in getattr(mg, "geoms", [mg])
+                     if g is not None and not g.is_empty
+                     and 0.02 <= g.area <= 6.0]
+            outer = [g if g.geom_type == "Polygon" else max(
+                g.geoms, key=lambda q: q.area) for g in outer
+                if not g.is_empty]
+            for g in outer:
+                m = g.minimum_rotated_rectangle
+                cs = list(m.exterior.coords)[:-1]
+                a_, b_ = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+                if not (0.15 <= max(a_, b_) <= 2.4) or min(a_, b_) < 0.08:
+                    continue
+                if g.area < 0.6 * m.area:
+                    continue
+                ang = math.degrees(math.atan2(cs[1][1] - cs[0][1],
+                                              cs[1][0] - cs[0][0])) % 90.0
+                if ang > 45:
+                    ang -= 90
+                c = g.centroid
+                items.append((c.x, c.y, a_, b_, ang, False))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("fitout._diffusers lines")
     for ci in pl.get("circles") or ():
         if AC_LAYER.search(str(ci["layer"])) and \
                 0.08 <= float(ci["r"]) <= 0.4:
@@ -636,8 +921,9 @@ def _diffusers(doc, lid, pl, rooms, entries) -> int:
     items = _dedupe(items, 0.15)
     n = 0
     placed = False
+    floor = _floor_poly(doc, lid)
     for x, y, lx, ly, rot, rnd in items:
-        r = _room_at(rooms, x, y)
+        r = _place_room(rooms, floor, x, y)
         if r is None:
             continue
         if not placed:

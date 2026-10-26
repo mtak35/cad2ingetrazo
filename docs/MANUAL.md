@@ -523,6 +523,7 @@ The full list, version by version, is in the README. In short:
 - GLASS layer in a bathroom → glass shower partition with its door; CLADDING / ACP layer → aluminium panels on the wall; LIFT room → library elevator and its door.
 - WCs → «Toilet unit», basins → «Vanity» (also oval basins drawn loose); LIGHT / ELE layers → ceiling lamps and AC layers → diffusers in the false ceiling (made when missing); DRESS rooms / layer → library wardrobes.
 - The stair cut symbol (slant break line) is ignored when tracing stairs.
+- 3.29.1: ducts drawn as crossed boxes cut the slab (no false arches); shower glass no longer makes walls; the slab runs under corridors open to balconies; one lift per LIFT text with its door to the lobby; 45° fixtures read correctly.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

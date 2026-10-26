@@ -473,11 +473,23 @@ def _emit(e, inherit, depth, sag, out) -> None:
                 xs = [v for s in mine for v in (s[0], s[2])]
                 ys = [v for s in mine for v in (s[1], s[3])]
                 ins = e.dxf.insert
+                rot_ = float(e.dxf.get("rotation", 0.0))
+                # its own sides (in the block's axes): a block turned 45°
+                # shows a square box in the drawing's axes
+                ca, sa = math.cos(math.radians(-rot_)), \
+                    math.sin(math.radians(-rot_))
+                lx_ = [ca * (v[0] - ins[0]) - sa * (v[1] - ins[1])
+                       for s in mine for v in ((s[0], s[1]), (s[2], s[3]))]
+                ly_ = [sa * (v[0] - ins[0]) + ca * (v[1] - ins[1])
+                       for s in mine for v in ((s[0], s[1]), (s[2], s[3]))]
                 out["inserts"].append({
                     "name": e.dxf.name, "layer": lay,
                     "x": ins[0], "y": ins[1],
-                    "rot": float(e.dxf.get("rotation", 0.0)),
+                    "rot": rot_,
                     "box": [min(xs), min(ys), max(xs), max(ys)],
+                    "ldim": [max(lx_) - min(lx_), max(ly_) - min(ly_)],
+                    "lmid": [(max(lx_) + min(lx_)) / 2,
+                             (max(ly_) + min(ly_)) / 2],
                     "segs": len(mine), "depth": depth})
     elif t == "LINE":
         a, b = e.dxf.start, e.dxf.end
@@ -624,8 +636,22 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
         pts = [T(b[0], b[1]), T(b[2], b[1]), T(b[2], b[3]), T(b[0], b[3])]
         return pts
 
+    def _ld(i):
+        d_ = i.get("ldim")
+        return {"ldim": [d_[0] * k, d_[1] * k]} if d_ else {}
+
+    def _lc(i):
+        """The block's own middle, in the model."""
+        m_ = i.get("lmid")
+        if not m_:
+            return {}
+        a_ = math.radians(i["rot"])
+        wx = i["x"] + math.cos(a_) * m_[0] - math.sin(a_) * m_[1]
+        wy = i["y"] + math.sin(a_) * m_[0] + math.cos(a_) * m_[1]
+        return {"lc": T(wx, wy)}
     inserts = [dict(i, x=T(i["x"], i["y"])[0], y=T(i["x"], i["y"])[1],
-                    rot=i["rot"] + rot_deg, corners=box(i["box"]))
+                    rot=i["rot"] + rot_deg, corners=box(i["box"]),
+                    **_ld(i), **_lc(i))
                for i in drawing.get("inserts", ())]
     return {"segs": segs, "layers": layers, "inserts": inserts,
             "dashed": dashed,

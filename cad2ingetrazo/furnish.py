@@ -23,7 +23,7 @@ KINDS = {
     "wc": (r"\bWC\b|W\.C|TOILET|COMMODE|WATER.?CLOSET|\bEWC\b|\bIWC\b|"
            r"INODORO|\bPAN\b",
            [("Bathroom", ["toilet unit", "hanged toilet", "toilet"])]),
-    "basin": (r"BASIN|\bWHB\b|WASH|\bLAV|LAVABO|VANITY",
+    "basin": (r"BASIN|\bWHB\b|\bWB\b|WASH|\bLAV|LAVABO|VANITY",
               [("Bathroom", ["vanity", "washbasin with cabinet",
                              "washbasin", "basin", "small lavatory"])]),
     "shower": (r"SHOWER|DUCHA", [("Bathroom", ["shower cabin", "shower stall",
@@ -144,8 +144,8 @@ def classify(name: str, layer: str, L: float, W: float, use: str):
         return "plant"
     # by its size and the room it stands in
     if use == "bath":
-        if _in(L, 0.55, 0.9) and _in(W, 0.33, 0.58):
-            return "wc"
+        if _in(L, 0.55, 1.0) and _in(W, 0.33, 0.6) and L / W >= 1.35:
+            return "wc"               # (with its cistern / its mat)
         if _in(L, 1.35, 1.95) and _in(W, 0.6, 0.98):
             return "bathtub"
         if _in(L, 0.75, 1.25) and _in(W, 0.75, 1.25) and L / W < 1.4:
@@ -177,7 +177,7 @@ def classify(name: str, layer: str, L: float, W: float, use: str):
 
 
 def _fits(kind, L, W) -> bool:
-    lim = {"bed": (1.6, 2.5, 0.8, 2.2), "wc": (0.45, 0.95, 0.3, 0.6),
+    lim = {"bed": (1.6, 2.5, 0.8, 2.2), "wc": (0.45, 1.0, 0.3, 0.6),
            "basin": (0.3, 1.2, 0.25, 0.7), "shower": (0.7, 1.5, 0.7, 1.5),
            "bathtub": (1.2, 2.0, 0.55, 1.0), "sofa": (1.2, 3.6, 0.6, 2.2),
            "armchair": (0.5, 1.2, 0.5, 1.2), "chair": (0.3, 0.8, 0.3, 0.8),
@@ -392,6 +392,29 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                                          or f.get("kind") in only))]
         got = {}
         seen = []
+        near = None                      # the floor's reach (its walls)
+        try:
+            from shapely.geometry import MultiPoint
+            wp_ = [tuple(p_) for w_ in arch["walls"] if w_["level"] == lid
+                   and "a" in w_ for p_ in (w_["a"], w_["b"])]
+            if len(wp_) >= 3:
+                near = MultiPoint(wp_).convex_hull.buffer(3.0)
+        except Exception:  # noqa: BLE001
+            near = None
+        fix_rooms = set()                # rooms holding a sanitary block
+        for ins in blocks:
+            if re.search(r"FIX|SANIT|PLUMB|TOILET|\bWC\b|\bWB\b|BASIN",
+                         f"{ins.get('name', '')} {ins.get('layer', '')}",
+                         re.I):
+                cs_ = ins.get("corners") or []
+                if len(cs_) < 4:
+                    continue
+                pc_ = Point(sum(c[0] for c in cs_) / 4,
+                            sum(c[1] for c in cs_) / 4)
+                for r in rooms:
+                    if r["poly"].contains(pc_):
+                        fix_rooms.add(id(r))
+                        break
         for ins in blocks:
             if detect.block_kind(str(ins.get("name", "")),
                                  str(ins.get("layer", ""))):
@@ -405,11 +428,20 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
             dx, dy = max(xs) - min(xs), max(ys) - min(ys)
             if max(dx, dy) < 0.25 or max(dx, dy) > 14.0:
                 continue
+            if near is not None and not near.contains(Point(cx, cy)):
+                continue                 # far from the floor's walls
             rot = float(ins.get("rot", 0.0) or 0.0)
             # the block's own sides (its box is the world box): a block
             # turned a quarter shows them swapped
             q = round((rot % 180.0) / 90.0) % 2
             lx, ly = (dy, dx) if q == 1 else (dx, dy)
+            if ins.get("ldim"):          # read in the block's own axes
+                lx, ly = float(ins["ldim"][0]), float(ins["ldim"][1])
+                if ins.get("lc"):
+                    cx, cy = float(ins["lc"][0]), float(ins["lc"][1])
+                a_ = math.radians(rot)   # its footprint in the world
+                dx = abs(math.cos(a_)) * lx + abs(math.sin(a_)) * ly
+                dy = abs(math.sin(a_)) * lx + abs(math.cos(a_)) * ly
             L, W = max(lx, ly), min(lx, ly)
             room = None
             P_ = Point(cx, cy)
@@ -421,6 +453,10 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                 except Exception:  # noqa: BLE001
                     continue
             use = _use(room["name"]) if room else ""
+            if room is not None and not use and \
+                    str(room["name"]).startswith("Room ") and \
+                    id(room) in fix_rooms:
+                use = "bath"             # an unnamed room with its fixtures
             kind = classify(str(ins.get("name", "")),
                             str(ins.get("layer", "")), L, W, use)
             if kind is None or (kind == "tree" and room is not None):
