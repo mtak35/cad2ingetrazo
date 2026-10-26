@@ -534,3 +534,15 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Arch types in the door / window edit**: the Head field in «Selected element» and «Edit properties…» lists Flat, Transom and every arch type (Semicircular, Segmental, Elliptical, Pointed, Ogee, Horseshoe, Multifoil, Trefoil, Tudor). The right-click «Make it a…» menu works again and can also make an opening a curtain wall.
 - **Stairs start on the floor that is there**: a stair whose foot stands outside on the ground (a back stair) starts on the ground or the platform piece at its foot, not up at the floor level.
 - **Columns down to the floor**: a column on the ground floor runs down as the walls do, so a porch column stands on the ground and the outside floor instead of hanging at the floor level.
+
+## 3.29.0
+- **Slab cuts named on the plan**: a «VOID» / «CUT OUT» / «DOUBLE HEIGHT» text cuts the floor slab under it; «DUCT», «SHAFT», «P.D», «O.T.S» / «OPEN TO SKY», «LIGHT WELL» cut it and every floor over it, the roof too. The outline cut is the smallest one round the text (its room, a closed polyline, or the lines closed round it). Made again on each import; the lowest floor is never cut.
+- **Glass shower cabins**: the GLASS layer's lines inside a bathroom become a frameless 10 mm glass partition 2.0 m high, carried to the walls it nearly meets, with a glass door (pull handle, hinges) at the free end of its longest run. Glass lines in the walls (windows) are left alone.
+- **Stair cut symbol ignored**: the slant break line drawn across a flight where the plan cuts it at eye level (and its zigzag) is no longer read as a tread or a winder line.
+- **Aluminium cladding**: the CLADDING / ACP / ALUCOBOND layer's lines along a wall put 4' × 2' aluminium composite panels (open joints) on that wall's face, floor to the storey's top.
+- **Lift**: a room named LIFT / ELEVATOR gets the IngeTrazo library's «Elevator» fitted to the well and its «Elevator door» in the opening on the lobby side; the well is cut through the floor slab.
+- **Vanity and commode**: the bathroom's fixtures are placed even with the CAD furniture off — WCs as the library's «Toilet unit», washbasins as a «Vanity» (basin with its counter). Basins drawn loose as an oval (not a block) are found too.
+- **False-ceiling lights**: blocks and small circles on the LIGHT / LIGHTING layers (and light blocks on ELE / ELEC layers) become library ceiling lamps (a fluorescent strip for a long symbol) hung under the false ceiling, which is made for the floor (gypsum, 8'-0") when it has none.
+- **AC diffusers**: squares, rectangles, circles and blocks on the AC / HVAC / DIFFUSER layers become square, linear or round ceiling diffusers set in the false ceiling.
+- **Wardrobes**: rectangles on the DRESS / WARDROBE layer, and rooms named DRESS (or a DRESS text in a room), get library wardrobes along their walls, clear of the doors.
+- Panel ▸ 12 (components): «Fit-out from the CAD» switch and «Read again».

@@ -436,7 +436,7 @@ Most problems come from the CAD file or its layers. The report under **Import** 
 
 If something goes wrong without a clear message, the details are written to `%APPDATA%\ingetrazo\plugins\cad2ingetrazo_errors.log`. Send that file with your question.
 
-## 13. What's new since 3.11 (3.12 – 3.28)
+## 13. What's new since 3.11 (3.12 – 3.29)
 
 The full list, version by version, is in the README. In short:
 
@@ -517,6 +517,12 @@ The full list, version by version, is in the README. In short:
 - Curtain walls on the finished floor (a solid base under them), mullions each side of their doors, a transom at the door head; corner windows → curtain wall or a glass door in a panel (right-click).
 - Arch types in the Head field of doors and windows.
 - Stairs start on the ground / platform at their foot; ground-floor columns run down to the ground.
+
+**3.29 — fit-out from the CAD**
+- VOID / CUT OUT texts cut the floor slab; DUCT / SHAFT / O.T.S / OPEN TO SKY cut it and every floor over it, the roof too.
+- GLASS layer in a bathroom → glass shower partition with its door; CLADDING / ACP layer → aluminium panels on the wall; LIFT room → library elevator and its door.
+- WCs → «Toilet unit», basins → «Vanity» (also oval basins drawn loose); LIGHT / ELE layers → ceiling lamps and AC layers → diffusers in the false ceiling (made when missing); DRESS rooms / layer → library wardrobes.
+- The stair cut symbol (slant break line) is ignored when tracing stairs.
 
 **The panel**
 - Numbered sections (1 – 13), closed on every launch; a language box (English, 中文, हिन्दी, Español, Français, العربية, বাংলা, Português, Русский, اردو); a ⟳ button that tells you when the extension catalogue lists a newer version (install it from IngeTrazo's Extension Manager).

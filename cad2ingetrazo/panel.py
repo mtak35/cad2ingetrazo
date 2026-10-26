@@ -836,6 +836,7 @@ class Panel(QWidget):
             f"{n} {k}" for k, n in tot.most_common()))
 
     def _cad_furniture_off(self):
+        from . import furnish as FU_
         doc = self.doc()
         n = sum(1 for f in doc.get("furniture") or [] if f.get("cad"))
         if not n:
@@ -844,7 +845,9 @@ class Panel(QWidget):
                 PJ.store_only(self.vp, doc)
             self.flash("Furniture from the CAD: off")
             return
-        doc["furniture"] = [f for f in doc["furniture"] if not f.get("cad")]
+        doc["furniture"] = [f for f in doc["furniture"] if not f.get("cad")
+                            or f.get("src") == "fitout"
+                            or f.get("kind") in FU_.BATH_KINDS]
         doc["settings"]["cad_furniture"] = False
         self.commit(doc, f"{n} pieces of CAD furniture removed")
 
@@ -4925,6 +4928,10 @@ class Panel(QWidget):
             self.c_furn.blockSignals(True)
             self.c_furn.setChecked(bool(st.get("cad_furniture", False)))
             self.c_furn.blockSignals(False)
+        if hasattr(self, "c_fitout"):
+            self.c_fitout.blockSignals(True)
+            self.c_fitout.setChecked(bool(st.get("fitout_on", True)))
+            self.c_fitout.blockSignals(False)
         if hasattr(self, "t_rkind"):
             self.t_rkind.blockSignals(True)
             self.t_rkind.setCurrentIndex(max(self.t_rkind.findData(
@@ -7287,8 +7294,70 @@ class Panel(QWidget):
                            "Read the CAD's furniture and fixture blocks "
                            "again (replaces only its own pieces)"))
         v.addLayout(row)
+        row = QHBoxLayout()
+        self.c_fitout = QCheckBox("Fit-out from the CAD")
+        self.c_fitout.setToolTip(
+            "On by default, on every import: VOID / CUT OUT texts cut the "
+            "floor slab, DUCT / SHAFT / O.T.S / OPEN TO SKY cut it and every "
+            "floor over it (the roof too); the GLASS layer in a bathroom a "
+            "glass shower partition with its door; the CLADDING / ACP layer "
+            "aluminium panels on the wall; a LIFT room the library's "
+            "elevator and its door; the LIGHT / ELE layers ceiling lamps "
+            "and the AC layers diffusers in the false ceiling; DRESS rooms "
+            "and the DRESS layer library wardrobes. The bathroom's WCs, "
+            "vanities and showers are placed too.")
+        self.c_fitout.toggled.connect(self._fitout_toggle)
+        row.addWidget(self.c_fitout)
+        row.addStretch(1)
+        row.addWidget(_btn("Read again", self._fitout_again,
+                           "Read the CAD's fit-out again on every imported "
+                           "floor (replaces only its own pieces)"))
+        v.addLayout(row)
         self._cp_keys = []
         self.lay.addWidget(box)
+
+    def _fitout_toggle(self, on):
+        if self._building:
+            return
+        doc = self.doc()
+        doc["settings"]["fitout_on"] = bool(on)
+        if on:
+            self._fitout_again()
+            return
+        from . import fitout as FO
+        for lid in list((doc.get("imports") or {}).keys()):
+            FO.clear(doc, lid)
+        self.commit(doc, "Fit-out from the CAD: off")
+
+    def _fitout_again(self):
+        from . import fitout as FO
+        from . import furnish as FU
+        doc = self.doc()
+        if not doc.get("imports"):
+            self.flash("Import a CAD plan first")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        from collections import Counter
+        tot = Counter()
+        try:
+            st = doc["settings"]
+            for lid in list(doc["imports"].keys()):
+                pl, _P = PJ._placed_plan(doc, lid)
+                if pl is None:
+                    continue
+                if not st.get("cad_furniture") and \
+                        st.get("bath_fixtures", True):
+                    tot.update(FU.furnish(doc, [lid], only=FU.BATH_KINDS)
+                               .get(lid, {}))
+                tot.update(FO.analyze(doc, lid, pl))
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._fitout_again")
+            self.flash(f"Fit-out not read — {e}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.commit(doc, "Fit-out from the CAD: " + (", ".join(
+            f"{n} {k}" for k, n in tot.most_common()) or "nothing found"))
 
     def _furn_toggle(self, on):
         if self._building:

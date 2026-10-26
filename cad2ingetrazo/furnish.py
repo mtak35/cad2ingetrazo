@@ -24,7 +24,8 @@ KINDS = {
            r"INODORO|\bPAN\b",
            [("Bathroom", ["toilet unit", "hanged toilet", "toilet"])]),
     "basin": (r"BASIN|\bWHB\b|WASH|\bLAV|LAVABO|VANITY",
-              [("Bathroom", ["washbasin", "basin", "small lavatory"])]),
+              [("Bathroom", ["vanity", "washbasin with cabinet",
+                             "washbasin", "basin", "small lavatory"])]),
     "shower": (r"SHOWER|DUCHA", [("Bathroom", ["shower cabin", "shower stall",
                                                "shower cubicle"])]),
     "bathtub": (r"\bTUB|BATHTUB|BAÑERA|BANERA|JACUZZI",
@@ -68,7 +69,7 @@ NOT_WORDS = {
             "bedside", "iron", "futon"),
     "wc": ("turkish", "japanese", "brush", "paper", "potty", "grab",
            "urinal"),
-    "basin": ("corner", "stone", "ergonomic", "mixer"),
+    "basin": ("corner", "stone", "ergonomic", "mixer", "double", "hand"),
     "shower": ("door", "curtain", "head", "chair", "armchair", "mixer",
                "tap"),
     "bathtub": ("mat", "mixer", "towel", "island", "jet", "l shape"),
@@ -235,6 +236,61 @@ def pick(kind, L, W, entries, cache=None):
     return hit
 
 
+def cad_plan(doc, lid):
+    """The level's CAD plan placed in the model (``cadread.place``), or
+    None."""
+    from . import cadread
+    how = (doc.get("imports") or {}).get(lid)
+    if not isinstance(how, dict) or not how.get("file"):
+        return None
+    raw = cadread.read(how["file"], how.get("unit"))
+    drawing = cadread.crop(raw, how.get("region"))
+    base = cadread.base_point(drawing, how.get("base", "origin"),
+                              (how.get("bx", 0.0), how.get("by", 0.0)))
+    return cadread.place(drawing, base, (how.get("ix", 0.0),
+                                         how.get("iy", 0.0)),
+                         how.get("rot", 0.0))
+
+
+def oval_basins(pl, rooms) -> list:
+    """Washbasins drawn loose (not a block): an oval / round closed line
+    on a fixture layer inside a bathroom, 14"–30" across — [(x, y, L, W,
+    room)], the outer ring of each."""
+    from shapely.geometry import Polygon
+    out = []
+    if pl is None:
+        return out
+    for lp in pl.get("loops") or ():
+        if not re.search(FURN_LAYER, str(lp["layer"]).upper()) or \
+                len(lp["pts"]) < 12:
+            continue
+        try:
+            g = Polygon(lp["pts"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if g.is_empty or g.geom_type != "Polygon":
+            continue
+        m = g.minimum_rotated_rectangle
+        cs = list(m.exterior.coords)[:-1]
+        a_, b_ = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+        L, W = max(a_, b_), min(a_, b_)
+        if not (_in(L, 0.35, 0.8) and _in(W, 0.22, 0.65)):
+            continue
+        if not 0.68 <= g.area / max(m.area, 1e-9) <= 0.84:
+            continue                       # an ellipse fills π/4 of its box
+        c = g.centroid
+        room = next((r for r in rooms if r["poly"].contains(c)), None)
+        if room is None or _use(room["name"]) != "bath":
+            continue
+        out.append((c.x, c.y, L, W, room))
+    out.sort(key=lambda q: -q[2])
+    keep = []
+    for q in out:                          # the rings of one basin: one
+        if all(math.dist(q[:2], k[:2]) > 0.2 for k in keep):
+            keep.append(q)
+    return keep
+
+
 def cad_blocks(doc, lid) -> list:
     """The level's CAD blocks, placed in the model (``cadread.place``)."""
     from . import cadread
@@ -296,7 +352,11 @@ def face_wall(poly, cx, cy, ex, ey, reach=0.75):
     return back_to(*n), [along, across]
 
 
-def furnish(doc, lids=None, entries=None) -> dict:
+#: the bathroom's fixtures (placed even with the CAD furniture off)
+BATH_KINDS = ("wc", "basin", "shower", "bathtub")
+
+
+def furnish(doc, lids=None, entries=None, only=None) -> dict:
     """The furniture / fixtures of the CAD blocks on levels ``lids`` (all
     imported) set as library models: the CAD-made ones of those levels
     made again, the hand-placed kept. {level: {kind: n}}."""
@@ -326,7 +386,10 @@ def furnish(doc, lids=None, entries=None) -> dict:
         except Exception:  # noqa: BLE001
             pass
         doc["furniture"] = [f for f in doc.get("furniture") or []
-                            if not (f.get("cad") and f["level"] == lid)]
+                            if not (f.get("cad") and f["level"] == lid
+                                    and f.get("src") != "fitout"
+                                    and (only is None
+                                         or f.get("kind") in only))]
         got = {}
         seen = []
         for ins in blocks:
@@ -362,6 +425,8 @@ def furnish(doc, lids=None, entries=None) -> dict:
                             str(ins.get("layer", "")), L, W, use)
             if kind is None or (kind == "tree" and room is not None):
                 continue
+            if only is not None and kind not in only:
+                continue
             if any(math.dist((cx, cy), s) < 0.15 for s in seen):
                 continue                       # the same block twice
             e = pick(kind, L, W, entries, cache)
@@ -394,6 +459,27 @@ def furnish(doc, lids=None, entries=None) -> dict:
                       else {})}
             doc["furniture"].append(rec)
             got[kind] = got.get(kind, 0) + 1
+        if only is None or "basin" in only:
+            try:             # basins drawn as an oval, not a block
+                pl_ = cad_plan(doc, lid)
+                for bx, by, bl, bw, room in oval_basins(pl_, rooms):
+                    if any(math.dist((bx, by), s_) < 0.35 for s_ in seen):
+                        continue
+                    e = pick("basin", bl, bw, entries, cache)
+                    if e is None:
+                        continue
+                    fw = face_wall(room["poly"], bx, by, bl, bw, reach=0.6)
+                    rot = fw[0] if fw else 0.0
+                    rec = _rec(doc, lid, e, "basin", bx, by, rot, room)
+                    rec["oval"] = True
+                    seen.append((bx, by))
+                    got["basin"] = got.get("basin", 0) + 1
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("furnish.oval_basins")
+        if only is not None:
+            out[lid] = got
+            continue
         try:                 # kitchen counters along the sink and hob
             for k_, n_ in kitchen_runs(doc, lid, rooms, entries,
                                        cache).items():

@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -205,7 +205,7 @@ def empty() -> dict:
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
-            "chhatris": []}
+            "chhatris": [], "fitout": []}
 
 
 def load(raw) -> dict:
@@ -288,6 +288,11 @@ def load(raw) -> dict:
     doc["furniture"] = [f for f in raw.get("furniture") or []
                         if isinstance(f, dict) and f.get("level") in ids
                         and f.get("key")]
+    # the fit-out read from the CAD (fitout.py): shower glass, cladding,
+    # AC diffusers
+    doc["fitout"] = [f for f in raw.get("fitout") or []
+                     if isinstance(f, dict) and f.get("level") in ids
+                     and f.get("kind") in ("glass", "clad", "diffuser")]
     doc["ffl_marks"] = [m for m in raw.get("ffl_marks") or []
                         if isinstance(m, dict) and m.get("level") in ids]
     # slab openings closed by hand: kept closed when the CAD is read again
@@ -3653,6 +3658,20 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.furnish")
+    elif st.get("bath_fixtures", True):   # the WCs, vanities, showers only
+        try:
+            from . import furnish as FU
+            rep["fixtures"] = FU.furnish(doc, [lid], only=FU.BATH_KINDS) \
+                .get(lid, {})
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.furnish fixtures")
+    try:                       # voids / ducts, shower glass, lift, lights…
+        from . import fitout as FO
+        rep["fitout"] = FO.analyze(doc, lid, pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.fitout")
     return rep
 
 
@@ -4451,10 +4470,14 @@ def apply_man_shafts(doc) -> dict:
     out = {}
     for m in doc.get("man_shafts") or []:
         hp = Polygon(m["pts"]).buffer(0)
-        targets = slabs if m.get("through") else (
-            [s_ for s_ in slabs if s_["level"] == m["level"]
-             and s_.get("roof")] if m.get("roof")
-            else _floor_slabs(doc, m["level"]))
+        if m.get("auto"):                 # read from the CAD (fitout.py)
+            from . import fitout as FO_
+            targets = FO_.cut_targets(doc, m, slabs)
+        else:
+            targets = slabs if m.get("through") else (
+                [s_ for s_ in slabs if s_["level"] == m["level"]
+                 and s_.get("roof")] if m.get("roof")
+                else _floor_slabs(doc, m["level"]))
         n = 0
         for s in targets:
             try:
@@ -8987,7 +9010,13 @@ def _furniture_pose(f, pr, z):
         try:
             sx = float(fit[0]) / max(x1 - x0, 1e-6)
             sy = float(fit[1]) / max(y1 - y0, 1e-6)
-            if 0.75 <= sx <= 1.33 and 0.75 <= sy <= 1.33:
+            if f.get("fit_free"):           # a lift / a wardrobe run
+                sz = 1.0
+                if f.get("fit_h"):
+                    sz = float(f["fit_h"]) / max(z1 - z0, 1e-6)
+                    sz = min(max(sz, 0.7), 1.4)
+                m.scale(sx, sy, sz)
+            elif 0.75 <= sx <= 1.33 and 0.75 <= sy <= 1.33:
                 m.scale(sx, sy, 1.0)        # (far off: the model's own size)
         except (TypeError, ValueError):
             pass
@@ -9006,6 +9035,7 @@ def _furniture_groups(doc):
     z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
     names = {lv["id"]: lv["name"] for lv in arch["levels"]}
     out = []
+    _rooms_cache = {}
     for f in doc.get("furniture") or []:
         if f["level"] not in z_of:
             continue
@@ -9017,6 +9047,19 @@ def _furniture_groups(doc):
         z = z_of[f["level"]] + (room_finish(doc, rec)
                                 if doc["settings"].get("finish_on", True)
                                 else 0.0)
+        if f.get("hang"):              # hung under the false ceiling
+            try:
+                from . import fitout as FO
+                rms = _rooms_cache.get(f["level"])
+                if rms is None:
+                    rms = _rooms_cache[f["level"]] = FO._rooms(
+                        arch, f["level"])
+                h_ = FO.ceiling_h(doc, f["level"],
+                                  FO._room_at(rms, f["x"], f["y"]),
+                                  float(f["hang"]))
+            except Exception:  # noqa: BLE001
+                h_ = float(f["hang"])
+            z = z_of[f["level"]] + h_ - (pr["box"][5] - pr["box"][2])
         base = _furniture_pose(f, pr, z)
         nm = f"{f.get('name', 'Furniture')} · {names[f['level']]}"
         if len(pr["parts"]) == 1:
@@ -9657,6 +9700,12 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._furniture_groups")
     try:
+        from . import fitout as FO
+        new_groups += FO.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.fitout groups")
+    try:
         new_groups += _edge_groups(doc)
     except Exception:  # noqa: BLE001
         from .host import log_error
@@ -10165,6 +10214,63 @@ def plan_lines_near(doc, lid, boxes, lo=0.3, hi=3.0) -> list:
     return out
 
 
+def stair_cut_lines(segs) -> set:
+    """The stair's cut symbol — the break line drawn slantwise across a
+    flight where the plan cuts it at eye level (often with a zigzag in
+    it): indices of ``segs`` [((x, y), (x, y))] that are not treads. A
+    slant line crossing two or more treads, and the short pieces of its
+    zigzag touching it."""
+    from shapely.geometry import LineString, Point
+    if len(segs) < 3:
+        return set()
+    # the treads' direction: the longest-weighted angle (mod 90)
+    hist = {}
+    for a, b in segs:
+        L = math.dist(a, b)
+        if L < 0.3:
+            continue
+        k = round(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+                  % 90.0) % 90
+        hist[k] = hist.get(k, 0.0) + L
+    if not hist:
+        return set()
+    main = max(hist, key=hist.get)
+
+    def off(a, b):
+        g = (math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) - main) % 90.0
+        return min(g, 90.0 - g)
+    square = [i for i, (a, b) in enumerate(segs) if off(a, b) <= 6.0]
+    lines = {i: LineString(segs[i]) for i in range(len(segs))}
+    cut = set()
+    for i, (a, b) in enumerate(segs):
+        if math.dist(a, b) < 0.5 or off(a, b) < 12.0:
+            continue
+        L_ = lines[i]
+        n = 0
+        for j in square:
+            if j == i:
+                continue
+            x = L_.intersection(lines[j])
+            if x.is_empty or x.geom_type != "Point":
+                continue
+            # a real crossing: not at either line's end
+            if min(Point(p).distance(x) for p in segs[j]) > 0.03 and \
+                    min(Point(p).distance(x) for p in (a, b)) > 0.03:
+                n += 1
+        if n >= 2:
+            cut.add(i)
+    if cut:                         # its zigzag: short pieces touching it
+        zone = [lines[i].buffer(0.06) for i in cut]
+        for i, (a, b) in enumerate(segs):
+            if i in cut or math.dist(a, b) > 0.4 or off(a, b) <= 6.0 and \
+                    math.dist(a, b) > 0.15:
+                continue
+            if any(z.contains(Point(a)) or z.contains(Point(b))
+                   for z in zone):
+                cut.add(i)
+    return cut
+
+
 def stair_trace(doc, lid):
     """The stairs drawn on the level's CAD plan (its stair layers' tread
     lines), traced: [[flight…] per stair] — see stairs.trace."""
@@ -10189,6 +10295,24 @@ def stair_trace(doc, lid):
     words = [(t["x"], t["y"], t["text"]) for t in pl["texts"]]
     if not segs:
         return []
+    try:                         # the cut symbol across a flight: not treads
+        cut_ = stair_cut_lines(segs)
+        if cut_:
+            cut_xy = [segs[i] for i in cut_]
+            segs = [sg for i, sg in enumerate(segs) if i not in cut_]
+            if not segs:
+                return []
+        else:
+            cut_xy = []
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.stair_cut_lines")
+        cut_xy = []
+
+    def _is_cut(a_, b_):
+        return any(math.dist(a_, c0) < 0.02 and math.dist(b_, c1) < 0.02
+                   or math.dist(a_, c1) < 0.02 and math.dist(b_, c0) < 0.02
+                   for c0, c1 in cut_xy)
     chains = ST.trace(segs, words)
     # the rest of the stair as drawn on other layers (the upper flight,
     # its landing treads…): tread lines of any layer but the walls', doors'
@@ -10216,6 +10340,10 @@ def stair_trace(doc, lid):
                 if any(b[0] <= mx <= b[2] and b[1] <= my <= b[3]
                        for b in boxes):
                     extra.append(((s_[0], s_[1]), (s_[2], s_[3])))
+            if extra:                # (a cut symbol on another layer: out)
+                cx_ = stair_cut_lines(segs + extra)
+                extra = [e_ for k_, e_ in enumerate(extra)
+                         if k_ + len(segs) not in cx_]
             if extra:
                 more = ST.trace(segs + extra, words)
                 own = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
@@ -10262,8 +10390,15 @@ def stair_trace(doc, lid):
                         abs(a_[1] - b_[1]) < 0.2:
                     continue             # level / plumb: not a diagonal
                 if all(bx[0] <= q[0] <= bx[2] and bx[1] <= q[1] <= bx[3]
-                       for q in (a_, b_)):
+                       for q in (a_, b_)) and not _is_cut(a_, b_):
                     dg.append([list(a_), list(b_)])
+            if dg:                   # a slant line across the treads: the
+                tl = [tuple(map(tuple, ln)) for f in ch   # cut symbol
+                      for ln in f["lines"]]
+                cx_ = stair_cut_lines(tl + [tuple(map(tuple, d_))
+                                            for d_ in dg])
+                dg = [d_ for k_, d_ in enumerate(dg)
+                      if k_ + len(tl) not in cx_]
             ch[0]["_diag"] = dg
     except Exception:  # noqa: BLE001
         from .host import log_error
