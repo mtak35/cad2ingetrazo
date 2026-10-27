@@ -892,6 +892,9 @@ def frame_size(o: dict):
     material's, with the width / depth set on the opening (Edit ▸ Frame
     width, Frame depth) over them."""
     lab, col, f, dep = FRAMES[frame_of(o)]
+    if frame_of(o) == "wood" and str(o.get("panel") or "").startswith(
+            "veneer"):
+        col = WALNUT_FRAME                  # a walnut door: walnut chowkat
     try:
         if float(o.get("frame_w") or 0) > 0:
             f = float(o["frame_w"])
@@ -1325,10 +1328,15 @@ HANDLE_TYPES = [("auto", "As the door type"),
                 ("lever_plate", "Lever on a back plate (with lock)"),
                 ("knob", "Round knob"),
                 ("pull_bar", "Pull bar (long, vertical)"),
+                ("long_pull", "Tall pull bar, dark bronze (1.2 m)"),
                 ("d_pull", "D pull handle"),
                 ("flush", "Flush pull (recessed)"),
                 ("none", "No handle")]
 KEY_COLOR = (0.12, 0.12, 0.13, 1.0)
+BRONZE_COLOR = (0.20, 0.16, 0.12, 1.0)     # dark bronze pull
+WALNUT_LEAF = (0.40, 0.22, 0.11, 1.0)      # walnut veneer leaf
+WALNUT_GROOVE = (0.22, 0.12, 0.06, 1.0)
+WALNUT_FRAME = (0.33, 0.18, 0.09, 1.0)
 
 
 def _handle(p0, u, n, ua, ub, c_h, toward, z, kind="lever") -> list:
@@ -1384,6 +1392,14 @@ def _handle(p0, u, n, ua, ub, c_h, toward, z, kind="lever") -> list:
             for zz in (z - L2 + 0.05, z + L2 - 0.05):       # standoffs
                 B(f, f + sg * 0.055, c_h - 0.008, c_h + 0.008, zz - 0.008,
                   zz + 0.008)
+        elif kind == "long_pull":
+            L2 = 0.60
+            zc = max(z, L2 + 0.25)
+            B(f + sg * 0.045, f + sg * 0.070, c_h - 0.011, c_h + 0.011,
+              zc - L2, zc + L2, BRONZE_COLOR)               # the bar
+            for zz in (zc - L2 + 0.08, zc + L2 - 0.08):     # standoffs
+                B(f, f + sg * 0.045, c_h - 0.007, c_h + 0.007, zz - 0.007,
+                  zz + 0.007, BRONZE_COLOR)
         elif kind == "d_pull":
             L2 = 0.11
             B(f + sg * 0.050, f + sg * 0.065, c_h - 0.008, c_h + 0.008,
@@ -1550,7 +1566,9 @@ PANEL_TYPES = [("auto", "As the door type"), ("flush", "Flush"),
                ("panel2", "2 panels"), ("panel4", "4 panels"),
                ("panel6", "6 panels"), ("glazed_half", "Half glazed"),
                ("glazed_full", "Fully glazed"), ("louvred", "Louvred"),
-               ("ledged", "Ledged (vertical boards)")]
+               ("ledged", "Ledged (vertical boards)"),
+               ("veneer_walnut", "Walnut veneer, flush (luxury)"),
+               ("veneer_grooved", "Walnut veneer with grooves (luxury)")]
 
 
 def leaf_face(pk, p0, u, n, ua, ub, ca, cb, z0, z1) -> list:
@@ -1590,6 +1608,17 @@ def leaf_face(pk, p0, u, n, ua, ub, ca, cb, z0, z1) -> list:
         else:
             P.append(_box(p0, u, n, ua + 0.012, ub - 0.012, ca + st_,
                           cb - st_, lo, z1 - top_, GLASS_COLOR))
+        return P
+    if pk in ("veneer_walnut", "veneer_grooved"):     # walnut veneer
+        P.append(_box(p0, u, n, ua, ub, ca, cb, z0, z1, WALNUT_LEAF))
+        if pk == "veneer_grooved":
+            # V-grooves across both faces, and one down the lock side
+            H = z1 - z0
+            for j in (0.22, 0.42, 0.62, 0.82):
+                zz = z0 + H * j
+                for a_, b_ in ((ua - 0.003, ua), (ub, ub + 0.003)):
+                    P.append(_box(p0, u, n, a_, b_, ca + 0.06, cb - 0.06,
+                                  zz - 0.003, zz + 0.003, WALNUT_GROOVE))
         return P
     P.append(_box(p0, u, n, ua, ub, ca, cb, z0, z1, LEAF_COLOR))
     if pk == "ledged":                          # board joints, both faces

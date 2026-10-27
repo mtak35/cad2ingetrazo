@@ -307,6 +307,16 @@ def _walls(raw, level_ids: set) -> list[dict]:
                 for k_ in ("np_a", "np_b", "cj_a", "cj_b"):
                     if w.get(k_):
                         rec[k_] = True
+            if w.get("clad") and w.get("clad") != "none":   # cladding
+                rec["clad"] = str(w["clad"])[:40]
+                if w.get("clad_side") in ("clad_in", "clad_both", "clad_l",
+                                          "clad_r"):
+                    rec["clad_side"] = w["clad_side"]
+                for k_, lo, hi in (("clad_h", 0.0, 20.0),
+                                   ("clad_len", 0.0, 200.0),
+                                   ("clad_off", -100.0, 100.0)):
+                    if w.get(k_) not in (None, ""):
+                        rec[k_] = min(max(float(w[k_]), lo), hi)
             if w.get("cwin"):                # a leg of a corner window
                 rec["cwin"] = str(w["cwin"])[:40]
                 rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
@@ -381,8 +391,11 @@ def _rooms(raw, level_ids: set) -> list[dict]:
             except (TypeError, ValueError):
                 pass
         # its false ceiling: «level» (the level's), «none», or a type
-        if r.get("ceiling") in ("none", "gypsum", "tiles", "pop", "wood",
-                                "pvc", "metal"):
+        try:
+            from ..ceilings import BY as _CEB
+        except Exception:  # noqa: BLE001
+            _CEB = {}
+        if r.get("ceiling") == "none" or r.get("ceiling") in _CEB:
             rec["ceiling"] = r["ceiling"]
         # its materials (IngeTrazo's library: «category/file»)
         for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
@@ -585,10 +598,11 @@ def _structure(raw, level_ids: set) -> list[dict]:
 _OP_LABEL = {"door": "Door", "window": "Window", "void": "Opening"}
 #: a door's ironmongery (Edit ▸ Door handle)
 HANDLE_KEYS = ("auto", "lever_rose", "lever_plate", "knob", "pull_bar",
-               "d_pull", "flush", "none")
+               "long_pull", "d_pull", "flush", "none")
 #: a wooden door leaf's face (Edit ▸ Door panel)
 PANEL_KEYS = ("auto", "flush", "panel2", "panel4", "panel6", "glazed_half",
-              "glazed_full", "louvred", "ledged")
+              "glazed_full", "louvred", "ledged", "veneer_walnut",
+              "veneer_grooved")
 
 
 def _openings(raw, wall_ids: set) -> list[dict]:

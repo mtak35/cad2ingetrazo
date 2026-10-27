@@ -11112,6 +11112,12 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._furniture_groups")
     try:
+        from . import wallclad as WC_
+        new_groups += WC_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.wallclad groups")
+    try:
         from . import fitout as FO
         new_groups += FO.groups(doc)
     except Exception:  # noqa: BLE001

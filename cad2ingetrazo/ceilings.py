@@ -51,7 +51,13 @@ TYPES = [
      1.2192, (0.60, 0.61, 0.63, 1.0)),
     ("metal_linear", "Metal linear strips", 0.015, (0.80, 0.81, 0.83, 1.0),
      0.1016, (0.55, 0.56, 0.58, 1.0)),
+    ("cove_track", "Luxury cove ceiling: LED cove, magnetic track lights, "
+     "downlights", 0.0125, (0.96, 0.95, 0.93, 1.0), 0.0, None),
+    ("cove_slot", "Luxury cove ceiling: LED cove, linear slot lights, "
+     "downlights", 0.0125, (0.96, 0.95, 0.93, 1.0), 0.0, None),
 ]
+TRACK = (0.08, 0.08, 0.09, 1.0)       # black magnetic track, spot heads
+WARM = (1.0, 0.84, 0.55, 1.0)         # warm-white LED cove
 LIGHT = (1.0, 0.93, 0.72, 1.0)        # the cove's glow, a lit panel
 WOOD = (0.62, 0.45, 0.30, 1.0)
 #: types with no board: strips hung in rows (depth m, width m)
@@ -119,6 +125,9 @@ def faces(poly, z, kind) -> list:
             for q in getattr(mid, "geoms", [mid]):
                 if q.geom_type == "Polygon" and q.area > 0.05:
                     out.append((_slab(q, z, z + t), col))
+            continue
+        if kind in ("cove_track", "cove_slot"):
+            out += _luxury(p, z, t, col, tracks=(kind == "cove_track"))
             continue
         if kind in ("pop", "combo", "glass"):
             # a tray: a band round the room, the middle raised (POP: its
@@ -202,6 +211,118 @@ def faces(poly, z, kind) -> list:
                                        for h in holes]}, z, z + t), col))
         if grid > 0 and gcol is not None:
             out.append((_grid(p, z, grid), gcol))
+    return out
+
+
+def _luxury(p, z, t, col, tracks=True) -> list:
+    """The designer bedroom ceiling: a gypsum bulkhead round the room
+    (15 cm lower, 60 cm wide) with recessed downlights, a warm LED cove
+    washing the raised middle from its inner edge, and in the middle black
+    magnetic tracks along the room with spot heads and linear lights
+    (``tracks``) or recessed linear slot lights."""
+    import math as _m
+
+    from shapely import affinity
+    from shapely.geometry import LineString, Point
+    out = []
+    drop, bw, up = 0.15, 0.60, 0.05
+    mid = p.buffer(-bw, join_style=2)
+    if mid.is_empty or mid.area < 1.0:          # small room: plain cove
+        mid = p.buffer(-0.30, join_style=2)
+        bw = 0.30
+    band = p.difference(mid) if not mid.is_empty else p
+    for q in getattr(band, "geoms", [band]):
+        if q.geom_type == "Polygon" and q.area > 0.01:
+            out.append((_slabs(q, z - drop, z + t), col))
+    if mid.is_empty:
+        return out
+    for q in getattr(mid, "geoms", [mid]):
+        if q.geom_type != "Polygon" or q.area < 0.3:
+            continue
+        out.append((_slabs(q, z + up, z + up + t), col))
+        # the cove: the fascia's inner face lit, a glow on the soffit
+        lip = q.buffer(0.012, join_style=2).difference(q)
+        out.append((_slabs(lip, z - drop + 0.02, z + up - 0.005), WARM))
+        glow = q.difference(q.buffer(-0.10, join_style=2))
+        out.append((_slabs(glow, z + up - 0.003, z + up - 0.001), WARM))
+        # the room's long direction (its tracks run along it)
+        mrr = q.minimum_rotated_rectangle
+        cs = list(mrr.exterior.coords)[:4]
+        e1 = (cs[1][0] - cs[0][0], cs[1][1] - cs[0][1])
+        e2 = (cs[2][0] - cs[1][0], cs[2][1] - cs[1][1])
+        ax = e1 if _m.hypot(*e1) >= _m.hypot(*e2) else e2
+        ang = _m.degrees(_m.atan2(ax[1], ax[0]))
+        c = q.centroid
+        qr = affinity.rotate(q, -ang, origin=c)
+        x0, y0, x1, y1 = qr.bounds
+        inner = qr.buffer(-0.25, join_style=2)
+        if inner.is_empty:
+            continue
+        W_ = y1 - y0
+        nlines = 2 if W_ > 2.4 else 1
+        for k in range(nlines):
+            yy = y0 + W_ * (k + 1) / (nlines + 1)
+            ln = LineString([(x0, yy), (x1, yy)]).intersection(inner)
+            for seg in getattr(ln, "geoms", [ln]):
+                if seg.geom_type != "LineString" or seg.length < 0.6:
+                    continue
+                (sx0, _y), (sx1, _y2) = list(seg.coords)[0], \
+                    list(seg.coords)[-1]
+                sx0, sx1 = min(sx0, sx1), max(sx0, sx1)
+
+                def rect(a_, b_, w_):
+                    r = LineString([(a_, yy), (b_, yy)]).buffer(
+                        w_ / 2, cap_style=2, join_style=2)
+                    return affinity.rotate(r, ang, origin=c)
+                if tracks:
+                    out.append((_slabs(rect(sx0, sx1, 0.035), z + up - 0.035,
+                                      z + up), TRACK))
+                    xx = sx0 + 0.25
+                    k_ = 0
+                    while xx < sx1 - 0.2:          # spots and linear lights
+                        if k_ % 2 == 0:
+                            out.append((_slabs(rect(xx - 0.035, xx + 0.035,
+                                                   0.07), z + up - 0.15,
+                                              z + up - 0.035), TRACK))
+                            out.append((_slabs(rect(xx - 0.025, xx + 0.025,
+                                                   0.05), z + up - 0.152,
+                                              z + up - 0.15), WARM))
+                            xx += 0.35
+                        else:
+                            e_ = min(xx + 0.6, sx1 - 0.2)
+                            out.append((_slabs(rect(xx, e_, 0.02),
+                                              z + up - 0.037,
+                                              z + up - 0.035), LIGHT))
+                            xx = e_ + 0.35
+                        k_ += 1
+                else:                               # recessed slots
+                    out.append((_slabs(rect(sx0, sx1, 0.06), z + up - 0.004,
+                                      z + up - 0.001), TRACK))
+                    out.append((_slabs(rect(sx0 + 0.01, sx1 - 0.01, 0.03),
+                                      z + up - 0.006, z + up - 0.004),
+                                LIGHT))
+    # recessed downlights along the bulkhead
+    rp = p.buffer(-bw / 2, join_style=2)
+    for rq in getattr(rp, "geoms", [rp]):
+        if rq.is_empty or rq.geom_type != "Polygon":
+            continue
+        ring = rq.exterior
+        if ring.length < 1.0:
+            continue
+        n_ = max(int(ring.length / 1.2), 1)
+        for i in range(n_):
+            pt = ring.interpolate(i * ring.length / n_)
+            out.append((_slabs(Point(pt.x, pt.y).buffer(0.045, 8),
+                               z - drop - 0.003, z - drop - 0.001), WARM))
+    return out
+
+
+def _slabs(g, z0, z1) -> list:
+    """_slab of every polygon in ``g`` (a polygon or several)."""
+    out = []
+    for q in getattr(g, "geoms", [g]):
+        if q.geom_type == "Polygon" and not q.is_empty and q.area > 1e-6:
+            out += _slab(q, z0, z1)
     return out
 
 

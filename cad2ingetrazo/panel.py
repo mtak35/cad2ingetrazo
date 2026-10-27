@@ -147,6 +147,7 @@ def _form(parent):
 #: (key, label, kind, options / range)
 from . import matlib as _ML  # noqa: E402
 from .ceilings import TYPES as _CE_TYPES  # noqa: E402
+from . import wallclad as _WC  # noqa: E402
 FIELDS = {
     "wall": [("type", "Wall type", "choice", ("solid", "curtain")),
              ("glass", "Curtain wall glass", "choice",
@@ -166,7 +167,17 @@ FIELDS = {
              ("top_att", "Top", "choice", ("slab", "free")),
              ("bot_att", "Bottom", "choice", ("slab", "free")),
              ("height", "Height", "height", (0.1, 50.0)),
-             ("base", "Base offset", "len", (-5.0, 10.0))],
+             ("base", "Base offset", "len", (-5.0, 10.0)),
+             ("clad", "Wall cladding (interior design)", "choice",
+              tuple(k_ for k_, _l in _WC.TYPES)),
+             ("clad_side", "Cladding on", "choice",
+              tuple(k_ for k_, _l in _WC.SIDES)),
+             ("clad_h", "Cladding height (0 = up to the false ceiling)",
+              "len", (0.0, 20.0)),
+             ("clad_len", "Cladding length (0 = the whole wall)", "len",
+              (0.0, 200.0)),
+             ("clad_off", "Cladding centre moved along the wall", "len",
+              (-100.0, 100.0))],
     "opening": [("kind", "Type", "choice", ("door", "window", "void",
                                             "curtain")),
                 ("w", "Width", "len", (0.2, 20.0)),
@@ -200,10 +211,11 @@ FIELDS = {
                  (0.03, 0.50)),
                 ("panel", "Door panel", "choice",
                  ("auto", "flush", "panel2", "panel4", "panel6",
-                  "glazed_half", "glazed_full", "louvred", "ledged")),
+                  "glazed_half", "glazed_full", "louvred", "ledged",
+                  "veneer_walnut", "veneer_grooved")),
                 ("handle", "Door handle", "choice",
                  ("auto", "lever_rose", "lever_plate", "knob", "pull_bar",
-                  "d_pull", "flush", "none")),
+                  "long_pull", "d_pull", "flush", "none")),
                 ("glass", "Glass type", "choice",
                  ("clear", "double", "lowe", "grey", "bronze", "green",
                   "blue_ref", "silver_ref", "frosted")),
@@ -358,6 +370,8 @@ CHOICE_LABELS.update({"cnc": "CNC jali — diamonds", "none": "None",
                       "interior": "Inner face of the wall",
                       "ablaq": "Ablaq (dark / light stones)",
                       "plain": "Plain band"})
+CHOICE_LABELS.update(dict(_WC.TYPES))
+CHOICE_LABELS.update(dict(_WC.SIDES))
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
 
@@ -4539,6 +4553,40 @@ class Panel(QWidget):
         m_.addAction("No false ceiling",
                      lambda: self.apply_ceiling("none"))
 
+    def _clad_menu(self, menu) -> None:
+        """«Wall cladding» in the right-click menu for the walls selected:
+        the design picked goes on their room side (Edit ▸ Cladding on, for
+        the other face or both)."""
+        doc = self.doc()
+        wids = [i for k, i in self._selected_all() if k == "wall"]
+        if not wids:
+            return
+        w0 = PJ.find_record(doc, "wall", wids[0]) or {}
+        now = w0.get("clad") or "none"
+        m_ = menu.addMenu(f"CAD2IngeTrazo · Wall cladding — {len(wids)} "
+                          "wall(s)")
+        for k_, lab_ in _WC.TYPES:
+            a_ = m_.addAction(lab_, lambda k=k_: self.apply_clad(k))
+            a_.setCheckable(True)
+            a_.setChecked(k_ == now)
+
+    def apply_clad(self, kind):
+        doc = self.doc()
+        n = 0
+        for k, i in self._selected_all():
+            if k != "wall":
+                continue
+            w = PJ.find_record(doc, "wall", i)
+            if w is None:
+                continue
+            if kind == "none":
+                w.pop("clad", None)
+            else:
+                w["clad"] = kind
+            n += 1
+        if n:
+            self.commit(doc, f"{_WC.BY.get(kind, kind)}: {n} wall(s)")
+
     def apply_ceiling(self, kind):
         """A false ceiling of ``kind`` ("none": no ceiling) in the rooms
         selected (or their ceilings), else on the whole level picked."""
@@ -6067,6 +6115,10 @@ class Panel(QWidget):
             self._ceiling_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu ceiling")
+        try:            # the selected walls' interior cladding
+            self._clad_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu cladding")
         sel = self._selected(fresh=True)
         if not sel:
             return
