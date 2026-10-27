@@ -559,3 +559,6 @@ The full list, version by version, is in the README. In short:
 - **Columns, as on the reference plates**: architectural columns in the five orders — **Doric** (fluted, no base, cushion capital), **Ionic** (scroll volutes), **Corinthian** (acanthus leaves, corner helices), **Composite** (big volutes over the leaves), **Tuscan** (plain shaft, simple capital) — besides round smooth / fluted, square smooth and the library column. **Structural** columns are bare RCC (rectangular / round, one clean pour, no lines); «Structural columns: show the reinforcement» (section 6) shows their main bars and links / helix through see-through concrete.
 - **Clean wall junctions**: L corners that stopped short of each other (a notch the CAD does not draw, e.g. the lift lobby) are closed to the outer faces; small stubs past a wall's far face are cut back.
 - **No slab / floor-finish lines on the elevations**: the floor finish stops at the walls and 20 mm short of the slab edge; structural columns no longer show joint or kicker lines.
+
+## 3.34.1
+- **No band at the floor line on the elevations**: a floor slab standing a little proud of the outside walls above it (the CAD outline drawn a couple of cm out) is trimmed back flush with the walls' outer face, so the walls running down over its edge cover it; balconies and canopies stay.

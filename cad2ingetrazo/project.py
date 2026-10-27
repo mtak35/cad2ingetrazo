@@ -2054,6 +2054,70 @@ def trim_wall_stubs(doc, lid, most=0.2) -> int:
     return n
 
 
+def trim_slab_slivers(doc, lid, most=0.15) -> int:
+    """The floor slab flush with the outside walls: a thin strip of slab
+    standing proud of the walls' outer face (the CAD's outline drawn a few
+    cm out — the plaster, a drip) shows a band and two lines on every
+    elevation; it is taken off. Balconies and canopies (wider than
+    ``most``) stay. The number of slabs trimmed."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from . import slabedges as SE
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    try:
+        el = elevations(arch)
+        order = [ids[i] for i in sorted(range(len(ids)), key=lambda i: el[i])]
+    except Exception:  # noqa: BLE001
+        order = ids
+    k = order.index(lid) if lid in order else -1
+    near = {lid}                  # the walls standing on it, over its edge
+    ws = [w for w in arch["walls"] if w["level"] in near
+          and not w.get("rail") and W.why_not(w) is None]
+    if not ws:
+        return 0
+    WU = unary_union(SE.wall_polys(ws))
+    F = unary_union([Polygon(g.exterior) for g in getattr(WU, "geoms", [WU])
+                     if g.geom_type == "Polygon"])
+    n = 0
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid or not e.get("corners") \
+                or e.get("user") or e.get("roof"):
+            continue
+        try:
+            sp = Polygon(e["corners"]).buffer(0)
+            out = sp.difference(F)
+            if out.is_empty:
+                continue
+            # what is thin of it (an opening keeps the balconies)
+            body = out.buffer(-most / 2, join_style=2).buffer(
+                most / 2, join_style=2)
+            rest = out.difference(body.buffer(0.001, join_style=2)) \
+                if not body.is_empty else out
+            thin = [g for g in getattr(rest, "geoms", [rest])
+                    if g.geom_type == "Polygon" and g.area > 1e-4
+                    and g.buffer(-most / 2, join_style=2).is_empty]
+            if not thin:
+                continue
+            new = sp.difference(unary_union(thin).buffer(0.002,
+                                                         join_style=2))
+            if new.geom_type != "Polygon":
+                parts = [g for g in getattr(new, "geoms", [new])
+                         if g.geom_type == "Polygon"]
+                if not parts:
+                    continue
+                new = max(parts, key=lambda g: g.area)
+            if new.area < 0.9 * sp.area:
+                continue                       # never more than a sliver
+            new = new.simplify(0.003)
+            e["corners"] = [[round(x, 4), round(y, 4)] for x, y in
+                            list(new.exterior.coords)[:-1]]
+            n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
+
+
 def close_wall_corners(doc, lid, reach=0.45) -> int:
     """Clean L corners: two walls meeting at a corner (both ends near
     where their centre lines cross) but stopping short of each other — a
@@ -4417,6 +4481,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.fitout")
+    try:                       # no slab strip proud of the outside walls
+        rep["slab_slivers"] = trim_slab_slivers(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.trim_slab_slivers")
     try:                       # L corners closed solid
         rep["wall_corners"] = close_wall_corners(doc, lid)
     except Exception:  # noqa: BLE001
