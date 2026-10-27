@@ -10,10 +10,13 @@ Then the walkthrough is its own mode until **Esc**:
 * W / S or ↑ / ↓ — forward / back;  A / D — sideways;  ← / → — turn;
   Shift — faster.
 * drag with the mouse (either button) — look round; the eye stays put.
-* the wheel — the angle of view (wide angle up to 120°); 1 / 2 / 3 / 4 —
+* the view is the normal one (the camera's own angle) until «Wide angle»
+  is ticked (100°); the wheel sets any angle (35°–120°), 1 / 2 / 3 / 4 —
   60° / 75° / 90° / 110°.
 * PgUp / PgDn — the floor above / below, at the same place.
-* walls are no obstacle: you walk through them from room to room.
+* walls stop you; doors, openings, French windows and lift doors let you
+  through into the next room («Walk through walls» in the menu: none
+  stops you).
 * the eye stays at eye level (no climbing, no falling, no flying out) and
   nothing else moves the camera away — zoom, orbit and the view buttons
   are held off — until Esc puts back the floors and the camera as they
@@ -39,7 +42,8 @@ _state = {"cam": None, "hidden": [], "rooms": [], "i": -1, "lid": None,
           "on": False, "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0,
           "pitch": 0.0, "fov": FOV, "wide": False, "held": set(),
           "drag": None, "filter": None, "timer": None, "panel": None,
-          "last": None}
+          "last": None, "free": False, "block": None, "block_lid": None,
+          "fov0": 45.0}
 
 
 def _eye_h() -> float:
@@ -194,9 +198,100 @@ def _tick():
             math.sin(math.radians(s["yaw"]))
         v = WALK_SPEED * run * dt
         # level: the eye keeps its height whatever the head's tilt
-        s["x"] += (f * cy + r * sy) * v
-        s["y"] += (f * sy - r * cy) * v
+        dx, dy = (f * cy + r * sy) * v, (f * sy - r * cy) * v
+        if s["free"]:
+            s["x"] += dx
+            s["y"] += dy
+        else:                      # walls stop you, the openings let you on
+            for mx, my in ((dx, dy), (dx, 0.0), (0.0, dy)):
+                if mx == 0.0 and my == 0.0:
+                    continue
+                if _free_at(s["x"] + mx, s["y"] + my, s["x"], s["y"]):
+                    s["x"] += mx
+                    s["y"] += my
+                    break
     _apply()
+
+
+#: how near the eye may come to a wall's face
+CLEAR = 0.2
+
+
+def _blocked(lid):
+    """The level's walls as one footprint, the doors, openings, French
+    windows and curtain-wall doors cut out of it: where you cannot walk."""
+    s = _state
+    if s["block_lid"] == lid and s["block"] is not None:
+        return s["block"]
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    from .engine import walls as W
+    doc = s["panel"].doc()
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid
+          and W.why_not(w) is None]
+    try:
+        wu = unary_union(SE.wall_polys(ws)) if ws else None
+    except Exception:  # noqa: BLE001
+        wu = None
+    if wu is None or wu.is_empty:
+        s.update(block=None, block_lid=lid)
+        return None
+    by = {w["id"]: w for w in ws}
+    gaps = []
+    for o in arch["openings"]:
+        w = by.get(o.get("wall"))
+        if w is None or w.get("kind", "line") != "line" or w.get("rail"):
+            continue
+        k = o.get("kind")
+        sill = float(o.get("sill", 0.0) or 0.0)
+        if not (k in ("door", "void") or (k == "window" and sill < 0.25)):
+            continue
+        try:
+            seg = W.centre(w)
+            u = seg.u
+            n = (-u[1], u[0])
+            p0 = seg.p0
+            s0 = float(o["pos"]) - float(o["w"]) / 2 + 0.02
+            s1 = float(o["pos"]) + float(o["w"]) / 2 - 0.02
+            t = float(w["t"]) / 2 + 0.3
+            gaps.append(Polygon([
+                (p0[0] + u[0] * a + n[0] * c, p0[1] + u[1] * a + n[1] * c)
+                for a, c in ((s0, -t), (s1, -t), (s1, t), (s0, t))]))
+        except Exception:  # noqa: BLE001
+            continue
+    for f_ in doc.get("fitout") or []:       # the lifts' landing doors
+        if f_.get("level") == lid and f_.get("kind") == "liftdoor":
+            try:
+                c, u, n = f_["c"], f_["u"], f_["n"]
+                a, t = float(f_["w"]) / 2, float(f_.get("t", 0.2)) / 2 + 0.3
+                gaps.append(Polygon([
+                    (c[0] + u[0] * x + n[0] * y, c[1] + u[1] * x + n[1] * y)
+                    for x, y in ((-a, -t), (a, -t), (a, t), (-a, t))]))
+            except Exception:  # noqa: BLE001
+                continue
+    if gaps:
+        wu = wu.difference(unary_union(gaps))
+    from shapely.prepared import prep
+    blk = (wu, prep(wu.buffer(CLEAR)))
+    s.update(block=blk, block_lid=lid)
+    return blk
+
+
+def _free_at(x, y, x0, y0) -> bool:
+    """May the eye step to (x, y) from (x0, y0)? Not into a wall — but out
+    of one it stands in (put there by hand) it may."""
+    from shapely.geometry import Point
+    blk = _blocked(_state["lid"])
+    if blk is None:
+        return True
+    wu, near = blk
+    if not near.contains(Point(x, y)):
+        return True
+    return near.contains(Point(x0, y0)) and \
+        wu.distance(Point(x, y)) >= wu.distance(Point(x0, y0)) - 1e-6
 
 
 def _change_floor(k):
@@ -419,11 +514,13 @@ def start(panel, lid=None, index=0):
         s["cam"] = (QVector3D(cam.target), cam.distance, cam.yaw,
                     cam.pitch, getattr(cam, "fov_deg", 45.0),
                     getattr(cam, "perspective", True))
-        s["fov"] = WIDE if s["wide"] else FOV
+        s["fov0"] = float(getattr(cam, "fov_deg", 45.0) or 45.0)
+        s["fov"] = WIDE if s["wide"] else s["fov0"]
     if s["lid"] != lid:
         _put_back()
         s["hidden"] = _hide_above(panel, lid)
-    s.update(rooms=rs, lid=lid, i=index % len(rs))
+    s.update(rooms=rs, lid=lid, i=index % len(rs), block=None,
+             block_lid=None)
     name, poly = rs[s["i"]]
     _engage(panel)
     _stand(panel, name, poly, lid)
@@ -439,7 +536,7 @@ def step(panel, k):
 def set_wide(panel, on):
     s = _state
     s["wide"] = bool(on)
-    s["fov"] = WIDE if on else FOV
+    s["fov"] = WIDE if on else float(s.get("fov0") or 45.0)
     if s["on"]:
         _apply(True)
         _hint()
@@ -487,6 +584,11 @@ def fill_menu(panel, menu):
         lm.addAction(str(lv_.get("name") or lv_["id"]),
                      lambda i_=lv_["id"]: start(panel, i_, 0))
     menu.addSeparator()
+    b = menu.addAction("Walk through walls (off: only through doors and "
+                       "openings)")
+    b.setCheckable(True)
+    b.setChecked(bool(_state["free"]))
+    b.toggled.connect(lambda on: _state.update(free=bool(on)))
     a = menu.addAction(f"Wide angle ({WIDE:.0f}° view; the wheel sets "
                        "any angle)")
     a.setCheckable(True)

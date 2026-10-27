@@ -69,7 +69,9 @@ def faces(doc, lid, z0) -> list:
     from .engine import structure as S
     from .engine import walls as W
     st = doc["settings"]
-    if not st.get("curtains"):
+    every = bool(st.get("curtains"))
+    if not every and not any(o.get("curtain") == "curtain_on"
+                             for o in doc["arch"]["openings"]):
         return []
     arch = doc["arch"]
     col = dict((k, c) for k, _l, c in COLORS).get(
@@ -83,6 +85,9 @@ def faces(doc, lid, z0) -> list:
         if w is None or o["kind"] != "window" or \
                 w.get("kind", "line") != "line" or w.get("type") == "curtain":
             continue
+        if o.get("curtain") == "curtain_off" or \
+                (not every and o.get("curtain") != "curtain_on"):
+            continue                       # this window: none
         seg = W.centre(w)
         sd = _room_side(doc, w, seg, float(o["pos"]), rooms)
         if not sd:

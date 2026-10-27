@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1991,6 +1991,136 @@ def roof_terrace_faces(doc, s, z_top) -> list:
                 d_["color"] = DRAIN
                 out.append(d_)
     return out
+
+
+def trim_wall_stubs(doc, lid, most=0.2) -> int:
+    """Clean wall junctions: a wall that runs through another and sticks
+    out past its far face by a little (less than ``most``) — a stub the
+    line-pairing leaves at a T, not drawn in the CAD — is cut back to that
+    face. A wall carried on by another on the far side (a cross) is left.
+    The number of ends trimmed."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and math.dist(w["a"], w["b"]) > 0.05]
+    n = 0
+
+    def frame(w):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        return a, u, (-u[1], u[0]), L
+    for w in ws:
+        a_w, u_w, _n, L_w = frame(w)
+        for k in ("a", "b"):
+            E = w[k]
+            inward = u_w if k == "a" else (-u_w[0], -u_w[1])
+            for o in ws:
+                if o is w:
+                    continue
+                a_o, u_o, n_o, L_o = frame(o)
+                if abs(u_o[0] * u_w[0] + u_o[1] * u_w[1]) > 0.5:
+                    continue                 # (nearly) parallel: not a T
+                s_ = (E[0] - a_o[0]) * u_o[0] + (E[1] - a_o[1]) * u_o[1]
+                if s_ < 0.02 or s_ > L_o - 0.02:
+                    continue
+                d_ = (E[0] - a_o[0]) * n_o[0] + (E[1] - a_o[1]) * n_o[1]
+                h = float(o.get("t", 0.115)) / 2
+                # the wall comes from the side opposite its end's overshoot
+                side = 1.0 if d_ > 0 else -1.0
+                if not (h + 0.005 < abs(d_) < h + most):
+                    continue
+                if (inward[0] * n_o[0] + inward[1] * n_o[1]) * side > -0.3:
+                    continue                 # not running back through o
+                # carried on beyond (a cross): leave it
+                carried = False
+                for v in ws:
+                    if v is w or v is o:
+                        continue
+                    for kk in ("a", "b"):
+                        if math.dist(v[kk], E) < 0.08:
+                            carried = True
+                if carried:
+                    continue
+                # back along the wall to o's far face
+                c = abs(inward[0] * n_o[0] + inward[1] * n_o[1]) or 1.0
+                back = (abs(d_) - h) / c
+                if back >= L_w - 0.1:
+                    continue
+                w[k] = [round(E[0] + inward[0] * back, 4),
+                        round(E[1] + inward[1] * back, 4)]
+                n += 1
+                break
+    return n
+
+
+def close_wall_corners(doc, lid, reach=0.45) -> int:
+    """Clean L corners: two walls meeting at a corner (both ends near
+    where their centre lines cross) but stopping short of each other — a
+    notch the CAD does not draw — each carried on to the other's outer
+    face, so the corner is closed solid. The number of corners closed."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and math.dist(w["a"], w["b"]) > 0.1]
+    n = 0
+
+    def cross(p, u, q, v):
+        den = u[0] * v[1] - u[1] * v[0]
+        if abs(den) < 1e-6:
+            return None
+        t = ((q[0] - p[0]) * v[1] - (q[1] - p[1]) * v[0]) / den
+        return (p[0] + u[0] * t, p[1] + u[1] * t)
+    for i, A in enumerate(ws):
+        for B in ws[i + 1:]:
+            ua = (A["b"][0] - A["a"][0], A["b"][1] - A["a"][1])
+            ub = (B["b"][0] - B["a"][0], B["b"][1] - B["a"][1])
+            la, lb = math.hypot(*ua), math.hypot(*ub)
+            ua, ub = (ua[0] / la, ua[1] / la), (ub[0] / lb, ub[1] / lb)
+            sin_ = abs(ua[0] * ub[1] - ua[1] * ub[0])
+            if sin_ < 0.5:
+                continue                     # not a corner (< 30°)
+            X = cross(A["a"], ua, B["a"], ub)
+            if X is None:
+                continue
+            ka = "a" if math.dist(A["a"], X) < math.dist(A["b"], X) else "b"
+            kb = "a" if math.dist(B["a"], X) < math.dist(B["b"], X) else "b"
+            da, db = math.dist(A[ka], X), math.dist(B[kb], X)
+            ta, tb = float(A.get("t", 0.115)), float(B.get("t", 0.115))
+            if da > reach or db > reach:
+                continue
+            # already closed: each end at (or past) the other's far face
+            need_a = tb / 2 / sin_
+            need_b = ta / 2 / sin_
+            oa = (ua if ka == "b" else (-ua[0], -ua[1]))   # A's way out
+            ob = (ub if kb == "b" else (-ub[0], -ub[1]))
+            # where each end stands along its own line, from X
+            sa = (A[ka][0] - X[0]) * oa[0] + (A[ka][1] - X[1]) * oa[1]
+            sb = (B[kb][0] - X[0]) * ob[0] + (B[kb][1] - X[1]) * ob[1]
+            if sa >= need_a - 0.005 and sb >= need_b - 0.005:
+                continue
+            # the other walls at this corner (a T or a cross): leave it
+            def _par(C, u):
+                uc = (C["b"][0] - C["a"][0], C["b"][1] - C["a"][1])
+                lc = math.hypot(*uc) or 1.0
+                return abs(uc[0] * u[0] + uc[1] * u[1]) / lc > 0.95
+            busy = any(C is not A and C is not B and
+                       min(math.dist(C["a"], X), math.dist(C["b"], X))
+                       < reach and not _par(C, ua) and not _par(C, ub)
+                       for C in ws)
+            if busy:
+                continue
+            changed = False
+            if sa < need_a - 0.005:
+                A[ka] = [round(X[0] + oa[0] * need_a, 4),
+                         round(X[1] + oa[1] * need_a, 4)]
+                changed = True
+            if sb < need_b - 0.005:
+                B[kb] = [round(X[0] + ob[0] * need_b, 4),
+                         round(X[1] + ob[1] * need_b, 4)]
+                changed = True
+            n += changed
+    return n
 
 
 def drop_false_columns(doc, lid) -> int:
@@ -4287,6 +4417,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.fitout")
+    try:                       # L corners closed solid
+        rep["wall_corners"] = close_wall_corners(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.close_wall_corners")
+    try:                       # the stubs at wall junctions cut back
+        rep["wall_stubs"] = trim_wall_stubs(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.trim_wall_stubs")
     try:                       # a duct's box is not a column
         rep["false_columns"] = drop_false_columns(doc, lid)
     except Exception:  # noqa: BLE001
@@ -6785,7 +6925,9 @@ def _groups(arch, doc=None):
                 if c_.get("shape") == "poly" and c_.get("pts"):
                     ol_ = [(c_["x"] + p_[0], c_["y"] + p_[1])
                            for p_ in c_["pts"]]
-                parts_ = CS.rcc_faces(c_, ol_, min(zz), max(zz))
+                parts_ = CS.rcc_faces(
+                    c_, ol_, min(zz), max(zz),
+                    rebar=bool(doc["settings"].get("col_rebar", False)))
                 fl_ = []
                 for fs_, col_ in parts_:
                     for f_ in fs_:
@@ -7964,6 +8106,29 @@ def _finish_groups(doc):
                 for s_, q in whole:        # «Over the whole slab»
                     pieces += [g for g in getattr(q, "geoms", [q])
                                if g.geom_type == "Polygon" and g.area >= 0.3]
+                try:     # never under the walls, and held 20 mm back from
+                    from shapely.ops import unary_union as _uu4   # the
+                    wu_ = _uu4(SE.wall_polys(                     # edge:
+                        [w_ for w_ in arch["walls"] if w_["level"] == lid
+                         and not w_.get("rail")
+                         and W.why_not(w_) is None]))   # no line on the
+                    su_ = _uu4([_poly_of(s2) for s2 in arch["structure"]
+                                if s2["type"] == "slab"     # elevations
+                                and s2["level"] == lid and s2.get("corners")])
+                    np_ = []
+                    for p_ in pieces:
+                        q_ = p_
+                        if not wu_.is_empty:
+                            q_ = q_.difference(wu_.buffer(0.005))
+                        if not su_.is_empty:
+                            q_ = q_.intersection(su_.buffer(-0.02,
+                                                            join_style=2))
+                        np_ += [g for g in getattr(q_, "geoms", [q_])
+                                if g.geom_type == "Polygon" and g.area >= 0.1]
+                    pieces = np_
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("project edge finish trim")
                 if lv.get("kind") == "ground" and pieces and \
                         platform_on(doc):
                     # on the foundation platform: the finish only where the

@@ -206,12 +206,17 @@ FIELDS = {
                   "d_pull", "flush", "none")),
                 ("glass", "Glass type", "choice",
                  ("clear", "double", "lowe", "grey", "bronze", "green",
-                  "blue_ref", "silver_ref", "frosted"))],
+                  "blue_ref", "silver_ref", "frosted")),
+                ("arch_w", "Door architrave width (0 = none)", "len",
+                 (0.0, 0.30)),
+                ("curtain", "Window curtain", "choice",
+                 ("curtain_auto", "curtain_on", "curtain_off"))],
     "column": [("role", "Column type", "choice",
                 ("structural", "architectural")),
                ("astyle", "Architectural style", "choice",
-                ("round_smooth", "round_fluted", "corinthian",
-                 "square_smooth", "library")),
+                ("doric", "ionic", "corinthian", "composite", "tuscan",
+                 "round_smooth", "round_fluted", "square_smooth",
+                 "library")),
                ("shape", "Shape", "choice", ("rect", "round")),
                ("w", "Width / Ø", "len", (0.05, 5.0)),
                ("d", "Depth", "len", (0.05, 5.0)),
@@ -301,9 +306,16 @@ def _choice_labels() -> dict:
                 "architectural": "Architectural (casing / decorative)",
                 "round_smooth": "Round smooth (base, capital)",
                 "round_fluted": "Round fluted",
-                "corinthian": "Fluted, Corinthian capital",
+                "corinthian": "Corinthian (acanthus leaves)",
                 "square_smooth": "Square smooth (plinth, cap)",
-                "library": "Library column (IngeTrazo, round)"})
+                "library": "Library column (IngeTrazo, round)",
+                "doric": "Doric (fluted, cushion capital)",
+                "ionic": "Ionic (scroll volutes)",
+                "composite": "Composite (volutes over leaves)",
+                "tuscan": "Tuscan (plain, simple capital)",
+                "curtain_auto": "As the project setting",
+                "curtain_on": "Curtain on this window",
+                "curtain_off": "No curtain on this window"})
     try:
         from . import stairs as ST_
         out.update({k: lab for k, lab, _c in ST_.FINISHES })
@@ -3233,10 +3245,31 @@ class Panel(QWidget):
                                                   [rec])
         self.commit(doc, f"{kind.title()} added")
 
+    def _col_rebar(self, on):
+        doc = self.doc()
+        doc["settings"]["col_rebar"] = bool(on)
+        self.commit(doc, "Column reinforcement shown" if on else
+                    "Column reinforcement hidden")
+
     # ---- 4. structure -------------------------------------------------------------
     def _structure_part(self):
         box, body = _fold("6  Structure and foundation", "structure", False)
         f = _form(body)
+        self.s_rebar = QCheckBox("Structural columns: show the "
+                                 "reinforcement (bars and links seen "
+                                 "through the concrete)")
+        self.s_rebar.setToolTip(
+            "On: every structural (RCC) column shows its main bars and its "
+            "links / helix through see-through concrete — as on a "
+            "structural drawing. Off: bare concrete. Architectural columns "
+            "(the classical orders) are never shown this way.")
+        try:
+            self.s_rebar.setChecked(bool(self.doc()["settings"].get(
+                "col_rebar", False)))
+        except Exception:  # noqa: BLE001
+            self.s_rebar.setChecked(False)
+        self.s_rebar.toggled.connect(self._col_rebar)
+        f.addRow(self.s_rebar)
         self.s_slab = QCheckBox("Floor slab on import (outline layer, else "
                                 "round the walls)")
         self.s_slab_t = _spin(0.05, 2, 0.1016)          # 4"

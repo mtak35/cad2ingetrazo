@@ -122,7 +122,8 @@ def type_of(kind: str, rec: dict, walls: dict | None = None):
                                     "round" else "square_smooth")
         lab = {"round_smooth": "round smooth", "round_fluted": "round fluted",
                "corinthian": "Corinthian", "square_smooth": "square smooth",
-               "library": "library"}.get(st_, st_)
+               "library": "library", "doric": "Doric", "ionic": "Ionic",
+               "composite": "Composite", "tuscan": "Tuscan"}.get(st_, st_)
         return "column", f"column|arch|{st_}|{_mm(rec['w'])}|" \
             f"{_mm(rec.get('d') or rec['w'])}", \
             f"Architectural column, {lab} {_len(rec['w'])}"

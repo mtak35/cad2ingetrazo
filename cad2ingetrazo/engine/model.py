@@ -452,7 +452,8 @@ def _structure(raw, level_ids: set) -> list[dict]:
                     rec["role"] = e["role"]      # (his ask 2026-10-26)
                 if e.get("astyle") in ("round_smooth", "round_fluted",
                                        "corinthian", "square_smooth",
-                                       "library"):
+                                       "library", "doric", "ionic",
+                                       "composite", "tuscan"):
                     rec["astyle"] = e["astyle"]
                 for k_ in ("pier", "round_lib", "mass"):  # a pier box; a round
                     if e.get(k_):                # column of the library
@@ -632,6 +633,13 @@ def _openings(raw, wall_ids: set) -> list[dict]:
                 v_ = 0.0
             if v_ > 0:
                 rec[k_] = min(max(v_, lo_), hi_)
+        if o.get("arch_w") not in (None, ""):   # the door's architrave
+            try:
+                rec["arch_w"] = min(max(float(o["arch_w"]), 0.0), 0.30)
+            except (TypeError, ValueError):
+                pass
+        if o.get("curtain") in ("curtain_on", "curtain_off"):
+            rec["curtain"] = o["curtain"]
         if o.get("panel") in PANEL_KEYS and o.get("panel") != "auto":
             rec["panel"] = o["panel"]
         if o.get("handle") in HANDLE_KEYS and o.get("handle") != "auto":

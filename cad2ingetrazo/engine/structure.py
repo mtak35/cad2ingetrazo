@@ -1508,10 +1508,16 @@ def door_trim(o, p0, u, n, s0, s1, zs, zt, col) -> list:
     reveal, the wall's full thickness, both jambs and the head) and an
     architrave on both faces of the wall (two legs and a head)."""
     t2 = float(o["_t"]) / 2
-    L, A, D = LINING_T, ARCH_W, ARCH_T
+    L, D = LINING_T, ARCH_T
+    try:                          # its own architrave width (0: none)
+        A = float(o["arch_w"]) if o.get("arch_w") is not None else ARCH_W
+    except (TypeError, ValueError):
+        A = ARCH_W
     out = [_box(p0, u, n, s0, s0 + L, -t2, t2, zs, zt, col),       # linings
            _box(p0, u, n, s1 - L, s1, -t2, t2, zs, zt, col),
            _box(p0, u, n, s0, s1, -t2, t2, zt - L, zt, col)]
+    if A <= 0.001:
+        return out
     for c0, c1 in ((t2, t2 + D), (-t2 - D, -t2)):                 # architraves
         out += [_box(p0, u, n, s0 - A, s0 + L, c0, c1, zs, zt + A, col),
                 _box(p0, u, n, s1 - L, s1 + A, c0, c1, zs, zt + A, col),
