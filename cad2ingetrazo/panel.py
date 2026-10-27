@@ -5747,8 +5747,17 @@ class Panel(QWidget):
                                                    0.0)) < 1e-4 else "free")
         if kind == "opening" and rec.get("head") == "arch":
             rec = dict(rec, head="arch_" + str(rec.get("arch") or "semi"))
-        for key, label, typ, opt in FIELDS.get(kind, []):
+        fields_ = FIELDS.get(kind, [])
+        if kind == "opening":       # a door's dialog and a window's: each
+            ok_ = OPENING_FIELDS.get(rec.get("kind"), None)   # its own
+            if ok_ is not None:
+                fields_ = [(k_, lab_, t_, (OPENING_STYLES.get(
+                    rec.get("kind"), o_) if k_ == "style" else o_))
+                    for k_, lab_, t_, o_ in fields_ if k_ in ok_]
+        for key, label, typ, opt in fields_:
             if typ == "choice":
+                if rec.get(key) is not None and rec.get(key) not in opt:
+                    opt = tuple(opt) + (rec[key],)   # its own value kept
                 w = QComboBox()
                 w.addItems([CHOICE_LABELS.get(str(o), str(o)) for o in opt])
                 w._opts = list(opt)
@@ -6383,7 +6392,10 @@ class Panel(QWidget):
             rec.setdefault("frame_w", round(fw_, 4))
             rec.setdefault("frame_d", round(fd_, 4))
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"{rec.get('name', sel[0])} — CAD2IngeTrazo")
+        what_ = {"door": "Door", "window": "Window", "void": "Opening"}.get(
+            rec.get("kind"), "") if sel[0] == "opening" else ""
+        dlg.setWindowTitle((f"Edit {what_.lower()} · " if what_ else "") +
+                           f"{rec.get('name', sel[0])} — CAD2IngeTrazo")
         lay = QVBoxLayout(dlg)
         form = QFormLayout()
         lay.addLayout(form)
@@ -8671,3 +8683,25 @@ class Panel(QWidget):
             self._fill_selected()
         self._show_portion()
         self.retune_units()
+
+
+#: the fields of a door's dialog and of a window's (an opening's): each
+#: shows only what belongs to it
+OPENING_FIELDS = {
+    "door": {"kind", "w", "h", "pos", "swing", "face", "style", "leaves",
+             "head", "ring", "frame", "frame_w", "frame_d", "panel",
+             "handle", "glass", "arch_w", "grille", "grille_side"},
+    "window": {"kind", "w", "h", "sill", "pos", "style", "head", "ring",
+               "frame", "frame_w", "frame_d", "glass", "curtain", "grille",
+               "grille_side"},
+    "void": {"kind", "w", "h", "sill", "pos", "head", "ring", "grille",
+             "grille_side"},
+}
+#: and the opening types each may take
+OPENING_STYLES = {
+    "door": ("hinged", "main", "glass", "alu_glass", "louvre", "glazed",
+             "sliding", "pocket", "folding", "rolling", "garage"),
+    "window": ("sliding", "casement", "fixed", "louvre", "top-hung",
+               "glazed"),
+}
+

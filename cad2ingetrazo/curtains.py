@@ -42,6 +42,40 @@ def _room_side(doc, w, seg, pos, rooms):
     return 0
 
 
+def _inner_side(doc, lid, w, seg, pos, rooms):
+    """A curtain asked for on a window the rooms do not tell (both sides
+    rooms, or none read): the side under the floor slab and not out on a
+    balcony — else the wall's own side."""
+    import re
+    from shapely.geometry import Point, Polygon
+    n = (-seg.u[1], seg.u[0])
+    c = (seg.p0[0] + seg.u[0] * pos, seg.p0[1] + seg.u[1] * pos)
+    t2 = float(w["t"]) / 2
+    score = []
+    for sd in (1, -1):
+        q = Point(c[0] + n[0] * sd * (t2 + 0.4),
+                  c[1] + n[1] * sd * (t2 + 0.4))
+        v = 0
+        for r in rooms:
+            if r["poly"].contains(q):
+                v += 1 if not re.search(r"BALCON|TERRACE|SIT\s*OUT|OPEN",
+                                        str(r.get("name", "")), re.I) else -1
+        for e in doc["arch"]["structure"]:
+            if e["type"] == "slab" and e["level"] == lid and \
+                    e.get("corners"):
+                try:
+                    if Polygon(e["corners"]).contains(q):
+                        v += 1
+                except Exception:  # noqa: BLE001
+                    pass
+        score.append(v)
+    if score[0] > score[1]:
+        return 1
+    if score[1] > score[0]:
+        return -1
+    return int(w.get("side", 1) or 1)
+
+
 def _panel(p0, u, n, sa, sb, c, za, zb, col):
     """A pleated panel from sa to sb along the wall at offset c: a zigzag
     of vertical strips (one face each)."""
@@ -90,6 +124,8 @@ def faces(doc, lid, z0) -> list:
             continue                       # this window: none
         seg = W.centre(w)
         sd = _room_side(doc, w, seg, float(o["pos"]), rooms)
+        if not sd and o.get("curtain") == "curtain_on":
+            sd = _inner_side(doc, lid, w, seg, float(o["pos"]), rooms)
         if not sd:
             continue
         u = seg.u

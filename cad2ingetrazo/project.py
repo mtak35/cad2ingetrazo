@@ -2054,6 +2054,61 @@ def trim_wall_stubs(doc, lid, most=0.2) -> int:
     return n
 
 
+def drop_gap_walls(doc, lid) -> int:
+    """Walls made of the gap BETWEEN two walls: where the plan draws two
+    walls face to face with a cavity between them (a lift shaft beside a
+    stair, a duct against a room), the line-pairing may also pair the
+    two facing faces and fill the cavity with a wall — the two walls then
+    read merged into one fat mass. Such a wall (its both faces on other
+    walls' faces, over most of its length, no opening in it) is taken out;
+    so is a wall lying inside another one. The number taken out."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and math.dist(w["a"], w["b"]) > 0.05]
+    hosts = {o.get("wall") for o in arch["openings"]}
+
+    def fr(w):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        return a, u, (-u[1], u[0]), L
+    drop = set()
+    for W_ in ws:
+        if W_["id"] in hosts:
+            continue
+        a, u, n, L = fr(W_)
+        h = float(W_.get("t", 0.115)) / 2
+        cover = {1: 0.0, -1: 0.0}
+        inside = False
+        for o in ws:
+            if o is W_ or o["id"] in drop:
+                continue
+            ao, uo, no, Lo = fr(o)
+            if abs(u[0] * uo[0] + u[1] * uo[1]) < 0.995:
+                continue
+            off = (ao[0] - a[0]) * n[0] + (ao[1] - a[1]) * n[1]
+            ho = float(o.get("t", 0.115)) / 2
+            s0 = (ao[0] - a[0]) * u[0] + (ao[1] - a[1]) * u[1]
+            s1 = (o["b"][0] - a[0]) * u[0] + (o["b"][1] - a[1]) * u[1]
+            ov = min(L, max(s0, s1)) - max(0.0, min(s0, s1))
+            if ov <= 0:
+                continue
+            # wholly inside the other (a double of it)
+            if abs(off) + h <= ho + 0.01 and ov >= 0.9 * L and ho > h:
+                inside = True
+                break
+            # face to face: the other's face on this one's face
+            for sg in (1, -1):
+                if abs(sg * off - (h + ho)) < 0.015:
+                    cover[sg] += ov
+        if inside or (cover[1] >= 0.7 * L and cover[-1] >= 0.7 * L):
+            drop.add(W_["id"])
+    if drop:
+        arch["walls"] = [w for w in arch["walls"] if w.get("id") not in drop]
+    return len(drop)
+
+
 def trim_slab_slivers(doc, lid, most=0.15) -> int:
     """The floor slab flush with the outside walls: a thin strip of slab
     standing proud of the walls' outer face (the CAD's outline drawn a few
@@ -2200,6 +2255,103 @@ def slab_to_inner_faces(doc, lid) -> int:
             from .host import log_error
             log_error("project.slab_to_inner_faces slab")
             continue
+    return n
+
+
+def align_wall_runs(doc, lid, gap=0.6) -> int:
+    """Walls that carry on one another (in line, end to end or across a
+    junction) merged face to face: two pieces of one run drawn a few cm
+    off each other are put on one line — the same thickness: one centre
+    line; a thinner one going on from a thicker: their faces on the side
+    they share made flush. The shorter piece moves. The number moved."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and math.dist(w["a"], w["b"]) > 0.1]
+    ws.sort(key=lambda w: -math.dist(w["a"], w["b"]))
+    moved = set()
+    n = 0
+    for i, A in enumerate(ws):
+        a = A["a"]
+        L = math.dist(A["a"], A["b"])
+        u = ((A["b"][0] - a[0]) / L, (A["b"][1] - a[1]) / L)
+        nv = (-u[1], u[0])
+        hA = float(A.get("t", 0.115)) / 2
+        for B in ws[i + 1:]:
+            if B["id"] in moved:
+                continue
+            LB = math.dist(B["a"], B["b"])
+            ub = ((B["b"][0] - B["a"][0]) / LB, (B["b"][1] - B["a"][1]) / LB)
+            if abs(u[0] * ub[0] + u[1] * ub[1]) < 0.999:
+                continue
+            sa = [(p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1]
+                  for p in (B["a"], B["b"])]
+            oa = [(p[0] - a[0]) * nv[0] + (p[1] - a[1]) * nv[1]
+                  for p in (B["a"], B["b"])]
+            # end to end (or across a junction), not side by side
+            lo, hi = min(sa), max(sa)
+            if lo > L + gap or hi < -gap:
+                continue
+            if lo < L - 0.05 and hi > 0.05:
+                continue                     # overlapping along: parallel
+            off = (oa[0] + oa[1]) / 2
+            if abs(oa[0] - oa[1]) > 0.02:
+                continue
+            hB = float(B.get("t", 0.115)) / 2
+            if abs(hA - hB) < 0.015:
+                if 0.002 < abs(off) < 0.08:
+                    shift = -off             # onto A's centre line
+                else:
+                    continue
+            else:
+                # the faces on the same side: the nearer pair made flush
+                best = None
+                for sg in (1, -1):
+                    d_ = (off + sg * hB) - sg * hA
+                    if abs(d_) < 0.05 and (best is None or
+                                           abs(d_) < abs(best)):
+                        best = d_
+                if best is None or abs(best) < 0.002:
+                    continue
+                shift = -best
+            for k in ("a", "b"):
+                B[k] = [round(B[k][0] + nv[0] * shift, 4),
+                        round(B[k][1] + nv[1] * shift, 4)]
+            moved.add(B["id"])
+            n += 1
+    return n
+
+
+def default_upstands(doc, lid) -> int:
+    """Every balcony railing on its upstand: a railing the plan gave none
+    (read from its lines, or carried on to a wall) gets the project's
+    upstand (``terrace_curb_h``), run down over the slab's edge. The number
+    of railings given one."""
+    st = doc["settings"]
+    ch = float(st.get("terrace_curb_h", 0.3048) or 0.0)
+    if ch <= 0.01:
+        return 0
+    arch = doc["arch"]
+    td = float(st.get("slab_t", 0.1016) or 0.1016)
+    try:
+        ss = [float(e.get("t", td)) for e in arch["structure"]
+              if e["type"] == "slab" and e["level"] == lid]
+        if ss:
+            td = max(ss)
+    except Exception:  # noqa: BLE001
+        pass
+    n = 0
+    for w in arch["walls"]:
+        if w["level"] != lid or not w.get("rail") or \
+                float(w.get("curb_h") or 0.0) > 0.01:
+            continue
+        if not str(w.get("name", "")).startswith(("Balcony railing",
+                                                  "Terrace railing")):
+            continue
+        w["curb_h"] = round(ch, 4)
+        w["curb_t"] = CURB_T
+        w["curb_d"] = round(td, 4)
+        n += 1
     return n
 
 
@@ -4571,11 +4723,21 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.trim_slab_slivers")
+    try:                       # no wall filling the gap between two
+        rep["gap_walls"] = drop_gap_walls(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.drop_gap_walls")
     try:                       # the slab to the outside walls' inner face
         rep["slab_inner"] = slab_to_inner_faces(doc, lid)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.slab_to_inner_faces")
+    try:                       # pieces of one wall run face to face
+        rep["wall_runs"] = align_wall_runs(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.align_wall_runs")
     try:                       # L corners closed solid
         rep["wall_corners"] = close_wall_corners(doc, lid)
     except Exception:  # noqa: BLE001
@@ -4596,6 +4758,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.close_rail_gaps")
+    try:                       # every balcony railing on its upstand
+        rep["upstands"] = default_upstands(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.default_upstands")
     return rep
 
 
