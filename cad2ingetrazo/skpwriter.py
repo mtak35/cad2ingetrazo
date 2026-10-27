@@ -24,6 +24,21 @@ import inspect
 import math
 
 M_TO_IN = 39.37007874
+ASCII = False        # names written in plain ASCII only (see _nm)
+
+
+def _nm(s, n=80):
+    """A name for SketchUp: no control characters; with ``ASCII`` only
+    plain ASCII (· → -, ′ ″ → ' ", anything else dropped)."""
+    s = str(s or "")
+    s = "".join(c for c in s if c >= " " and c != "\x7f")
+    if ASCII:
+        s = (s.replace("\u00b7", "-").replace("\u2032", "'")
+             .replace("\u2033", '"').replace("\u2014", "-")
+             .replace("\u2013", "-").replace("\u00d7", "x")
+             .replace("\u00b2", "2").replace("\u00b0", " deg"))
+        s = s.encode("ascii", "ignore").decode("ascii")
+    return s[:n]
 
 
 def _kw(fn, **kw):
@@ -41,6 +56,36 @@ def _pt(v, m=None):
         v = m.map(v)
     return (round(v.x() * M_TO_IN, 4), round(v.y() * M_TO_IN, 4),
             round(v.z() * M_TO_IN, 4))
+
+
+def _clean(pts, tol=0.01):
+    """A loop (inches) without repeated points and without the points
+    standing in a straight run (OpenSKP's writer writes a face with
+    collinear vertices into a file SketchUp can't open —
+    «unexpected file format»)."""
+    out = []
+    for p in pts:
+        if not out or math.dist(p, out[-1]) > tol:
+            out.append(p)
+    if len(out) > 1 and math.dist(out[0], out[-1]) <= tol:
+        out.pop()
+    changed = True
+    while changed and len(out) > 3:
+        changed = False
+        for i in range(len(out)):
+            a, b, c = out[i - 1], out[i], out[(i + 1) % len(out)]
+            u = [b[k] - a[k] for k in range(3)]
+            w = [c[k] - b[k] for k in range(3)]
+            cr = (u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2],
+                  u[0] * w[1] - u[1] * w[0])
+            lu = math.sqrt(sum(x * x for x in u))
+            lw = math.sqrt(sum(x * x for x in w))
+            if lu < tol or lw < tol or \
+                    math.sqrt(sum(x * x for x in cr)) / max(lu, lw) < tol:
+                out.pop(i)
+                changed = True
+                break
+    return out
 
 
 def _rgba(col, opacity=1.0):
@@ -121,17 +166,38 @@ def _ensure_scaffold() -> None:
     mod._c2i_patched = True
 
 
-def save_skp(scene, path, progress=None) -> dict:
-    """Write ``scene`` to ``path`` as a .skp. {"definitions", "instances",
-    "groups", "faces"}; raises RuntimeError when OpenSKP is missing."""
+WRITER = ""          # which writer made the last file
+
+
+def new_builder():
+    """A blank .skp builder: OpenSKP 1.3.0's writer carried in
+    ``_openskp`` (IngeTrazo's own, older OpenSKP writes object references
+    past 16,384 wrongly — SketchUp then refuses the file as «unexpected
+    file format»); IngeTrazo's when ours can't load."""
+    global WRITER
+    try:
+        from ._openskp import create as _create
+        b = _create()
+        WRITER = "openskp 1.3.0 (CAD2IngeTrazo)"
+        return b
+    except Exception:  # noqa: BLE001 — a dependency missing: theirs
+        from .host import log_error
+        log_error("skpwriter: bundled OpenSKP")
     try:
         import openskp
     except ImportError as exc:
         raise RuntimeError("OpenSKP is not in this IngeTrazo") from exc
+    _ensure_scaffold()
+    WRITER = "openskp %s (IngeTrazo)" % getattr(openskp, "__version__", "?")
+    return openskp.create()
+
+
+def save_skp(scene, path, progress=None) -> dict:
+    """Write ``scene`` to ``path`` as a .skp. {"definitions", "instances",
+    "groups", "faces"}; raises RuntimeError when OpenSKP is missing."""
     from PySide6.QtGui import QMatrix4x4
 
-    _ensure_scaffold()
-    b = openskp.create()
+    b = new_builder()
     items = list(_walk(getattr(scene, "groups", [])))
     layers = {getattr(L, "name", ""): getattr(L, "visible", True)
               for L in getattr(scene, "layers", []) or []}
@@ -156,7 +222,7 @@ def save_skp(scene, path, progress=None) -> dict:
             name = "C2I %02X%02X%02X" % rgba[:3] + \
                 ("" if rgba[3] >= 255 else " %d%%" % round(rgba[3] / 2.55))
             mats[rgba] = b.add_material(
-                name, rgba[:3] if rgba[3] >= 255 else rgba,
+                _nm(name), rgba[:3] if rgba[3] >= 255 else rgba,
                 **_kw(b.add_material,
                       opacity=None if rgba[3] >= 255 else rgba[3] / 255.0))
     for g, m, lay, mat in items:
@@ -169,15 +235,18 @@ def save_skp(scene, path, progress=None) -> dict:
     # 2 tags
     tags: dict = {}
     for lay in sorted({lay for _g, _m, lay, _mt in items if lay}):
-        tags[lay] = b.add_layer(lay, **_kw(b.add_layer,
+        tags[lay] = b.add_layer(_nm(lay) or "Tag", **_kw(b.add_layer,
                                            hidden=not layers.get(lay, True)))
 
     has_holes = "holes" in inspect.signature(b.add_face).parameters
 
     def put(sink, f, m, mat, layer):
-        pts = [_pt(v.position, m) for v in f.loop]
-        holes = [[_pt(v.position, m) for v in h]
-                 for h in getattr(f, "hole_loops", None) or []]
+        pts = _clean([_pt(v.position, m) for v in f.loop])
+        if len(pts) < 3:
+            return 0
+        holes = [h_ for h_ in (_clean([_pt(v.position, m) for v in h])
+                               for h in getattr(f, "hole_loops", None) or [])
+                 if len(h_) >= 3]
         kw = dict(material=mats.get(_face_paint(f, mat)), layer=layer)
         try:
             if holes and not has_holes:
@@ -208,7 +277,7 @@ def save_skp(scene, path, progress=None) -> dict:
     for k, uses in defs.items():
         g0, _m0, lay0, mat0 = uses[0]
         name = str(getattr(g0, "name", "") or "Component").split(" · ")[0]
-        name = (name[:60] or "Component") + f" #{len(built) + 1}"
+        name = (_nm(name, 60) or "Component") + f" #{len(built) + 1}"
         d = b.add_component_definition(name)
         with d:
             for f in _faces(g0.mesh):
@@ -224,7 +293,7 @@ def save_skp(scene, path, progress=None) -> dict:
         if not fs:
             continue
         with b.add_group(**_kw(b.add_group,
-                               name=str(getattr(g, "name", "") or "")[:80],
+                               name=_nm(getattr(g, "name", "")),
                                layer=tags.get(lay))) as gb:
             for f in fs:
                 stats["faces"] += put(gb, f, None, mat, None)
@@ -235,7 +304,7 @@ def save_skp(scene, path, progress=None) -> dict:
             r = [m(i, j) for i in range(3) for j in range(3)]
             t = (m(0, 3) * M_TO_IN, m(1, 3) * M_TO_IN, m(2, 3) * M_TO_IN)
             b.add_instance(built[k], **_kw(
-                b.add_instance, name=str(getattr(g, "name", "") or "")[:80],
+                b.add_instance, name=_nm(getattr(g, "name", "")),
                 translation=t, matrix3x3=tuple(r), layer=tags.get(lay)))
             stats["instances"] += 1
 
