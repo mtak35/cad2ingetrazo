@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1993,6 +1993,141 @@ def roof_terrace_faces(doc, s, z_top) -> list:
     return out
 
 
+def drop_unsupported_walls(doc, lid, pl, P) -> int:
+    """Walls the plan does not draw: a wall whose two faces (and centre
+    line) find almost no line of the wall layer under them — made from a
+    shower's glass, a fixture's counter, a duct's outline — is taken out.
+    Walls holding a door or window, and walls placed by hand, stay. The
+    number taken out."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    if not pl or not P or not P.get("walls"):
+        return 0
+    lay = pl.get("layers") or []
+
+    def nm(i):
+        try:
+            n_ = lay[int(i)]
+        except Exception:  # noqa: BLE001
+            return ""
+        return n_ if isinstance(n_, str) else str(n_.get("name", ""))
+    segs = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+            for s_ in pl.get("segs") or []
+            if _match(nm(s_[4]), P["walls"])]
+    if not segs:
+        return 0
+    WL = unary_union(segs).buffer(0.03)
+    arch = doc["arch"]
+    hosts = {o.get("wall") for o in arch["openings"]}
+    drop = set()
+    for w in arch["walls"]:
+        if w["level"] != lid or w.get("rail") or "a" not in w or \
+                w.get("kind", "line") != "line" or w.get("user") or \
+                w["id"] in hosts or w.get("type") == "curtain":
+            continue
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 0.3:
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        n = (-u[1], u[0])
+        h = float(w.get("t", 0.115)) / 2
+        sup = []
+        for off in (h, -h, 0.0):
+            f = LineString([(a[0] + n[0] * off, a[1] + n[1] * off),
+                            (b[0] + n[0] * off, b[1] + n[1] * off)])
+            sup.append(f.intersection(WL).length / L)
+        if max(sup[0], sup[1]) < 0.25 and sup[2] < 0.3:
+            drop.add(w["id"])
+    if drop:
+        arch["walls"] = [w for w in arch["walls"] if w.get("id") not in drop]
+    return len(drop)
+
+
+BALCONY_ROOM = re.compile(r"BALCON|SIT\s*OUT|VERANDA|TERRACE|TERACE|"
+                          r"LOGGIA", re.I)
+BATH_ROOM = re.compile(r"BATH|TOILET|\bWC\b|W\.C|WASH|POWDER|LAV|"
+                       r"\bT\s*/\s*B\b|SHOWER", re.I)
+
+
+def balcony_doors_bath_windows(doc, lid) -> dict:
+    """A window opening onto a balcony made a sliding (glass) door — two
+    leaves, to the door height; a bathroom's window kept a window, high:
+    its sill at 5' (``bath_sill``), a ventilator under the lintel. Windows
+    set by hand stay. {"doors": n, "bath": n}."""
+    from shapely.geometry import Point
+    st = doc["settings"]
+    if not st.get("balcony_sliding", True):
+        return {}
+    arch = doc["arch"]
+    rooms = spaces.of_level(arch, lid)
+    walls = {w["id"]: w for w in arch["walls"] if w["level"] == lid}
+    head = float(st.get("door_h", 2.1336) or 2.1336)
+    bsill = float(st.get("bath_sill", 1.524) or 1.524)
+    out = {"doors": 0, "bath": 0}
+
+    def name_at(p):
+        for r in rooms:
+            try:
+                if r["poly"].contains(p):
+                    return str(r.get("name") or "")
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+    for i, o in enumerate(arch["openings"]):
+        w = walls.get(o.get("wall"))
+        if w is None or o.get("kind") != "window" or o.get("user") or \
+                w.get("kind", "line") != "line" or w.get("rail"):
+            continue
+        try:
+            seg = W.centre(w)
+        except Exception:  # noqa: BLE001
+            continue
+        u = seg.u
+        n = (-u[1], u[0])
+        c = (seg.p0[0] + u[0] * float(o["pos"]),
+             seg.p0[1] + u[1] * float(o["pos"]))
+        t2 = float(w["t"]) / 2 + 0.4
+        sides = [name_at(Point(c[0] + n[0] * t2 * sg, c[1] + n[1] * t2 * sg))
+                 for sg in (1, -1)]
+        names = [x for x in sides if x is not None]
+        if any(BATH_ROOM.search(x) for x in names):
+            h_ = max(min(float(o.get("h", 0.6)), head - bsill), 0.3)
+            if abs(float(o.get("sill", 0.0)) - bsill) > 0.01 or \
+                    abs(float(o.get("h", 0.0)) - h_) > 0.01:
+                o["sill"] = round(bsill, 4)
+                o["h"] = round(h_, 4)
+                out["bath"] += 1
+            continue
+        if any(BALCONY_ROOM.search(x) for x in names) and \
+                not all(BALCONY_ROOM.search(x) for x in names):
+            new = opening_as(o, "door", st)
+            new.update(style="sliding", leaves=2, sill=0.0,
+                       h=round(head, 4))
+            new.pop("curtain", None)
+            new["id"] = o["id"]
+            arch["openings"][i] = new
+            out["doors"] += 1
+    return out
+
+
+def _set_wall_end(doc, w, k, P) -> None:
+    """A straight wall's end ``k`` moved to ``P`` (on its line): its doors
+    and windows stay where they are in the world (their places are along
+    the wall from its «a» end)."""
+    a, b = w["a"], w["b"]
+    L = math.dist(a, b) or 1.0
+    u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+    P = [round(P[0], 4), round(P[1], 4)]
+    if k == "a":
+        d = (a[0] - P[0]) * u[0] + (a[1] - P[1]) * u[1]   # >0: longer
+        if abs(d) > 1e-6:
+            for o in doc["arch"]["openings"]:
+                if o.get("wall") == w["id"]:
+                    o["pos"] = round(float(o["pos"]) + d, 4)
+    w[k] = P
+
+
 def trim_wall_stubs(doc, lid, most=0.2) -> int:
     """Clean wall junctions: a wall that runs through another and sticks
     out past its far face by a little (less than ``most``) — a stub the
@@ -2019,36 +2154,28 @@ def trim_wall_stubs(doc, lid, most=0.2) -> int:
                 if o is w:
                     continue
                 a_o, u_o, n_o, L_o = frame(o)
-                if abs(u_o[0] * u_w[0] + u_o[1] * u_w[1]) > 0.5:
+                c_ = inward[0] * n_o[0] + inward[1] * n_o[1]
+                if abs(c_) < 0.5:
                     continue                 # (nearly) parallel: not a T
                 s_ = (E[0] - a_o[0]) * u_o[0] + (E[1] - a_o[1]) * u_o[1]
-                if s_ < 0.02 or s_ > L_o - 0.02:
+                if s_ < 0.05 or s_ > L_o - 0.05:
                     continue
-                d_ = (E[0] - a_o[0]) * n_o[0] + (E[1] - a_o[1]) * n_o[1]
                 h = float(o.get("t", 0.115)) / 2
-                # the wall comes from the side opposite its end's overshoot
-                side = 1.0 if d_ > 0 else -1.0
-                if not (h + 0.005 < abs(d_) < h + most):
+                dE = (E[0] - a_o[0]) * n_o[0] + (E[1] - a_o[1]) * n_o[1]
+                if abs(dE) > h + most:
                     continue
-                if (inward[0] * n_o[0] + inward[1] * n_o[1]) * side > -0.3:
-                    continue                 # not running back through o
-                # carried on beyond (a cross): leave it
-                carried = False
-                for v in ws:
-                    if v is w or v is o:
-                        continue
-                    for kk in ("a", "b"):
-                        if math.dist(v[kk], E) < 0.08:
-                            carried = True
-                if carried:
+                # the face on the wall's own side (where its body is)
+                sB = dE + c_ * 1.0
+                near = h if sB > 0 else -h
+                # E into o (or through it, a little): back to that face —
+                # the two walls meet face to face, no overlap
+                if (dE - near) * (1 if sB > 0 else -1) >= -0.002:
                     continue
-                # back along the wall to o's far face
-                c = abs(inward[0] * n_o[0] + inward[1] * n_o[1]) or 1.0
-                back = (abs(d_) - h) / c
-                if back >= L_w - 0.1:
+                t_ = (near - dE) / c_
+                if t_ <= 0.002 or t_ >= L_w - 0.1:
                     continue
-                w[k] = [round(E[0] + inward[0] * back, 4),
-                        round(E[1] + inward[1] * back, 4)]
+                _set_wall_end(doc, w, k, (E[0] + inward[0] * t_,
+                                          E[1] + inward[1] * t_))
                 n += 1
                 break
     return n
@@ -2398,8 +2525,6 @@ def close_wall_corners(doc, lid, reach=0.45) -> int:
             # where each end stands along its own line, from X
             sa = (A[ka][0] - X[0]) * oa[0] + (A[ka][1] - X[1]) * oa[1]
             sb = (B[kb][0] - X[0]) * ob[0] + (B[kb][1] - X[1]) * ob[1]
-            if sa >= need_a - 0.005 and sb >= need_b - 0.005:
-                continue
             # the other walls at this corner (a T or a cross): leave it
             def _par(C, u):
                 uc = (C["b"][0] - C["a"][0], C["b"][1] - C["a"][1])
@@ -2411,14 +2536,25 @@ def close_wall_corners(doc, lid, reach=0.45) -> int:
                        for C in ws)
             if busy:
                 continue
+            # a butt joint: the longer wall runs on to the other's outer
+            # face, the shorter stops at its inner face — face to face,
+            # no overlap, no notch
+            if la >= lb:
+                P_, kP, oP, nP = A, ka, oa, need_a
+                Q_, kQ, oQ, hP = B, kb, ob, ta / 2 / sin_
+            else:
+                P_, kP, oP, nP = B, kb, ob, need_b
+                Q_, kQ, oQ, hP = A, ka, oa, tb / 2 / sin_
             changed = False
-            if sa < need_a - 0.005:
-                A[ka] = [round(X[0] + oa[0] * need_a, 4),
-                         round(X[1] + oa[1] * need_a, 4)]
+            sP = (P_[kP][0] - X[0]) * oP[0] + (P_[kP][1] - X[1]) * oP[1]
+            sQ = (Q_[kQ][0] - X[0]) * oQ[0] + (Q_[kQ][1] - X[1]) * oQ[1]
+            if abs(sP - nP) > 0.003:
+                _set_wall_end(doc, P_, kP, (X[0] + oP[0] * nP,
+                                            X[1] + oP[1] * nP))
                 changed = True
-            if sb < need_b - 0.005:
-                B[kb] = [round(X[0] + ob[0] * need_b, 4),
-                         round(X[1] + ob[1] * need_b, 4)]
+            if abs(sQ + hP) > 0.003:
+                _set_wall_end(doc, Q_, kQ, (X[0] - oQ[0] * hP,
+                                            X[1] - oQ[1] * hP))
                 changed = True
             n += changed
     return n
@@ -4733,6 +4869,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.slab_to_inner_faces")
+    try:                       # balcony windows → sliding doors; bath
+        rep["balcony_bath"] = balcony_doors_bath_windows(doc, lid)
+    except Exception:  # noqa: BLE001        # windows high
+        from .host import log_error
+        log_error("project.balcony_doors_bath_windows")
+    try:                       # walls the plan does not draw: out
+        rep["unsupported_walls"] = drop_unsupported_walls(doc, lid, pl, P)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.drop_unsupported_walls")
     try:                       # pieces of one wall run face to face
         rep["wall_runs"] = align_wall_runs(doc, lid)
     except Exception:  # noqa: BLE001

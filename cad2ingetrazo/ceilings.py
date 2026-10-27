@@ -384,6 +384,11 @@ def build(doc, z_of, room_key) -> list:
                 out.append((lid, room["name"], c["type"], c["h"], fs,
                             room_key(lid, room)))
                 done_.append(poly)
+        try:                 # the beams round the stair well over it
+            out += _well_beams(doc, lid, order, z_of, wells)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("ceilings._well_beams")
         try:                 # the rest inside the outside walls (a hall,
             out += _rest(doc, lid, z_of, wells, done_)   # a corridor, a
         except Exception:  # noqa: BLE001                  # lobby…)
@@ -475,6 +480,58 @@ def _balcony(doc, lid, room, order, z_of, rails):
     if not fs:
         return None
     return (lid, room["name"], kind, h, fs)
+
+
+def _well_beams(doc, lid, order, z_of, wells) -> list:
+    """The edge beams round the stair well in the floor above (as round a
+    balcony): 9" wide, hung from the slab's soffit down to the false
+    ceiling, along the well's sides no wall closes."""
+    if wells is None or wells.is_empty:
+        return []
+    from shapely.ops import unary_union
+
+    from . import project as PJ
+    from . import slabedges as SE
+    from .engine import walls as W
+    arch = doc["arch"]
+    i = order.index(lid) if lid in order else -1
+    if i < 0 or i + 1 >= len(order):
+        return []
+    up = order[i + 1]
+    lvc = (doc.get("ceilings") or {}).get(lid) or {}
+    h = float(lvc.get("h", DEFAULT_H))
+    zc = z_of[lid] + h
+    t_up = 0.15
+    try:
+        t_up = max(float(s_.get("t", 0.15)) for s_ in
+                   PJ._floor_slabs(doc, up))
+    except Exception:  # noqa: BLE001
+        pass
+    zs = z_of[up] - t_up
+    if zs <= zc + 0.05:
+        zc = zs - 0.30                    # no room for a ceiling: a 1' beam
+    ws = [w for w in arch["walls"] if w["level"] in (lid, up)
+          and not w.get("rail") and W.why_not(w) is None]
+    WU = unary_union(SE.wall_polys(ws)) if ws else None
+    out = []
+    k = 0
+    for g in getattr(wells, "geoms", [wells]):
+        if g.geom_type != "Polygon" or g.area < 4.0:
+            continue                      # a duct / a shaft: no beam
+        edge = g.exterior
+        open_ = edge.difference(WU.buffer(0.12)) if WU is not None else edge
+        if open_.is_empty or open_.length < 0.5:
+            continue
+        band = open_.buffer(BEAM_W, cap_style=2, join_style=2).difference(g)
+        fs = []
+        for q in getattr(band, "geoms", [band]):
+            if q.geom_type == "Polygon" and q.area > 0.01:
+                fs += _slab(q, zc - 0.0125, zs)
+        if fs:
+            k += 1
+            out.append((lid, f"Stair well beam {k}", "beam", h,
+                        [(fs, BEAM_COLOR)], f"{lid}|wellbeam{k}"))
+    return out
 
 
 def _rest(doc, lid, z_of, wells, done) -> list:

@@ -726,7 +726,117 @@ def auto(doc, cad=None, flip=False) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("stairs rails_off_stairs")
+    try:                      # no sliver of landing run on under a flight
+        for st_ in doc["stairs"]:
+            clean_landings(st_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs.clean_landings")
+    try:                     # no thin notch of floor left open by the well
+        clean_well_holes(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs.clean_well_holes")
     return {"stairs": made, "cuts": cut, "traced": traced_n}
+
+
+def _opened(hp, thin=0.30, foot=None):
+    """The hole without its thin strips (narrower than ``thin``); with the
+    stair's ``foot``, without the thin strips of it beyond the stair (a
+    jog of a few cm along the landing's edge)."""
+    if foot is not None:
+        inside = hp.intersection(foot.buffer(0.02, join_style=2))
+        rest = hp.difference(foot.buffer(0.02, join_style=2))
+        rest = rest.buffer(-thin / 2, join_style=2).buffer(
+            thin / 2, join_style=2)
+        q = inside.union(rest).buffer(0.002, join_style=2).buffer(
+            -0.002, join_style=2)
+    else:
+        q = hp.buffer(-thin / 2, join_style=2).buffer(thin / 2,
+                                                      join_style=2)
+    if q.is_empty:
+        return None
+    if q.geom_type != "Polygon":
+        q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
+    q = q.intersection(hp)
+    if q.geom_type != "Polygon":
+        q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
+    if q.area < 0.9 * hp.area:
+        return None
+    return q.simplify(0.01)
+
+
+def clean_well_holes(doc, thin=0.30) -> int:
+    """A stair well's hole in the slab cleaned: the thin notches the cut
+    leaves round it (a strip of floor 25 cm wide left open beside the
+    landing, a jog where two cuts meet) closed with slab, so the floor
+    edge — and the railing on it — runs straight. How many holes."""
+    from shapely.geometry import Polygon
+    feet = []
+    for st in doc.get("stairs") or []:
+        try:
+            feet.append(Polygon([tuple(p[:2]) for p in st["corners"]]))
+        except Exception:  # noqa: BLE001
+            continue
+    n = 0
+    for e in doc["arch"]["structure"]:
+        if e["type"] != "slab" or not e.get("holes"):
+            continue
+        new = []
+        for hl in e["holes"]:
+            try:
+                hp = Polygon([tuple(p[:2]) for p in hl]).buffer(0)
+            except Exception:  # noqa: BLE001
+                new.append(hl)
+                continue
+            mine = [f for f in feet if hp.intersects(f) and
+                    hp.intersection(f).area > 0.3 * min(hp.area, f.area)]
+            if hp.is_empty or len(hl) < 5 or not mine:
+                new.append(hl)
+                continue
+            from shapely.ops import unary_union
+            q = _opened(hp, thin, unary_union(mine))
+            if q is None or abs(q.area - hp.area) < 1e-3:
+                new.append(hl)
+                continue
+            new.append([[round(x, 4), round(y, 4)]
+                        for x, y in list(q.exterior.coords)[:-1]])
+            n += 1
+        e["holes"] = new
+    return n
+
+
+def clean_landings(st, thin=0.15) -> int:
+    """A traced landing's outline cleaned: the thin strips the tracing
+    leaves along a flight's first riser (a few cm wide, the landing
+    carried on under the steps — a tread stuck out of the riser) are
+    cut off. The number of landings cleaned."""
+    from shapely.geometry import Polygon
+    n = 0
+    for lg in st.get("landings") or []:
+        cs = lg.get("corners") or []
+        if len(cs) < 5:
+            continue
+        try:
+            p = Polygon(cs).buffer(0)
+            q = p.buffer(-thin / 2, join_style=2).buffer(thin / 2,
+                                                         join_style=2)
+            if q.is_empty:
+                continue
+            if q.geom_type != "Polygon":
+                q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
+            q = q.intersection(p)
+            if q.geom_type != "Polygon":
+                q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
+            if q.area < 0.85 * p.area or abs(q.area - p.area) < 1e-4:
+                continue
+            q = q.simplify(0.005)
+            lg["corners"] = [[round(x, 4), round(y, 4)]
+                             for x, y in list(q.exterior.coords)[:-1]]
+            n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
 
 
 def _cut(arch, lid, corners) -> int:
@@ -1146,7 +1256,7 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
                 continue
             if hp.is_valid and hp.intersection(foot).area > 0.3 * min(
                     hp.area, foot.area):
-                holes.append(hp)
+                holes.append(_opened(hp, 0.30, foot) or hp)
     if not holes:
         return []
     walls = _walls_of(doc, st["to"])
@@ -1169,6 +1279,55 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
                                           tuple(ln[1][:2])]))
         except Exception:  # noqa: BLE001
             continue
+    # the stair railings' ends on this floor — the guard joined to them
+    anchors = []
+    try:
+        rs = _runs(st, z0)
+        last = max(r[0] for r in rs) if rs else -1
+        anchors += [r[3][:2] for r in rs if r[0] == last]
+    except Exception:  # noqa: BLE001
+        pass
+    for s2 in doc.get("stairs") or []:
+        if s2.get("level") != st["to"] or s2 is st:
+            continue
+        try:
+            anchors += [r[2][:2] for r in _runs(s2, 0.0) if r[0] == 0]
+        except Exception:  # noqa: BLE001
+            continue
+
+    def _snap(c):
+        # each end near a stair railing's end carried on, straight, to
+        # where that railing stops (then the few cm across to it)
+        a, b = tuple(c[0][:2]), tuple(c[-1][:2])
+        L = math.dist(a, b)
+        if L < 1e-6:
+            return [a, b]
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        head, tail = [], []
+        for k, end in ((0, a), (1, b)):
+            best = None
+            for an in anchors:
+                s_ = (an[0] - a[0]) * u[0] + (an[1] - a[1]) * u[1]
+                off = abs(-(an[0] - a[0]) * u[1] + (an[1] - a[1]) * u[0])
+                near = -s_ if k == 0 else s_ - L
+                if off < 0.15 and -0.05 < near < 0.6 and (
+                        best is None or abs(near) < best[0]):
+                    best = (abs(near), an, s_)
+            if best is None:
+                continue
+            an, s_ = best[1], best[2]
+            pj = (a[0] + u[0] * s_, a[1] + u[1] * s_)
+            seq = [pj] + ([an] if math.dist(pj, an) > 1e-3 else [])
+            if k == 0:
+                head = seq[::-1]
+            else:
+                tail = seq
+        if head:
+            a = None
+        if tail:
+            b = None
+        return head + [q for q in (a, b) if q is not None] + tail
+
     out = []
     for hp in holes:
         pts = list(hp.exterior.coords)[:-1]
@@ -1193,9 +1352,9 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
                 if g.geom_type != "LineString" or g.length < 0.3:
                     continue
                 c = list(g.coords)
-                out.append((RL.faces([(c[0][0], c[0][1], ztop),
-                                      (c[-1][0], c[-1][1], ztop)], h, kind,
-                                     gap=gap), None))
+                c = _snap([c[0], c[-1]])
+                out.append((RL.faces([(q[0], q[1], ztop) for q in c], h,
+                                     kind, gap=gap), None))
     return out
 
 
