@@ -1993,6 +1993,167 @@ def roof_terrace_faces(doc, s, z_top) -> list:
     return out
 
 
+def drop_false_columns(doc, lid) -> int:
+    """Columns read where there is none: a duct / shaft's crossed box (the
+    column stands in the slab's hole) and a box drawn out in the open, off
+    the floor and its walls. The number taken out."""
+    from shapely.geometry import LineString, Point, Polygon
+    arch = doc["arch"]
+    slabs = [e for e in arch["structure"] if e["type"] == "slab"
+             and e["level"] == lid and e.get("corners")]
+    if not slabs:
+        return 0
+    try:
+        floor = [Polygon(e["corners"]) for e in slabs]
+        holes = [Polygon(h) for e in slabs for h in (e.get("holes") or [])
+                 if len(h) >= 3]
+    except Exception:  # noqa: BLE001
+        return 0
+    walls = [LineString([w["a"], w["b"]]) for w in arch["walls"]
+             if w["level"] == lid and "a" in w and not w.get("rail")
+             and math.dist(w["a"], w["b"]) > 0.05]
+    plot = (arch.get("plot") or {}).get("corners") or []
+    pline = Polygon([tuple(q[:2]) for q in plot]).exterior \
+        if len(plot) >= 3 else None
+    drop = set()
+    for c in arch["structure"]:
+        if c["type"] != "column" or c["level"] != lid or c.get("user"):
+            continue
+        P_ = Point(c["x"], c["y"])
+        if any(h.buffer(0.05).contains(P_) for h in holes):
+            drop.add(c["id"])              # in a duct / shaft
+            continue
+        if min(f.distance(P_) for f in floor) > 0.6 and \
+                not any(w.distance(P_) < 0.6 for w in walls) and \
+                (pline is None or pline.distance(P_) > 1.0):
+            drop.add(c["id"])              # out in the open
+    if drop:
+        arch["structure"] = [e for e in arch["structure"]
+                             if e.get("id") not in drop]
+    return len(drop)
+
+
+def close_rail_gaps(doc, lid, reach=2.5) -> int:
+    """A balcony railing that stops short (the plan's railing ends a step
+    before the wall, the balcony's corner piece left out): carried on along
+    the floor slab's edge to the wall, column or railing it should meet.
+    Pieces of one railing a few cm apart are joined. The pieces added."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    rails = [w for w in arch["walls"] if w["level"] == lid and w.get("rail")
+             and w.get("kind", "line") == "line" and "a" in w]
+    if not rails:
+        return 0
+    # pieces of one run: ends a few cm apart meet
+    ends = [(w, k) for w in rails for k in ("a", "b")]
+    for i, (w, k) in enumerate(ends):
+        for v, j in ends[i + 1:]:
+            if v is w:
+                continue
+            p, q = tuple(w[k]), tuple(v[j])
+            if 1e-4 < math.dist(p, q) < 0.12:
+                m = [round((p[0] + q[0]) / 2, 4), round((p[1] + q[1]) / 2, 4)]
+                w[k] = m
+                v[j] = list(m)
+    slabs = [e for e in arch["structure"] if e["type"] == "slab"
+             and e["level"] == lid and e.get("corners")
+             and not e.get("zone")]
+    if not slabs:
+        return 0
+    try:
+        ring_polys = [Polygon(e["corners"]) for e in slabs]
+    except Exception:  # noqa: BLE001
+        return 0
+    solid_ = []
+    for w in arch["walls"]:
+        if w["level"] == lid and not w.get("rail") and "a" in w and \
+                w.get("kind", "line") == "line" and \
+                math.dist(w["a"], w["b"]) > 0.05:
+            solid_.append(LineString([w["a"], w["b"]]).buffer(
+                float(w.get("t", 0.115)) / 2 + 0.01, cap_style=2))
+    for c in arch["structure"]:
+        if c["type"] == "column" and c["level"] == lid:
+            try:
+                solid_.append(Polygon(S.column_outline(c, 0.0)).buffer(0.01))
+            except Exception:  # noqa: BLE001
+                pass
+    solid = unary_union(solid_) if solid_ else None
+    rail_u = unary_union([LineString([w["a"], w["b"]]) for w in rails])
+
+    def touches(pt, own):
+        P_ = Point(pt)
+        if solid is not None and solid.distance(P_) < 0.04:
+            return True
+        return any(v is not own and LineString([v["a"], v["b"]]).distance(
+            P_) < 0.04 for v in rails)
+    new = []
+    for w in list(rails):
+        own = LineString([w["a"], w["b"]])
+        for k in ("a", "b"):
+            E = tuple(w[k])
+            if touches(E, w):
+                continue
+            best = None
+            for pg in ring_polys:
+                ring = pg.exterior
+                if ring.distance(Point(E)) > 0.3:
+                    continue
+                L = ring.length
+                s0 = ring.project(Point(E))
+                O_ = tuple(w["b"] if k == "a" else w["a"])
+                ox, oy = O_[0] - E[0], O_[1] - E[1]
+                for sgn in (1, -1):
+                    q1 = ring.interpolate((s0 + sgn * 0.15) % L)
+                    if (q1.x - E[0]) * ox + (q1.y - E[1]) * oy > \
+                            0.5 * 0.15 * math.hypot(ox, oy):
+                        continue             # back along its own railing
+                    path = [E]
+                    ok = False
+                    st = 0.05
+                    while st <= reach:
+                        q = ring.interpolate((s0 + sgn * st) % L)
+                        if st < 0.3 and own.distance(q) < 0.03:
+                            break            # back along its own railing
+                        if solid is not None and solid.distance(q) < 0.04:
+                            ok = True
+                            path.append((q.x, q.y))
+                            break
+                        if rail_u.distance(q) < 0.04 and \
+                                own.distance(q) > 0.05:
+                            ok = True
+                            path.append((q.x, q.y))
+                            break
+                        path.append((q.x, q.y))
+                        st += 0.05
+                    if ok and (best is None or st < best[0]):
+                        best = (st, path)
+            if best is None or best[0] < 0.08:
+                continue
+            # the path as straight pieces (corners of the slab's edge kept)
+            pts = LineString(best[1]).simplify(0.02).coords
+            pts = list(pts)
+            for a, b in zip(pts, pts[1:]):
+                if math.dist(a, b) < 0.03:
+                    continue
+                r = {k_: v_ for k_, v_ in w.items()
+                     if k_ not in ("id", "name", "a", "b", "np_a", "np_b",
+                                   "cj_a", "cj_b", "auto")}
+                r["a"] = [round(a[0], 4), round(a[1], 4)]
+                r["b"] = [round(b[0], 4), round(b[1], 4)]
+                new.append(r)
+    if not new:
+        return 0
+    made = M.new_walls(arch["walls"], new)
+    n0 = sum(1 for w in arch["walls"] if str(w.get("name", ""))
+             .startswith("Balcony railing"))
+    for k_, w_ in enumerate(made, 1):
+        w_["name"] = f"Balcony railing {n0 + k_}"
+        w_["rail"] = new[0].get("rail", "ss_bars")
+    arch["walls"] += made
+    return len(made)
+
+
 def join_rail_corners(doc, lid, reach=0.35) -> int:
     """The railings of level ``lid`` meeting at corners joined there: both
     run to where their lines cross, ONE post on the corner (the other
@@ -4126,6 +4287,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.fitout")
+    try:                       # a duct's box is not a column
+        rep["false_columns"] = drop_false_columns(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.drop_false_columns")
+    try:                       # railings carried on to what they meet
+        rep["rail_gaps"] = close_rail_gaps(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.close_rail_gaps")
     return rep
 
 
@@ -6562,7 +6733,8 @@ def _groups(arch, doc=None):
                      **({"okind": e["okind"]} if e.get("okind") else {}),
                      **({"ctype": tkey, "mark": t["mark"]} if t else {})}}
         if e["kind"] == "column" and \
-                (cols_by.get(e["id"]) or {}).get("role") == "architectural":
+                (cols_by.get(e["id"]) or {}).get("role") == "architectural" \
+                and (cols_by.get(e["id"]) or {}).get("astyle") != "library":
             # an architectural column: its style drawn (base, shaft,
             # capital) — not the structural box
             try:
@@ -6597,9 +6769,52 @@ def _groups(arch, doc=None):
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("project._groups architectural column")
-        if not (t and t.get("lib")) and e["kind"] == "column" and \
+        if e["kind"] == "column" and not (t and t.get("lib")) and \
+                cols_by.get(e["id"]) is not None and \
                 (cols_by.get(e["id"]) or {}).get("role") != "architectural" \
-                and st_.get("round_lib", True) and not cols_lib_off:
+                and doc is not None and \
+                doc["settings"].get("rcc_columns_cast", True):
+            # a structural column: bare RCC as cast (chamfered arrises,
+            # shuttering joints, kicker) — never a styled column
+            try:
+                from . import colstyle as CS
+                c_ = cols_by[e["id"]]
+                zz = [q[2] for f_ in e["faces"]
+                      for q in (f_["loop"] if isinstance(f_, dict) else f_)]
+                ol_ = S.column_outline(c_, 0.0)
+                if c_.get("shape") == "poly" and c_.get("pts"):
+                    ol_ = [(c_["x"] + p_[0], c_["y"] + p_[1])
+                           for p_ in c_["pts"]]
+                parts_ = CS.rcc_faces(c_, ol_, min(zz), max(zz))
+                fl_ = []
+                for fs_, col_ in parts_:
+                    for f_ in fs_:
+                        d_ = dict(f_) if isinstance(f_, dict) else {
+                            "loop": f_, "holes": []}
+                        d_["color"] = col_
+                        fl_.append(d_)
+                g = Group(_mesh_of(fl_), name=name)
+                g.component = False
+                g.material = {"color": CS.CONCRETE, "opacity": 1.0,
+                              "name": "RCC (structural), fair-faced"}
+                g.layer = level_layer(names[e["level"]])
+                g.ifc = {"class": "IfcColumn", "name": name,
+                         "predefined": "COLUMN",
+                         "object_type": "Structural column",
+                         "load_bearing": True}
+                g.ext = {KEY: {"type": "column", "id": e["id"],
+                               "level": e["level"],
+                               **({"ctype": tkey, "mark": t["mark"]}
+                                  if t else {})}}
+                out.append(g)
+                continue
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project._groups structural column")
+        if not (t and t.get("lib")) and e["kind"] == "column" and \
+                (cols_by.get(e["id"]) or {}).get("role") == "architectural" \
+                and (cols_by.get(e["id"]) or {}).get("astyle") == "library" \
+                and not cols_lib_off:
             c_ = cols_by.get(e["id"])
             if c_ is not None and c_.get("shape") == "round":
                 # a round column: the IngeTrazo library's column, its shaft

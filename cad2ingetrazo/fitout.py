@@ -743,6 +743,12 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
                     "face": 1, "style": "", "lift": True}])
             # the landing door: its frame and two centre-opening leaves
             q = (cw.p0[0] + u[0] * pos, cw.p0[1] + u[1] * pos)
+            # its face toward the lobby: away from the car (3.32.0 — it
+            # was turned into the shaft, so the car hid it)
+            nn_ = (-u[1], u[0])
+            if nn_[0] * (q[0] - c.x) + nn_[1] * (q[1] - c.y) < 0:
+                nn_ = (u[1], -u[0])
+            nd = (-nn_[0], -nn_[1])
             doc.setdefault("fitout", []).append(
                 {"id": _new_id(), "level": lid, "kind": "liftdoor",
                  "c": [round(q[0], 4), round(q[1], 4)],
@@ -1348,6 +1354,19 @@ def groups(doc):
                 cx, cy = f["c"]
                 ux, uy = f["u"]
                 nx, ny = f["n"]            # toward the lobby
+                for m_ in doc.get("man_shafts") or []:   # (records made
+                    if m_.get("level") != lid or \
+                            m_.get("auto") != "lift":     # before 3.32:
+                        continue                          # into the shaft)
+                    try:
+                        from shapely.geometry import Point as _Pt
+                        from shapely.geometry import Polygon as _Pg
+                        if _Pg(m_["pts"]).buffer(0).contains(
+                                _Pt(cx + nx * 0.4, cy + ny * 0.4)):
+                            nx, ny = -nx, -ny
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
                 w_, h_ = float(f["w"]), float(f.get("h", 2.1336))
                 t_ = float(f.get("t", 0.2))
                 z0 = z + fin

@@ -211,7 +211,7 @@ FIELDS = {
                 ("structural", "architectural")),
                ("astyle", "Architectural style", "choice",
                 ("round_smooth", "round_fluted", "corinthian",
-                 "square_smooth")),
+                 "square_smooth", "library")),
                ("shape", "Shape", "choice", ("rect", "round")),
                ("w", "Width / Ø", "len", (0.05, 5.0)),
                ("d", "Depth", "len", (0.05, 5.0)),
@@ -302,7 +302,8 @@ def _choice_labels() -> dict:
                 "round_smooth": "Round smooth (base, capital)",
                 "round_fluted": "Round fluted",
                 "corinthian": "Fluted, Corinthian capital",
-                "square_smooth": "Square smooth (plinth, cap)"})
+                "square_smooth": "Square smooth (plinth, cap)",
+                "library": "Library column (IngeTrazo, round)"})
     try:
         from . import stairs as ST_
         out.update({k: lab for k, lab, _c in ST_.FINISHES })
@@ -4467,6 +4468,44 @@ class Panel(QWidget):
                          f"{len_txt(self.fc_h.value())} over the floor) on "
                          f"{len(lids)} level(s)")
 
+    def _ceiling_menu(self, menu) -> None:
+        """«False ceiling type» in the right-click menu: the rooms /
+        ceilings selected take the type picked (none selected: the level
+        picked at the top); the type they have now is ticked."""
+        from . import ceilings as CE
+        doc = self.doc()
+        rids = [i for k, i in self._selected_all() if k in ("room",
+                                                             "ceiling")]
+        now = None
+        if rids:
+            r0 = PJ.room_record(doc, rids[0])
+            now = (r0 or {}).get("ceiling")
+            what = f"{len(rids)} room(s)" if len(rids) > 1 else \
+                str((r0 or {}).get("name") or "the room")
+        else:
+            lid, lv = self.level()
+            if not lid:
+                return
+            what = str((lv or {}).get("name") or lid)
+        if now is None:
+            lid_ = None
+            if rids:
+                r0 = PJ.room_record(doc, rids[0])
+                lid_ = (r0 or {}).get("level")
+            else:
+                lid_, _lv = self.level()
+            now = (((doc.get("ceilings") or {}).get(lid_) or {})
+                   .get("type"))
+        menu.addSeparator()
+        m_ = menu.addMenu(f"CAD2IngeTrazo · False ceiling type — {what}")
+        for k_, lab_, *_r in CE.TYPES:
+            a_ = m_.addAction(lab_, lambda k=k_: self.apply_ceiling(k))
+            a_.setCheckable(True)
+            a_.setChecked(k_ == now)
+        m_.addSeparator()
+        m_.addAction("No false ceiling",
+                     lambda: self.apply_ceiling("none"))
+
     def apply_ceiling(self, kind):
         """A false ceiling of ``kind`` ("none": no ceiling) in the rooms
         selected (or their ceilings), else on the whole level picked."""
@@ -5973,6 +6012,10 @@ class Panel(QWidget):
                          lambda d_=drawn: self._shaft_drawn(d_, True))
             m_.addAction("Close the shaft / opening here",
                          lambda d_=drawn: self._shaft_close_drawn(d_))
+        try:            # the false ceiling's type / design, right here
+            self._ceiling_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu ceiling")
         sel = self._selected(fresh=True)
         if not sel:
             return

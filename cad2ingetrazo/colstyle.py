@@ -133,4 +133,65 @@ def faces(c, outline, z0, z1, style=None) -> list:
     return [(out, WHITE), (shade, SHADE)]
 
 
-__all__ = ["faces", "STYLES", "default_style"]
+CONCRETE = (0.62, 0.62, 0.60)
+JOINT = (0.50, 0.50, 0.49)
+
+
+def rcc_faces(c, outline, z0, z1) -> list:
+    """[(faces, colour)] of a STRUCTURAL column: bare reinforced concrete
+    as cast — the plain section (rectangular with chamfered arrises, or
+    round), its shuttering joints showing every 1.2 m, a kicker at its foot
+    and its top cut square under the slab. No base, no capital."""
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    H = max(z1 - z0, 0.3)
+    body, joint = [], []
+    if c.get("shape") == "round":
+        r = float(c.get("w", max(xs) - min(xs))) / 2
+
+        def sec(rr):
+            return _circle(cx, cy, rr, 32)
+        sh = sec(r)
+        kick = sec(r + 0.012)
+    else:
+        pts = [tuple(p[:2]) for p in outline]
+        if len(pts) > 4 or len(pts) < 3:
+            ang = math.radians(float(c.get("angle", 0.0) or 0.0))
+            w = float(c.get("w", max(xs) - min(xs)))
+            d = float(c.get("d", w) or w)
+            pts = _rect(cx, cy, w, d, ang)
+        ch = 0.02                       # 20 mm chamfered arrises
+        sh = []
+        n = len(pts)
+        for i in range(n):
+            a, b, c2 = pts[i - 1], pts[i], pts[(i + 1) % n]
+            for q in (a, c2):
+                L = math.dist(b, q) or 1.0
+                sh.append((b[0] + (q[0] - b[0]) * ch / L,
+                           b[1] + (q[1] - b[1]) * ch / L))
+        # the corners' two cut points in order (from a, to c)
+        kick = [((p[0] - cx) * 1.0 + cx, (p[1] - cy) * 1.0 + cy) for p in sh]
+        kick = [(cx + (p[0] - cx) * (1 + 0.024 / max(math.dist(p, (cx, cy)),
+                                                       0.05)),
+                 cy + (p[1] - cy) * (1 + 0.024 / max(math.dist(p, (cx, cy)),
+                                                       0.05)))
+                for p in sh]
+    kh = min(0.075, 0.05 * H)            # the kicker
+    joint += _solid(kick, z0, z0 + kh)
+    z = z0 + kh
+    lift = 1.2                           # a shuttering lift
+    while z < z1 - 1e-3:
+        zt = min(z + lift, z1)
+        body += _solid(sh, z, max(zt - (0.006 if zt < z1 else 0.0), z + 1e-3))
+        if zt < z1:                      # the joint, a hair proud
+            jj = [(cx + (p[0] - cx) * (1 + 0.004 / max(
+                math.dist(p, (cx, cy)), 0.05)),
+                cy + (p[1] - cy) * (1 + 0.004 / max(
+                    math.dist(p, (cx, cy)), 0.05))) for p in sh]
+            joint += _solid(jj, zt - 0.006, zt)
+        z = zt
+    return [(body, CONCRETE), (joint, JOINT)]
+
+
+__all__ = ["faces", "rcc_faces", "STYLES", "default_style"]

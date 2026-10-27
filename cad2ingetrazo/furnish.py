@@ -330,23 +330,42 @@ def back_to(dx, dy):
     return (math.degrees(math.atan2(dy, dx)) - 90.0) % 360.0
 
 
-def face_wall(poly, cx, cy, ex, ey, reach=0.75):
+def face_wall(poly, cx, cy, ex, ey, reach=0.75, own=None, back=None):
     """For an item centred (cx, cy), ``ex`` × ``ey`` across in the world, in
     the room ``poly``: (turn °, fit [along the wall, across it]) with its
     back to the nearest wall — or None when no wall is near."""
-    from shapely.geometry import LineString, Point, box
+    from shapely.geometry import LineString, Point, Polygon, box
     foot = box(cx - ex / 2, cy - ey / 2, cx + ex / 2, cy + ey / 2)
+    if own:                        # its own sides and turn (lx, ly, rot°)
+        ca_, sa_ = math.cos(math.radians(own[2])), \
+            math.sin(math.radians(own[2]))
+        foot = Polygon([(cx + ca_ * sx * own[0] / 2 - sa_ * sy * own[1] / 2,
+                         cy + sa_ * sx * own[0] / 2 + ca_ * sy * own[1] / 2)
+                        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))])
     pts = list(poly.exterior.coords)
+    ax_ = None                     # the side its back is on, by its kind:
+    if own and back in ("short", "long"):   # a WC's / bed's short end,
+        ca_, sa_ = math.cos(math.radians(own[2])), \
+            math.sin(math.radians(own[2]))  # a vanity's long side
+        long_x = own[0] >= own[1]
+        ax_ = (ca_, sa_) if long_x == (back == "long") else (-sa_, ca_)
     best = None
-    for a, b in zip(pts, pts[1:]):
-        L = math.dist(a, b)
-        if L < 0.3:
-            continue
-        d = LineString([a, b]).distance(foot)
-        if d > reach:
-            continue
-        if best is None or d < best[0]:
-            best = (d, a, b, L)
+    for pass_ in ((0, 1) if ax_ else (1,)):
+        for a, b in zip(pts, pts[1:]):
+            L = math.dist(a, b)
+            if L < 0.3:
+                continue
+            if pass_ == 0:       # a wall along that side only
+                if abs((b[0] - a[0]) / L * ax_[0] +
+                       (b[1] - a[1]) / L * ax_[1]) < 0.9:
+                    continue
+            d = LineString([a, b]).distance(foot)
+            if d > reach:
+                continue
+            if best is None or d < best[0]:
+                best = (d, a, b, L)
+        if best is not None:
+            break
     if best is None:
         return None
     _d, a, b, L = best
@@ -359,6 +378,13 @@ def face_wall(poly, cx, cy, ex, ey, reach=0.75):
         n = (-n[0], -n[1])
     along = abs(u[0]) * ex + abs(u[1]) * ey
     across = abs(u[1]) * ex + abs(u[0]) * ey
+    if own:                        # its sides, by the one along the wall
+        ca_, sa_ = math.cos(math.radians(own[2])), \
+            math.sin(math.radians(own[2]))
+        if abs(ca_ * u[0] + sa_ * u[1]) >= 0.7071:
+            along, across = own[0], own[1]
+        else:
+            along, across = own[1], own[0]
     return back_to(*n), [along, across]
 
 
@@ -411,6 +437,16 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                 near = MultiPoint(wp_).convex_hull.buffer(3.0)
         except Exception:  # noqa: BLE001
             near = None
+        wall_u = None                    # the floor's walls, as drawn
+        try:
+            from shapely.geometry import LineString as _LS
+            from shapely.ops import unary_union as _uu
+            wall_u = _uu([_LS([tuple(w_["a"]), tuple(w_["b"])]).buffer(
+                max(float(w_.get("t", 0.115)), 0.05) / 2, cap_style=2)
+                for w_ in arch["walls"] if w_["level"] == lid and "a" in w_
+                and math.dist(w_["a"], w_["b"]) > 0.05])
+        except Exception:  # noqa: BLE001
+            wall_u = None
         fix_rooms = set()                # rooms holding a sanitary block
         for ins in blocks:
             if re.search(r"FIX|SANIT|PLUMB|TOILET|\bWC\b|\bWB\b|BASIN",
@@ -452,6 +488,13 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                 a_ = math.radians(rot)   # its footprint in the world
                 dx = abs(math.cos(a_)) * lx + abs(math.sin(a_)) * ly
                 dy = abs(math.sin(a_)) * lx + abs(math.cos(a_)) * ly
+            if ins.get("odim"):          # drawn turned inside the block
+                lx, ly = float(ins["odim"][0]), float(ins["odim"][1])
+                rot = float(ins["orot"]) % 360.0
+                cx, cy = float(ins["oc"][0]), float(ins["oc"][1])
+                a_ = math.radians(rot)
+                dx = abs(math.cos(a_)) * lx + abs(math.sin(a_)) * ly
+                dy = abs(math.sin(a_)) * lx + abs(math.cos(a_)) * ly
             L, W = max(lx, ly), min(lx, ly)
             room = None
             P_ = Point(cx, cy)
@@ -489,10 +532,35 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                     fit = [ly, lx]
                 else:
                     fit = [lx, ly]
-            if kind in WALL_KINDS and room is not None:
-                fw = face_wall(room["poly"], cx, cy, dx, dy)
+            space = room["poly"] if room is not None else None
+            if space is None and kind in WALL_KINDS and wall_u is not None:
+                try:             # no room read: the space the walls leave
+                    from shapely.geometry import box as _bx
+                    fr_ = _bx(cx - 2.5, cy - 2.5, cx + 2.5, cy + 2.5
+                              ).difference(wall_u)
+                    for g_ in getattr(fr_, "geoms", [fr_]):
+                        if g_.geom_type == "Polygon" and \
+                                g_.buffer(0.3).contains(P_):
+                            space = g_
+                            break
+                except Exception:  # noqa: BLE001
+                    space = None
+            if kind in WALL_KINDS and space is not None:
+                fw = face_wall(space, cx, cy, dx, dy,
+                               own=(lx, ly, rot),
+                               back=("short" if kind == "wc"
+                                     else "long" if kind in (
+                                         "basin", "wardrobe", "sofa", "tv")
+                                     else None))
                 if fw is not None:       # its back to the wall, facing in
                     turn, fit = fw
+                    # square with the block as drawn (a quarter turn of it)
+                    k_ = round(((turn - rot) % 360.0) / 90.0) % 4
+                    turn = (rot + 90.0 * k_) % 360.0
+                    if k_ % 2 == 1:
+                        fit = [ly, lx]
+                    else:
+                        fit = [lx, ly]
             rec = {"id": __import__("uuid").uuid4().hex[:8], "level": lid,
                    "key": e["key"], "name": e["name"], "x": round(cx, 4),
                    "y": round(cy, 4), "rot": round(turn % 360.0, 3),
@@ -505,6 +573,43 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                       else {})}
             doc["furniture"].append(rec)
             got[kind] = got.get(kind, 0) + 1
+        try:                 # a bed turned by its bedside tables: its
+            beds_ = [f for f in doc["furniture"] if f["level"] == lid
+                     and f.get("kind") == "bed" and f.get("cad")]
+            tabs_ = [f for f in doc["furniture"] if f["level"] == lid
+                     and f.get("kind") in ("sidetable", "chair")
+                     and f.get("cad")]
+            for b in beds_:           # head between them
+                nb = sorted(tabs_, key=lambda t: math.dist(
+                    (t["x"], t["y"]), (b["x"], b["y"])))[:2]
+                if len(nb) < 2 or any(math.dist((t["x"], t["y"]),
+                                                (b["x"], b["y"])) > 1.9
+                                      for t in nb):
+                    continue
+                ux, uy = nb[1]["x"] - nb[0]["x"], nb[1]["y"] - nb[0]["y"]
+                Lh = math.hypot(ux, uy)
+                if Lh < 0.9:
+                    continue
+                mx, my = (nb[0]["x"] + nb[1]["x"]) / 2, \
+                    (nb[0]["y"] + nb[1]["y"]) / 2
+                nx, ny = -uy / Lh, ux / Lh          # across the head line
+                if (mx - b["x"]) * nx + (my - b["y"]) * ny < 0:
+                    nx, ny = -nx, ny * -1
+                fb = b.get("fit") or [1.8, 2.0]
+                wid = min(max(min(fb), 0.9), 2.0, Lh - 0.3)
+                ln_ = min(max(fb), 2.15)
+                b["rot"] = round(back_to(nx, ny), 3)
+                b["fit"] = [round(wid, 4), round(ln_, 4)]
+                # its head on the line of the tables
+                off = (mx - b["x"]) * nx + (my - b["y"]) * ny
+                sh = off + 0.2 - ln_ / 2       # tables 0.2 off the wall
+                b["x"] = round(b["x"] + nx * sh, 4)
+                b["y"] = round(b["y"] + ny * sh, 4)
+                for t in nb:              # the tables square with it
+                    t["rot"] = b["rot"]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("furnish.bed_heads")
         try:                 # a small square by a bed: its bedside table
             beds = [f for f in doc["furniture"] if f["level"] == lid
                     and f.get("kind") == "bed" and f.get("cad")]

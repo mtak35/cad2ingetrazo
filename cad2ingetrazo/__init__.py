@@ -11,7 +11,7 @@ ArchXQ IT Lite (c) Orlando Souza / XQ, GPL-3.0-or-later.
 """
 from __future__ import annotations
 
-__version__ = "3.31.0"
+__version__ = "3.32.0"
 TITLE = "CAD2IngeTrazo"
 
 _panel = None
@@ -61,6 +61,13 @@ def setup(app) -> None:
         menu.addSeparator()
         menu.addAction("3D view (whole model, clean)", _panel.show_3d)
         menu.addAction("Plan of the current level", _panel.show_plan)
+        try:                              # walk through the rooms
+            from . import walk as _walk
+            wm = menu.addMenu("Walkthrough (inside the rooms)")
+            wm.aboutToShow.connect(lambda m=wm: _walk.fill_menu(_panel, m))
+            _walk.fill_menu(_panel, wm)
+        except Exception:  # noqa: BLE001
+            log_error("setup.walkthrough")
         menu.addAction("Site plan (plot and setbacks)", _panel.show_site)
         menu.addAction("Make sheets", _panel.make_sheets)
         menu.addAction("Open sheets", _panel.open_sheets)

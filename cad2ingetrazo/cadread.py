@@ -482,7 +482,25 @@ def _emit(e, inherit, depth, sag, out) -> None:
                        for s in mine for v in ((s[0], s[1]), (s[2], s[3]))]
                 ly_ = [sa * (v[0] - ins[0]) + ca * (v[1] - ins[1])
                        for s in mine for v in ((s[0], s[1]), (s[2], s[3]))]
+                ob_ = None              # its tightest box, any angle:
+                try:                    # a block drawn turned inside
+                    from shapely.geometry import MultiPoint as _MP
+                    rr_ = _MP(list(zip(lx_, ly_))).minimum_rotated_rectangle
+                    cs_ = list(rr_.exterior.coords)[:4]
+                    e1 = (cs_[1][0] - cs_[0][0], cs_[1][1] - cs_[0][1])
+                    e2 = (cs_[2][0] - cs_[1][0], cs_[2][1] - cs_[1][1])
+                    w1, w2 = math.hypot(*e1), math.hypot(*e2)
+                    ab_ = (max(lx_) - min(lx_)) * (max(ly_) - min(ly_))
+                    if w1 * w2 < 0.8 * ab_ and min(w1, w2) > 0.05 and \
+                            max(w1, w2) > 1.2 * min(w1, w2):
+                        an_ = math.degrees(math.atan2(e1[1], e1[0]))
+                        ob_ = [an_, w1, w2,
+                               sum(c[0] for c in cs_) / 4,
+                               sum(c[1] for c in cs_) / 4]
+                except Exception:  # noqa: BLE001
+                    ob_ = None
                 out["inserts"].append({
+                    **({"obox": ob_} if ob_ else {}),
                     "name": e.dxf.name, "layer": lay,
                     "x": ins[0], "y": ins[1],
                     "rot": rot_,
@@ -657,9 +675,21 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
         oc = [w_(m_[0] + sx * hx, m_[1] + sy * hy)
               for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
         return {"lc": w_(m_[0], m_[1]), "ocorners": oc}
+    def _ob(i):
+        """A block drawn turned inside its definition (the plan at 45°
+        with blocks inserted square): its true sides and turn."""
+        o_ = i.get("obox")
+        if not o_:
+            return {}
+        a_ = math.radians(i["rot"])
+        ca, sa = math.cos(a_), math.sin(a_)
+        c_ = T(i["x"] + ca * o_[3] - sa * o_[4],
+               i["y"] + sa * o_[3] + ca * o_[4])
+        return {"orot": i["rot"] + rot_deg + o_[0],
+                "odim": [o_[1] * k, o_[2] * k], "oc": c_}
     inserts = [dict(i, x=T(i["x"], i["y"])[0], y=T(i["x"], i["y"])[1],
                     rot=i["rot"] + rot_deg, corners=box(i["box"]),
-                    **_ld(i), **_lc(i))
+                    **_ld(i), **_lc(i), **_ob(i))
                for i in drawing.get("inserts", ())]
     return {"segs": segs, "layers": layers, "inserts": inserts,
             "dashed": dashed,
