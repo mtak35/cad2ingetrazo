@@ -342,6 +342,20 @@ def build(doc, z_of, room_key) -> list:
                 continue
             rec_ = room.get("rec") or {}
             if rec_.get("ceiling") not in BY and _open_air(room, rails):
+                if rec_.get("ceiling") != "none" and \
+                        doc["settings"].get("balcony_ceiling", True) and \
+                        re.search(BALCONY, str(room.get("name", "")), re.I) \
+                        or (rec_.get("ceiling") != "none" and
+                            doc["settings"].get("balcony_ceiling", True) and
+                            not re.search(NO_CEILING,
+                                          str(room.get("name", "")), re.I)):
+                    try:          # a balcony: its ceiling and edge beam
+                        b_ = _balcony(doc, lid, room, order, z_of, rails)
+                        if b_:
+                            out.append(b_ + (room_key(lid, room),))
+                    except Exception:  # noqa: BLE001
+                        from .host import log_error
+                        log_error("ceilings._balcony")
                 continue
             c = room_ceiling(doc, lid, room_key(lid, room))
             rec = room.get("rec") or {}
@@ -376,6 +390,91 @@ def build(doc, z_of, room_key) -> list:
             from .host import log_error
             log_error("ceilings._rest")
     return out
+
+
+#: rooms out in the open that still get a false ceiling (under the floor
+#: above): balconies, sit-outs, verandahs
+BALCONY = r"BALCON|SIT\s*OUT|VERANDA|PORCH|LOGGIA"
+#: the beam round a balcony's open sides: 9" wide, hung from the slab
+#: above down to the false ceiling
+BEAM_W = 0.2286
+BEAM_COLOR = (0.93, 0.92, 0.89, 1.0)
+
+
+def _balcony(doc, lid, room, order, z_of, rails):
+    """(level, name, kind, h, [(faces, colour)]) of a balcony's false
+    ceiling with the periphery beam along its open sides (its railings,
+    the edges no wall closes), the beam from the soffit of the slab above
+    down to the ceiling — or None when no floor / roof is over it."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from . import project as PJ
+    from . import slabedges as SE
+    from .engine import walls as W
+    arch = doc["arch"]
+    i = order.index(lid) if lid in order else -1
+    if i < 0 or i + 1 >= len(order):
+        return None                       # nothing over it
+    up = order[i + 1]
+    poly = room["poly"]
+    over = []
+    for s_ in PJ._floor_slabs(doc, up):
+        try:
+            over.append(Polygon(s_["corners"]).buffer(0))
+        except Exception:  # noqa: BLE001
+            continue
+    if not over:
+        return None
+    cover = poly.intersection(unary_union(over))
+    if cover.area < 0.5 * poly.area:
+        return None                       # open to the sky
+    lvc = (doc.get("ceilings") or {}).get(lid) or {}
+    rec = room.get("rec") or {}
+    kind = rec.get("ceiling") if rec.get("ceiling") in BY else \
+        doc["settings"].get("balcony_ceiling_type") or \
+        lvc.get("type", "gypsum")
+    if kind not in BY:
+        kind = "gypsum"
+    h = float(rec.get("ceiling_h") or lvc.get("h", DEFAULT_H))
+    z0 = z_of[lid]
+    zc = z0 + h
+    t_up = 0.15
+    try:
+        t_up = max(float(s_.get("t", 0.15)) for s_ in PJ._floor_slabs(
+            doc, up))
+    except Exception:  # noqa: BLE001
+        pass
+    zs = z_of[up] - t_up                  # the soffit of the slab above
+    if zs <= zc + 0.02:
+        zs = zc + 0.02
+    ws = [w for w in arch["walls"] if w["level"] == lid
+          and not w.get("rail") and W.why_not(w) is None]
+    WU = unary_union(SE.wall_polys(ws)) if ws else None
+    cover = cover.buffer(-0.005)
+    edge = cover.exterior if cover.geom_type == "Polygon" else \
+        unary_union([g.exterior for g in cover.geoms])
+    open_ = edge.difference(WU.buffer(0.12)) if WU is not None else edge
+    band = None
+    if not open_.is_empty:
+        band = open_.buffer(BEAM_W, cap_style=2, join_style=2) \
+            .intersection(cover)
+    fs = []
+    ceil = cover.difference(band) if band is not None and \
+        not band.is_empty else cover
+    for g in getattr(ceil, "geoms", [ceil]):
+        if g.geom_type == "Polygon" and g.area > 0.1:
+            fs += faces(g, zc, kind)
+    if band is not None:
+        bf = []
+        for g in getattr(band, "geoms", [band]):
+            if g.geom_type == "Polygon" and g.area > 0.01:
+                bf += _slab(g, zc - 0.0125, zs)
+        if bf:
+            fs.append((bf, BEAM_COLOR))
+    if not fs:
+        return None
+    return (lid, room["name"], kind, h, fs)
 
 
 def _rest(doc, lid, z_of, wells, done) -> list:

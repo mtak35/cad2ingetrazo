@@ -68,30 +68,28 @@ def install(app, dock, panel) -> None:
     c.toggled.connect(lambda on: panel.set_cad_lines(on))
     tb.addAction(c)
     panel._tb_cad = c
-    # false ceilings: a type for the rooms selected (or the whole level)
+    # the walkthrough: a click walks into the biggest room of the level
+    # picked; the arrow beside it lists the rooms, levels, wide angle
     try:
         from PySide6.QtWidgets import QMenu, QToolButton
 
-        from . import ceilings as CE
+        from . import walk as WK
         fb = QToolButton(tb)
-        fb.setText("False ceiling")
-        fb.setToolTip("False ceiling: pick a type — for the rooms (or "
-                      "ceilings) selected in the model, else for every "
-                      "room of the level picked in the panel")
-        fb.setPopupMode(QToolButton.InstantPopup)
+        fb.setText("Walkthrough")
+        fb.setToolTip("Walkthrough: walk inside the rooms at eye level "
+                      "(W/A/S/D or arrows, drag to look, wheel = angle of "
+                      "view); Esc to come out")
+        fb.setPopupMode(QToolButton.MenuButtonPopup)
         m = QMenu(fb)
-        for k, lab, *_r in CE.TYPES:
-            act = m.addAction(lab)
-            act.triggered.connect(lambda _c=False, kk=k:
-                                  panel.apply_ceiling(kk))
-        m.addSeparator()
-        act = m.addAction("No false ceiling")
-        act.triggered.connect(lambda _c=False: panel.apply_ceiling("none"))
+        m.aboutToShow.connect(lambda mm=m: WK.fill_menu(panel, mm))
+        WK.fill_menu(panel, m)
         fb.setMenu(m)
+        fb.clicked.connect(lambda _c=False: WK.start(panel))
         tb.addWidget(fb)
+        panel._tb_walk = fb
     except Exception:  # noqa: BLE001
         from .host import log_error
-        log_error("toolbar false ceiling menu")
+        log_error("toolbar walkthrough")
     tb.show()
     try:
         dock.setWindowIcon(icon())
