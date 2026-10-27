@@ -77,7 +77,7 @@ def install(app, dock, panel) -> None:
         fb = QToolButton(tb)
         fb.setText("Walkthrough")
         fb.setToolTip("Walkthrough: walk inside the rooms at eye level "
-                      "(W/A/S/D or arrows, drag to look, wheel = angle of "
+                      "(W/A/S/D or arrows, right-drag to look, wheel = angle of "
                       "view); Esc to come out")
         fb.setPopupMode(QToolButton.MenuButtonPopup)
         m = QMenu(fb)

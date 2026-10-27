@@ -594,8 +594,8 @@ def groups(doc):
     by_lv = {}
     rooms_of = {}
     for o in arch["openings"]:
-        if not o.get("grille"):
-            continue
+        if o.get("grille") in (None, "", "none", False):
+            continue                     # («none» picked: no jali)
         w = walls.get(o["wall"])
         if w is None or w.get("kind", "line") != "line":
             continue

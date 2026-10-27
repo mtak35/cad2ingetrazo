@@ -9,7 +9,9 @@ Then the walkthrough is its own mode until **Esc**:
 
 * W / S or ↑ / ↓ — forward / back;  A / D — sideways;  ← / → — turn;
   Shift — faster.
-* drag with the mouse (either button) — look round; the eye stays put.
+* drag with the RIGHT (or middle) mouse button — look round; the left
+  button selects and edits as ever (every edit tool and the panel work
+  during the walk), a right click opens the menu.
 * the view is the normal one (the camera's own angle) until «Wide angle»
   is ticked (100°); the wheel sets any angle (35°–120°), 1 / 2 / 3 / 4 —
   60° / 75° / 90° / 110°.
@@ -165,7 +167,7 @@ def _apply(force=False):
 def _hint():
     p = _state["panel"]
     try:
-        p.flash(f"Walkthrough — W/A/S/D or arrows, drag to look, wheel "
+        p.flash(f"Walkthrough — W/A/S/D or arrows, right-drag to look, wheel "
                 f"= angle ({_state['fov']:.0f}°), PgUp/PgDn floors; "
                 "Esc to come out")
     except Exception:  # noqa: BLE001
@@ -214,7 +216,7 @@ def _tick():
 
 
 #: how near the eye may come to a wall's face
-CLEAR = 0.2
+CLEAR = 0.15
 
 
 def _blocked(lid):
@@ -254,9 +256,9 @@ def _blocked(lid):
             u = seg.u
             n = (-u[1], u[0])
             p0 = seg.p0
-            s0 = float(o["pos"]) - float(o["w"]) / 2 + 0.02
-            s1 = float(o["pos"]) + float(o["w"]) / 2 - 0.02
-            t = float(w["t"]) / 2 + 0.3
+            s0 = float(o["pos"]) - float(o["w"]) / 2 - 0.05
+            s1 = float(o["pos"]) + float(o["w"]) / 2 + 0.05
+            t = float(w["t"]) / 2 + CLEAR + 0.3
             gaps.append(Polygon([
                 (p0[0] + u[0] * a + n[0] * c, p0[1] + u[1] * a + n[1] * c)
                 for a, c in ((s0, -t), (s1, -t), (s1, t), (s0, t))]))
@@ -266,16 +268,22 @@ def _blocked(lid):
         if f_.get("level") == lid and f_.get("kind") == "liftdoor":
             try:
                 c, u, n = f_["c"], f_["u"], f_["n"]
-                a, t = float(f_["w"]) / 2, float(f_.get("t", 0.2)) / 2 + 0.3
+                a = float(f_["w"]) / 2 + 0.05
+                t = float(f_.get("t", 0.2)) / 2 + CLEAR + 0.3
                 gaps.append(Polygon([
                     (c[0] + u[0] * x + n[0] * y, c[1] + u[1] * x + n[1] * y)
                     for x, y in ((-a, -t), (a, -t), (a, t), (-a, t))]))
             except Exception:  # noqa: BLE001
                 continue
+    # the doorways stay open their full width (the clearance is not taken
+    # off them)
+    near = wu.buffer(CLEAR)
     if gaps:
-        wu = wu.difference(unary_union(gaps))
+        gu = unary_union(gaps)
+        wu = wu.difference(gu)
+        near = near.difference(gu)
     from shapely.prepared import prep
-    blk = (wu, prep(wu.buffer(CLEAR)))
+    blk = (wu, prep(near))
     s.update(block=blk, block_lid=lid)
     return blk
 
@@ -361,33 +369,45 @@ def _make_filter():
                     _apply(True)
                     _hint()
                     return True
-                return obj is vp            # no tool shortcut meanwhile
+                return False                # the edit tools' own keys
             if t == QEvent.KeyRelease:
                 k = ev.key()
                 if k in _keys():
                     if not ev.isAutoRepeat():
                         s["held"].discard(k)
                     return True
-                return obj is vp
+                return False
             if obj is not vp:
                 return False
+            # the left button is the model's: select, edit, move, every
+            # tool works as ever; the right (or middle) button drags to look
+            # round, a right click still opens the menu
             if t == QEvent.MouseButtonPress:
-                s["drag"] = ev.position()
                 vp.setFocus()
-                return True
+                if ev.button() in (Qt.RightButton, Qt.MiddleButton):
+                    s["drag"] = ev.position()
+                    s["moved"] = 0.0
+                    return True
+                return False
             if t == QEvent.MouseMove:
-                if s["drag"] is not None:
+                if s["drag"] is not None and ev.buttons() & (
+                        Qt.RightButton | Qt.MiddleButton):
                     q = ev.position()
                     dx, dy = q.x() - s["drag"].x(), q.y() - s["drag"].y()
                     s["drag"] = q
+                    s["moved"] = s.get("moved", 0.0) + abs(dx) + abs(dy)
                     s["yaw"] -= dx * LOOK_PER_PX
                     s["pitch"] = max(-80.0, min(80.0, s["pitch"] -
                                                 dy * LOOK_PER_PX))
                     _apply()
-                return True
+                    return True
+                return False
             if t in (QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
-                s["drag"] = None
-                return True
+                if ev.button() in (Qt.RightButton, Qt.MiddleButton):
+                    s["drag"] = None
+                    s["looked"] = s.get("moved", 0.0) > 4.0
+                    return True
+                return False
             if t == QEvent.Wheel:
                 d = ev.angleDelta().y()
                 s["fov"] = max(35.0, min(120.0, s["fov"] -
@@ -396,7 +416,10 @@ def _make_filter():
                 _hint()
                 return True
             if t == QEvent.ContextMenu:
-                return True
+                if s.get("looked"):           # it was a look, not a click
+                    s["looked"] = False
+                    return True
+                return False
             if t == QEvent.FocusOut:
                 s["held"].clear()
             return False
@@ -488,7 +511,7 @@ def _stand(panel, name, poly, lid):
              yaw=math.degrees(math.atan2(d[1], d[0])), pitch=-3.0)
     _apply(True)
     try:
-        panel.flash(f"Walkthrough · {name} — W/A/S/D or arrows, drag to "
+        panel.flash(f"Walkthrough · {name} — W/A/S/D or arrows, right-drag to "
                     "look, wheel = angle of view; Esc to come out")
     except Exception:  # noqa: BLE001
         pass

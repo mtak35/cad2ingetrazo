@@ -137,6 +137,95 @@ def _volutes(cx, cy, ang, zc, D, r, depth, diagonal=False):
     return out
 
 
+def _order_square(style, cx, cy, ang, w, d, z0, z1) -> list:
+    """A square / rectangular column (a pier, a pilaster) of one of the
+    five orders: the plan's own section kept, the order's base, its shaft
+    (fluted in fillets but the Tuscan), its capital."""
+    H = max(z1 - z0, 0.5)
+    D = min(w, d)
+    out, shade = [], []
+
+    def R(k, e=0.0):
+        return _rect(cx, cy, w * k + e, d * k + e, ang)
+    z = z0
+    if style != "doric":
+        ph = min(0.16, 0.05 * H)
+        out += _solid(R(1.0, 0.16), z, z + ph)
+        z += ph
+        tb = min(0.07, 0.025 * H)
+        out += _solid(R(1.0, 0.10), z, z + tb)
+        z += tb
+        if style != "tuscan":
+            shade += _solid(R(1.0, 0.01), z, z + 0.03)
+            z += 0.03
+            out += _solid(R(1.0, 0.06), z, z + 0.045)
+            z += 0.045
+    cap = {"doric": 0.45, "tuscan": 0.5, "ionic": 0.55, "corinthian": 1.0,
+           "composite": 1.0}[style] * D
+    cap = min(max(cap, 0.18), 0.32 * H)
+    ab = min(0.10, 0.12 * D + 0.02)
+    zs1 = z1 - cap
+    out += _solid(R(1.0), z, zs1)
+    if style != "tuscan":               # the flutes: fillets proud
+        ca, sa = math.cos(ang), math.sin(ang)
+        for (L_, off_, ax_) in ((w, d / 2, 0), (w, -d / 2, 0),
+                                (d, w / 2, 1), (d, -w / 2, 1)):
+            k_ = max(3, int(L_ / 0.075))
+            for i in range(1, k_):
+                t_ = -L_ / 2 + L_ * i / k_
+                if ax_ == 0:
+                    lx, ly = t_, off_ + (0.006 if off_ > 0 else -0.006)
+                    ex, ey = 0.012, 0.012
+                else:
+                    lx, ly = off_ + (0.006 if off_ > 0 else -0.006), t_
+                    ex, ey = 0.012, 0.012
+                px, py = cx + ca * lx - sa * ly, cy + sa * lx + ca * ly
+                shade += _solid(_rect(px, py, ex, ey, ang), z + 0.04,
+                                zs1 - 0.04)
+    shade += _solid(R(1.0, 0.04), zs1, zs1 + 0.03)      # astragal
+    zc0 = zs1 + 0.03
+    if style in ("doric", "tuscan"):
+        n_ = 4
+        for k in range(n_):
+            za = zc0 + (z1 - ab - zc0) * k / n_
+            zb = zc0 + (z1 - ab - zc0) * (k + 1) / n_
+            out += _solid(R(1.0, 0.03 + 0.20 * D * (k + 1) / n_), za, zb)
+        out += _solid(R(1.0, 0.26 * D + 0.04), z1 - ab, z1)
+        return [(out, WHITE), (shade, SHADE)]
+    if style == "ionic":
+        out += _solid(R(1.0, 0.05), zc0, zc0 + 0.3 * (z1 - ab - zc0))
+        rv = min(0.36 * cap, D * 0.21)
+        out += _solid(R(1.0, 0.03), zc0 + 0.3 * (z1 - ab - zc0), z1 - ab)
+        out += _volutes(cx, cy, ang, z1 - ab - rv * 0.95, w * 0.92, rv,
+                        d * 1.04)
+        out += _solid(R(1.0, 0.20 * D + 0.04), z1 - ab * 0.7, z1)
+        return [(out, WHITE), (shade, SHADE)]
+    # Corinthian / Composite: rows of leaves standing out of the bell
+    zb_top = z1 - ab - (0.30 * cap if style == "composite" else 0.10 * cap)
+    n_ = 6
+    for k in range(n_):
+        za = zc0 + (zb_top - zc0) * k / n_
+        zb = zc0 + (zb_top - zc0) * (k + 1) / n_
+        grow = 0.30 * D * (k + 1) / n_
+        out += _solid(R(1.0, grow * (0.6 if k % 2 else 1.0)), za, zb)
+        # the leaves: tips out on every face
+        ca, sa = math.cos(ang), math.sin(ang)
+        for lx, ly in ((0.0, d / 2 + grow / 2), (0.0, -d / 2 - grow / 2),
+                       (w / 2 + grow / 2, 0.0), (-w / 2 - grow / 2, 0.0)):
+            px, py = cx + ca * lx - sa * ly, cy + sa * lx + ca * ly
+            shade += _solid(_star(px, py, D * 0.12, D * 0.06, 5,
+                                  rot=ang + k), za, zb)
+    out += _volutes(cx, cy, ang, zb_top + (0.14 if style == "composite"
+                                          else 0.02) * cap,
+                    max(w, d) * 0.95, D * (0.30 if style == "composite"
+                                           else 0.18),
+                    D * (0.26 if style == "composite" else 0.16),
+                    diagonal=True)
+    out += _solid(_star(cx, cy, max(w, d) * 0.98, max(w, d) * 0.74, 4,
+                        rot=ang + math.pi / 4), z1 - ab, z1)
+    return [(out, WHITE), (shade, SHADE)]
+
+
 def _order(style, cx, cy, ang, D, z0, z1) -> list:
     """[(faces, colour)] of a column of one of the five orders, after the
     plates (Doric, Ionic, Corinthian, Composite, Tuscan)."""
@@ -244,6 +333,13 @@ def faces(c, outline, z0, z1, style=None) -> list:
     D = min(w, d)
     out, shade = [], []
     if style in ORDERS:
+        if c.get("shape") != "round":    # a pier / pilaster: its own section
+            if c.get("shape") == "poly" and len(outline) == 4:
+                w = math.dist(outline[0], outline[1])
+                d = math.dist(outline[1], outline[2])
+                ang = math.atan2(outline[1][1] - outline[0][1],
+                                 outline[1][0] - outline[0][0])
+            return _order_square(style, cx, cy, ang, w, d, z0, z1)
         return _order(style, cx, cy, ang, D, z0, z1)
     if style == "square_smooth":
         ph = min(0.25, 0.08 * H)

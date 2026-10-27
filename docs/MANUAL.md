@@ -562,3 +562,9 @@ The full list, version by version, is in the README. In short:
 
 ## 3.34.1
 - **No band at the floor line on the elevations**: a floor slab standing a little proud of the outside walls above it (the CAD outline drawn a couple of cm out) is trimmed back flush with the walls' outer face, so the walls running down over its edge cover it; balconies and canopies stay.
+
+## 3.35.0
+- **Walkthrough keeps every edit tool**: the left mouse button selects and edits as ever (the panel, Move, every tool work while you walk); drag with the right (or middle) button to look round; a right click still opens the menu. Doorways stay open their full width — every door, opening, French window and lift door lets you through; walls stop you («Walk through walls» in its menu to go anywhere). Esc ends it.
+- **Slab to the inner face of the outside walls**: the floor slab stops at the inside face of the outside walls (and of the piers in them); the outside walls run on floor to floor over its edge — no slab or floor-finish line on the elevations. Balconies and canopies keep the slab running out past their wall. Setting `slab_inner_face` (on).
+- **No CNC jali by mistake**: «None» picked for a window's jali (e.g. while taking its curtain off) now means no jali; models saved that way are cleaned when opened.
+- **Square / rectangular architectural columns** (piers, pilasters) keep their own section in every order — base, fluted shaft (Tuscan plain), capital (Ionic volutes, Corinthian / Composite leaves).

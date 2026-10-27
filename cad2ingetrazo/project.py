@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2114,6 +2114,91 @@ def trim_slab_slivers(doc, lid, most=0.15) -> int:
                             list(new.exterior.coords)[:-1]]
             n += 1
         except Exception:  # noqa: BLE001
+            continue
+    return n
+
+
+def slab_to_inner_faces(doc, lid) -> int:
+    """The floor slab stopped at the INNER face of the outside walls (and
+    of the piers / columns in them): the outside walls then run on, floor
+    to floor, over its edge — no slab or finish line on the elevations.
+    An outside wall is one with no slab beyond its outer face (a balcony or
+    canopy carrying the slab on past a wall leaves that wall on it). The
+    number of slabs changed."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    from . import slabedges as SE
+    if not doc["settings"].get("slab_inner_face", True) or slab_on_top(doc):
+        return 0
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid
+          and not w.get("rail") and W.why_not(w) is None
+          and w.get("kind", "line") == "line" and "a" in w
+          and math.dist(w["a"], w["b"]) > 0.1]
+    if not ws:
+        return 0
+    n = 0
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid or not e.get("corners") \
+                or e.get("user") or e.get("roof") or e.get("zone"):
+            continue
+        try:
+            sp = Polygon(e["corners"]).buffer(0)
+            cut = []
+            for w in ws:
+                c = LineString([w["a"], w["b"]])
+                h = float(w.get("t", 0.115)) / 2
+                sides = []
+                for sgn in (1, -1):
+                    band = c.buffer(sgn * (h + 0.25), single_sided=True,
+                                    cap_style=2).difference(
+                        c.buffer(h + 0.01, cap_style=2))
+                    if band.area < 1e-4:
+                        sides.append(1.0)
+                        continue
+                    sides.append(band.intersection(sp).area / band.area)
+                if min(sides) < 0.15 and max(sides) > 0.5:
+                    # the whole run, its windows too, out to its corners
+                    cut.append(c.buffer(h, cap_style=3, join_style=2))
+            for cl in arch["structure"]:  # the piers in the outside walls
+                if cl["type"] != "column" or cl["level"] != lid:
+                    continue
+                try:
+                    pc = Polygon(S.column_outline(cl, 0.0)).buffer(0)
+                except Exception:  # noqa: BLE001
+                    continue
+                ring = pc.buffer(0.25, join_style=2).difference(pc)
+                if ring.area > 0 and ring.intersection(sp).area / ring.area \
+                        < 0.7 and any(pc.distance(q) < 0.02 for q in cut):
+                    cut.append(pc)
+            if not cut:
+                continue
+            new = sp.difference(unary_union(cut).buffer(0.002,
+                                                        join_style=2))
+            if new.geom_type != "Polygon":
+                parts = [g for g in getattr(new, "geoms", [new])
+                         if g.geom_type == "Polygon"]
+                if not parts:
+                    continue
+                new = max(parts, key=lambda g: g.area)
+            if new.area < 0.8 * sp.area:
+                continue
+            new = new.simplify(0.003)
+            if e.get("holes"):
+                keep = []
+                for h_ in e["holes"]:
+                    try:
+                        if new.contains(Polygon(h_).representative_point()):
+                            keep.append(h_)
+                    except Exception:  # noqa: BLE001
+                        keep.append(h_)
+                e["holes"] = keep
+            e["corners"] = [[round(x, 4), round(y, 4)] for x, y in
+                            list(new.exterior.coords)[:-1]]
+            n += 1
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.slab_to_inner_faces slab")
             continue
     return n
 
@@ -4486,6 +4571,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.trim_slab_slivers")
+    try:                       # the slab to the outside walls' inner face
+        rep["slab_inner"] = slab_to_inner_faces(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.slab_to_inner_faces")
     try:                       # L corners closed solid
         rep["wall_corners"] = close_wall_corners(doc, lid)
     except Exception:  # noqa: BLE001
@@ -10661,6 +10751,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.sync_room_floors")
+    for o_ in arch["openings"]:          # «none» picked in a dialog
+        if o_.get("grille") in ("none", ""):
+            o_.pop("grille", None)
+            o_.pop("grille_side", None)
+        if o_.get("curtain") == "curtain_auto":
+            o_.pop("curtain", None)
     new_groups = _groups(arch, doc)
     try:
         new_groups += _stair_groups(doc)

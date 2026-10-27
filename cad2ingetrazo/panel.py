@@ -5902,6 +5902,15 @@ class Panel(QWidget):
             PJ._ramp_uncut(doc, rec["level"])
         to_cw = sel[0] == "wall" and new.get("type") == "curtain" and \
             rec.get("type") != "curtain"
+        if sel[0] == "opening":      # «none» / «as the project»: no key
+            if new.get("grille") in ("none", ""):
+                new.pop("grille", None)
+                new.pop("grille_side", None)
+                rec.pop("grille", None)
+                rec.pop("grille_side", None)
+            if new.get("curtain") == "curtain_auto":
+                new.pop("curtain", None)
+                rec.pop("curtain", None)
         rec.update(new)
         for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
             if rec.get(k_) == "none":
