@@ -514,7 +514,7 @@ def build(doc, z_of, room_key) -> list:
                     pass
             if poly.is_empty:
                 continue
-            fs = faces(poly, z_of[lid] + c["h"], c["type"])
+            fs = paint(faces(poly, z_of[lid] + c["h"], c["type"]), rec)
             if fs:
                 out.append((lid, room["name"], c["type"], c["h"], fs,
                             room_key(lid, room)))
@@ -529,6 +529,47 @@ def build(doc, z_of, room_key) -> list:
         except Exception:  # noqa: BLE001                  # lobby…)
             from .host import log_error
             log_error("ceilings._rest")
+    return out
+
+
+#: the false ceiling's face colour (Edit ▸ Ceiling colour) and its LED
+COLOURS = [("fc_auto", "As the type", None),
+           ("fc_white", "White", (0.97, 0.97, 0.97, 1.0)),
+           ("fc_offwhite", "Off-white", (0.95, 0.94, 0.90, 1.0)),
+           ("fc_ivory", "Ivory", (0.96, 0.92, 0.82, 1.0)),
+           ("fc_beige", "Warm beige", (0.88, 0.82, 0.72, 1.0)),
+           ("fc_grey", "Light grey", (0.82, 0.83, 0.84, 1.0)),
+           ("fc_charcoal", "Charcoal", (0.25, 0.26, 0.28, 1.0)),
+           ("fc_walnut", "Walnut wood", (0.42, 0.25, 0.13, 1.0)),
+           ("fc_oak", "Light oak", (0.74, 0.60, 0.42, 1.0))]
+LEDS = [("led_auto", "As the type", None), ("led_warm", "Warm white", WARM),
+        ("led_cool", "Cool white", (0.88, 0.94, 1.0, 1.0)),
+        ("led_gold", "Golden", (1.0, 0.75, 0.35, 1.0)),
+        ("led_off", "Off (no glow)", None)]
+_LIT = {LIGHT, WARM}
+
+
+def paint(fs, rec) -> list:
+    """The ceiling's faces in the room's own colours: its boards
+    (``ceil_color``) and its cove / panel light (``ceil_led``); the
+    tracks, spots and edge beams as they are."""
+    cc = dict((k, c) for k, _l, c in COLOURS).get((rec or {}).get(
+        "ceil_color") or "fc_auto")
+    led_k = (rec or {}).get("ceil_led") or "led_auto"
+    lc = dict((k, c) for k, _l, c in LEDS).get(led_k)
+    if cc is None and led_k == "led_auto":
+        return fs
+    out = []
+    for f_, col in fs:
+        col4 = tuple(col) if col is not None else None
+        if col4 in _LIT:
+            if led_k == "led_off":
+                col4 = cc or BY["gypsum"][3]
+            elif lc is not None:
+                col4 = lc
+        elif cc is not None and col4 not in (TRACK, BEAM_COLOR):
+            col4 = cc
+        out.append((f_, col4))
     return out
 
 
@@ -629,7 +670,7 @@ def _balcony(doc, lid, room, order, z_of, rails):
             fs.append((bf, BEAM_COLOR))
     if not fs:
         return None
-    return (lid, room["name"], kind, h, fs)
+    return (lid, room["name"], kind, h, paint(fs, rec))
 
 
 def _well_beams(doc, lid, order, z_of, wells) -> list:

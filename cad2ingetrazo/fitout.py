@@ -1247,6 +1247,11 @@ def groups(doc):
             continue
         z = z_of[lid]
         k = f.get("kind")
+        # the ceiling lights / AC diffusers shown or hidden (8A)
+        if k == "light" and not st.get("show_lights", True):
+            continue
+        if k == "diffuser" and not st.get("show_diffusers", True):
+            continue
         try:
             if k == "glass":
                 a, b = f["a"], f["b"]

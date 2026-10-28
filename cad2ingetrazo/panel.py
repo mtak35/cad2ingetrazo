@@ -147,6 +147,7 @@ def _form(parent):
 #: (key, label, kind, options / range)
 from . import matlib as _ML  # noqa: E402
 from .ceilings import TYPES as _CE_TYPES  # noqa: E402
+from .ceilings import COLOURS as _CE_COLOURS, LEDS as _CE_LEDS  # noqa: E402,E501
 from . import wallclad as _WC  # noqa: E402
 FIELDS = {
     "wall": [("type", "Wall type", "choice", ("solid", "curtain")),
@@ -284,6 +285,17 @@ FIELDS = {
                   ("rail_ext", "Run-on past the first / last step", "len",
                    (0.0, 1.0))],
     "dig": [("name", "Name", "text", None)],
+    "ceiling": [("name", "Room", "text", None),
+                ("ceiling", "False ceiling type / design", "choice",
+                 ("level", "none") + tuple(t_[0] for t_ in _CE_TYPES)),
+                ("ceiling_h", "Ceiling height from floor", "len",
+                 (2.0, 8.0)),
+                ("mat_ceil", "Ceiling material", "choice",
+                 _ML.keys_for("ceiling")),
+                ("ceil_color", "Ceiling face colour", "choice",
+                 tuple(k_ for k_, _l, _c in _CE_COLOURS)),
+                ("ceil_led", "Cove / panel light", "choice",
+                 tuple(k_ for k_, _l, _c in _CE_LEDS))],
     "room": [("size", "Size (width × length)", "info", None),
              ("name", "Room name", "text", None),
              ("ceiling", "False ceiling", "choice",
@@ -371,6 +383,8 @@ CHOICE_LABELS.update({"cnc": "CNC jali — diamonds", "none": "None",
                       "ablaq": "Ablaq (dark / light stones)",
                       "plain": "Plain band"})
 CHOICE_LABELS.update(dict(_WC.TYPES))
+CHOICE_LABELS.update({k: lab for k, lab, _c in _CE_COLOURS})
+CHOICE_LABELS.update({k: lab for k, lab, _c in _CE_LEDS})
 CHOICE_LABELS.update(dict(_WC.SIDES))
 CHOICE_LABELS.update({"slab": "Attached to the slab",
                       "free": "Detached (its own height / base)"})
@@ -4491,7 +4505,65 @@ class Panel(QWidget):
         row.addWidget(_btn("All levels", lambda: self._ceiling(True)))
         row.addWidget(_btn("Remove", self._ceiling_remove))
         f.addRow(row)
+        # the ceiling lights and AC diffusers: shown / hidden, deleted
+        st0 = self.doc()["settings"]
+        self.fc_lights = QCheckBox("Show the ceiling lights")
+        self.fc_lights.setChecked(bool(st0.get("show_lights", True)))
+        self.fc_lights.toggled.connect(
+            lambda on: self._fit_show("show_lights", on, "Ceiling lights"))
+        self.fc_diff = QCheckBox("Show the AC diffusers")
+        self.fc_diff.setChecked(bool(st0.get("show_diffusers", True)))
+        self.fc_diff.toggled.connect(
+            lambda on: self._fit_show("show_diffusers", on, "AC diffusers"))
+        f.addRow(self.fc_lights)
+        f.addRow(self.fc_diff)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Delete lights (this level)",
+                           lambda: self._fit_delete("light", False),
+                           "Every ceiling light of the level picked at the "
+                           "top deleted (Ctrl+Z brings them back; «Update "
+                           "from CAD» reads them again — untick «Show» to "
+                           "keep them off)"))
+        row.addWidget(_btn("Delete diffusers (this level)",
+                           lambda: self._fit_delete("diffuser", False)))
+        f.addRow(row)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Delete lights (all levels)",
+                           lambda: self._fit_delete("light", True)))
+        row.addWidget(_btn("Delete diffusers (all levels)",
+                           lambda: self._fit_delete("diffuser", True)))
+        f.addRow(row)
         self.lay.addWidget(box)
+
+    def _fit_show(self, key, on, what):
+        doc = self.doc()
+        doc["settings"][key] = bool(on)
+        self.commit(doc, f"{what} {'shown' if on else 'hidden'}")
+
+    def _fit_delete(self, kind, all_levels=False, ids=None):
+        """The ceiling lights / diffusers deleted: those selected
+        (``ids``), else every one of the level picked (or all levels)."""
+        doc = self.doc()
+        lid, _lv = self.level()
+        if ids is None and not all_levels and not lid:
+            self.flash("Pick a level at the top first")
+            return
+        before = len(doc.get("fitout") or [])
+        keep = []
+        for f_ in doc.get("fitout") or []:
+            hit = (f_.get("id") in ids) if ids is not None else (
+                f_.get("kind") == kind and (all_levels or
+                                            f_.get("level") == lid))
+            if not hit:
+                keep.append(f_)
+        doc["fitout"] = keep
+        n = before - len(keep)
+        what = {"light": "ceiling light", "diffuser": "AC diffuser"}.get(
+            kind, "fit-out item")
+        if n:
+            self.commit(doc, f"{n} {what}(s) deleted")
+        else:
+            self.flash(f"No {what} there")
 
     def _ceiling(self, all_levels=False):
         from . import ceilings as CE
@@ -6115,6 +6187,23 @@ class Panel(QWidget):
             self._ceiling_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu ceiling")
+        try:            # the ceiling lights / diffusers selected
+            fids = [i for k, i in self._selected_all() if k == "fitout"]
+            if fids:
+                kinds = {f_.get("kind") for f_ in self.doc().get("fitout")
+                         or [] if f_.get("id") in fids}
+                if kinds & {"light", "diffuser"}:
+                    menu.addAction(
+                        f"CAD2IngeTrazo · Delete the {len(fids)} selected "
+                        "light(s) / diffuser(s)",
+                        lambda ids_=set(fids): self._fit_delete(
+                            None, ids=ids_))
+                    menu.addAction("CAD2IngeTrazo · Hide all ceiling lights",
+                                   lambda: self.fc_lights.setChecked(False))
+                    menu.addAction("CAD2IngeTrazo · Hide all AC diffusers",
+                                   lambda: self.fc_diff.setChecked(False))
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu fitout")
         try:            # the selected walls' interior cladding
             self._clad_menu(menu)
         except Exception:  # noqa: BLE001

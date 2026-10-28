@@ -402,6 +402,13 @@ def _rooms(raw, level_ids: set) -> list[dict]:
             v_ = r.get(k_)
             if isinstance(v_, str) and v_ and v_ != "none" and "/" in v_:
                 rec[k_] = v_[:120]
+        # the false ceiling's face colour and its cove light
+        if str(r.get("ceil_color") or "").startswith("fc_") and \
+                r.get("ceil_color") != "fc_auto":
+            rec["ceil_color"] = str(r["ceil_color"])[:20]
+        if str(r.get("ceil_led") or "").startswith("led_") and \
+                r.get("ceil_led") != "led_auto":
+            rec["ceil_led"] = str(r["ceil_led"])[:20]
         out.append(rec)
     return out
 

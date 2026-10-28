@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.9144, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2083,6 +2083,7 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
         3.5 m, straight out from anywhere along the window's width (a
         balcony the plan never closed into a room, or one it named
         wrongly)."""
+        hits = 0
         for f_ in (-0.4, -0.2, 0.0, 0.2, 0.4):
             a_ = (c[0] + nv[0] * t2 + u_[0] * wid * f_,
                   c[1] + nv[1] * t2 + u_[1] * wid * f_)
@@ -2091,8 +2092,11 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
             for r_ in rails:
                 if ray.intersects(r_) and Point(a_).distance(
                         ray.intersection(r_)) > 0.3:
-                    return True
-        return False
+                    hits += 1
+                    break
+        # the whole window looking out onto the balcony, not a corner of
+        # it passing a balcony's end (half a door in the balcony)
+        return hits >= 4
 
     foot = None
     try:                      # the floor's own slab(s): inside the building
@@ -2151,11 +2155,14 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
                 if sides[k_] is not None and sides[k_] in names:
                     names.remove(sides[k_])
                 names.append("BALCONY")
+                sides[k_] = "BALCONY"
         if any(BATH_ROOM.search(x) for x in names):
             h_ = max(min(float(o.get("h", 0.6)), head - bsill), 0.3)
-            # one size for the bathrooms' windows: none wider than 3'-0"
+            # one size for the bathrooms' windows: none wider than 2'-0"
             # (``bath_win_w``) — a ventilator, not a room's window
-            bw_ = float(st.get("bath_win_w", 0.9144) or 0.9144)
+            bw_ = float(st.get("bath_win_w", 0.6096) or 0.6096)
+            if abs(bw_ - 0.9144) < 1e-4:        # 3.40's default: now 2'
+                bw_ = 0.6096
             w_ = min(float(o.get("w", 0.6)), bw_)
             if abs(float(o.get("sill", 0.0)) - bsill) > 0.01 or \
                     abs(float(o.get("h", 0.0)) - h_) > 0.01 or \
@@ -2165,9 +2172,11 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
                 o["w"] = round(w_, 4)
                 out["bath"] += 1
             continue
-        # any window in a balcony's wall (onto the flat or its own outer
-        # wall, the balcony glazed in) — a sliding door
-        if any(BALCONY_ROOM.search(x) for x in names):
+        # a window between a balcony and the flat — a sliding door; one in
+        # the balcony's own outer wall (open air beyond) stays a window
+        if any(BALCONY_ROOM.search(x) for x in names) and \
+                any(not BALCONY_ROOM.search(x) for x in names) and \
+                None not in sides:
             new = opening_as(o, "door", st)
             new.update(style="sliding", leaves=2, sill=0.0,
                        h=round(head, 4))
@@ -7177,7 +7186,7 @@ LISTS = {"wall": "walls", "opening": "openings"}
 
 def find_record(doc, kind, rid):
     arch = doc["arch"]
-    if kind == "room":
+    if kind in ("room", "ceiling"):       # a false ceiling: its room's
         return room_record(doc, rid)
     if kind in ("stair", "stairrail"):
         return next((s for s in doc.get("stairs") or [] if s["id"] == rid),
@@ -7251,6 +7260,10 @@ def check_record(doc, kind, rec) -> str | None:
     if kind == "room":
         return None if 0.0 <= float(rec.get("finish", 0.0)) <= 0.3 else \
             "a floor finish is 0–300 mm thick"
+    if kind == "ceiling":
+        h_ = float(rec.get("ceiling_h") or 2.4384)
+        return None if 2.0 <= h_ <= 8.0 else \
+            "a false ceiling hangs 2.0–8.0 m over the floor"
     if kind == "ramp":
         return None if 0.05 <= float(rec.get("t", 0.2)) <= 1.0 else \
             "a ramp slab is 0.05–1.0 m thick"
