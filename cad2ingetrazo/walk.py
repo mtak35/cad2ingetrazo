@@ -63,18 +63,70 @@ def rooms(doc, lid) -> list:
 
     from .engine import spaces
     out = []
+    arch = doc["arch"]
+    feet = []
+    for s_ in doc.get("stairs") or []:          # the stairs of this floor
+        if s_.get("level") != lid:
+            continue
+        try:
+            from shapely.geometry import Polygon as _Pg
+            feet.append(_Pg([tuple(q[:2]) for q in s_["corners"]]).buffer(0))
+        except Exception:  # noqa: BLE001
+            continue
+    found = []
     try:
-        for r in spaces.of_level(doc["arch"], lid):
+        found = spaces.of_level(arch, lid)
+        for r in found:
             p = r.get("poly")
             if p is None or p.is_empty or p.area < 2.0:
                 continue
+            nm = str(r.get("name") or "Room")
+            stair = any(p.intersects(f_) for f_ in feet)
+            if re.search(r"\b(VOID|STAIR)", nm, re.I) and stair:
+                out.append((f"Stair hall ({nm})", p))   # the CAD's «VOID»
+                continue
             if re.search(r"\b(VOID|DUCT|SHAFT|OTS|LIFT|OPEN\s*TO\s*SKY)\b",
-                         str(r.get("name") or ""), re.I):
+                         nm, re.I):
                 continue                  # nothing to walk into
-            out.append((str(r.get("name") or "Room"), p))
+            out.append((nm, p))
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("walk.rooms")
+    try:                 # the floor no room covers: corridors, passages
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union
+
+        from . import slabedges as SE
+        sl = [_Pg([tuple(q[:2]) for q in e["corners"]]).buffer(0)
+              for e in arch["structure"] if e.get("type") == "slab"
+              and e.get("level") == lid and not e.get("zone")
+              and len(e.get("corners") or []) >= 3]
+        if sl:
+            rest = unary_union(sl).buffer(-0.05)
+            rp = [r["poly"] for r in found if r.get("poly") is not None]
+            ws = [w for w in arch["walls"] if w["level"] == lid
+                  and not w.get("rail")]
+            cut = unary_union(rp + SE.wall_polys(ws)) if (rp or ws) else None
+            if cut is not None:
+                rest = rest.difference(cut.buffer(0.02))
+            k = 0
+            for g in sorted(getattr(rest, "geoms", [rest]),
+                            key=lambda g: -g.area):
+                if g.geom_type != "Polygon" or g.area < 3.0:
+                    continue
+                # a passage, not a sliver along a wall
+                if g.area < 0.6 * g.minimum_rotated_rectangle.area and \
+                        g.buffer(-0.45).is_empty:
+                    continue
+                if g.buffer(-0.4).is_empty:
+                    continue
+                k += 1
+                stair = any(g.intersects(f_) for f_ in feet)
+                out.append(((f"Stair hall {k}" if stair else
+                             f"Corridor {k}"), g))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("walk.rooms corridors")
     out.sort(key=lambda t: -t[1].area)
     return out
 

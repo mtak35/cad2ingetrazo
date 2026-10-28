@@ -205,7 +205,7 @@ def empty() -> dict:
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
-            "chhatris": [], "fitout": []}
+            "chhatris": [], "fitout": [], "fitout_hide": []}
 
 
 def load(raw) -> dict:
@@ -294,6 +294,12 @@ def load(raw) -> dict:
                      if isinstance(f, dict) and f.get("level") in ids
                      and f.get("kind") in ("glass", "clad", "diffuser",
                                            "light", "liftdoor")]
+    # the rooms whose lights / diffusers were deleted: kept off
+    doc["fitout_hide"] = [[str(h[0]), str(h[1]), float(h[2]), float(h[3])]
+                          for h in raw.get("fitout_hide") or []
+                          if isinstance(h, (list, tuple)) and len(h) == 4
+                          and str(h[0]) in ids
+                          and h[1] in ("light", "diffuser")]
     doc["ffl_marks"] = [m for m in raw.get("ffl_marks") or []
                         if isinstance(m, dict) and m.get("level") in ids]
     # slab openings closed by hand: kept closed when the CAD is read again

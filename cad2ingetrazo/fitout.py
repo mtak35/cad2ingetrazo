@@ -1209,6 +1209,34 @@ def _poly_faces(poly, z0, z1):
     return W.solid({"outer": pts, "holes": holes}, z0, z1)
 
 
+_HIDE_CACHE: dict = {}
+
+
+def hidden_in_room(doc, f) -> bool:
+    """A light / diffuser in a room its lights / diffusers were deleted
+    from (8A ▸ Room ▸ Delete its lights): kept off."""
+    hide = [h for h in doc.get("fitout_hide") or []
+            if h[0] == f.get("level") and h[1] == f.get("kind")]
+    if not hide:
+        return False
+    from shapely.geometry import Point
+
+    from . import walk as WK
+    key = (id(doc), f.get("level"), len(doc["arch"]["walls"]))
+    rooms = _HIDE_CACHE.get(key)
+    if rooms is None:
+        rooms = [p for _n, p in WK.rooms(doc, f.get("level"))]
+        _HIDE_CACHE.clear()
+        _HIDE_CACHE[key] = rooms
+    pt = Point(f.get("x", 1e9), f.get("y", 1e9))
+    for h in hide:
+        hp = Point(h[2], h[3])
+        for p in rooms:
+            if p.buffer(0.01).contains(hp) and p.buffer(0.01).contains(pt):
+                return True
+    return False
+
+
 def groups(doc):
     """The shower glass, the cladding and the diffusers of every level."""
     from core.group import Group
@@ -1251,6 +1279,8 @@ def groups(doc):
         if k == "light" and not st.get("show_lights", True):
             continue
         if k == "diffuser" and not st.get("show_diffusers", True):
+            continue
+        if k in ("light", "diffuser") and hidden_in_room(doc, f):
             continue
         try:
             if k == "glass":

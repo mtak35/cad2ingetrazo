@@ -1338,6 +1338,11 @@ class Panel(QWidget):
             self._fill_overlap(self.doc())
             self._fill_rooms(self.doc())
             self._fill_import(self.doc())
+            try:                      # 8A's room list follows the level
+                if hasattr(self, "fc_room"):
+                    self._fit_rooms()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- 2. import a plan --------------------------------------------------------
     def _import_part(self):
@@ -4517,28 +4522,98 @@ class Panel(QWidget):
             lambda on: self._fit_show("show_diffusers", on, "AC diffusers"))
         f.addRow(self.fc_lights)
         f.addRow(self.fc_diff)
+        # by room: the rooms of the level picked at the top, by name
+        self.fc_room = QComboBox()
+        self.fc_room.setToolTip("A room of the level picked at the top")
+        rrow = QHBoxLayout()
+        rrow.addWidget(self.fc_room, 1)
+        rrow.addWidget(_btn("↻", self._fit_rooms,
+                            "List the rooms of the level picked again"))
+        f.addRow("Room", rrow)
         row = QHBoxLayout()
-        row.addWidget(_btn("Delete lights (this level)",
-                           lambda: self._fit_delete("light", False),
-                           "Every ceiling light of the level picked at the "
-                           "top deleted (Ctrl+Z brings them back; «Update "
-                           "from CAD» reads them again — untick «Show» to "
-                           "keep them off)"))
-        row.addWidget(_btn("Delete diffusers (this level)",
-                           lambda: self._fit_delete("diffuser", False)))
+        row.addWidget(_btn("Delete its lights",
+                           lambda: self._fit_room("light"),
+                           "The ceiling lights of the room picked deleted "
+                           "— and kept off when the floor is read from the "
+                           "CAD again («Bring back» undoes it)"))
+        row.addWidget(_btn("Delete its diffusers",
+                           lambda: self._fit_room("diffuser")))
+        row.addWidget(_btn("Bring back", lambda: self._fit_room(None),
+                           "The room's lights and diffusers back (read "
+                           "again from the CAD at the next «Update from "
+                           "CAD»)"))
         f.addRow(row)
-        row = QHBoxLayout()
-        row.addWidget(_btn("Delete lights (all levels)",
-                           lambda: self._fit_delete("light", True)))
-        row.addWidget(_btn("Delete diffusers (all levels)",
-                           lambda: self._fit_delete("diffuser", True)))
-        f.addRow(row)
+        try:
+            self._fit_rooms()
+        except Exception:  # noqa: BLE001
+            pass
         self.lay.addWidget(box)
 
     def _fit_show(self, key, on, what):
         doc = self.doc()
         doc["settings"][key] = bool(on)
         self.commit(doc, f"{what} {'shown' if on else 'hidden'}")
+
+    def _fit_rooms(self):
+        """The room list of 8A: the level picked's rooms, by name (the stair
+        hall and the corridors too)."""
+        from . import walk as WK
+        self.fc_room.clear()
+        lid, _lv = self.level()
+        if not lid:
+            return
+        seen = {}
+        for name, poly in WK.rooms(self.doc(), lid):
+            seen[name] = seen.get(name, 0) + 1
+            lab = name if seen[name] == 1 else f"{name} {seen[name]}"
+            pt = poly.representative_point()
+            self.fc_room.addItem(f"{lab}  ({poly.area:.0f} m²)",
+                                 (lid, round(pt.x, 3), round(pt.y, 3)))
+
+    def _fit_room(self, kind):
+        """The lights (``kind`` "light") / diffusers of the room picked
+        deleted and kept off; None: brought back."""
+        from shapely.geometry import Point
+
+        from . import walk as WK
+        data = self.fc_room.currentData()
+        if not data:
+            self.flash("Pick a room (↻ lists the rooms of the level "
+                       "picked at the top)")
+            return
+        lid, x, y = data
+        doc = self.doc()
+        poly = next((p for _n, p in WK.rooms(doc, lid)
+                     if p.buffer(0.01).contains(Point(x, y))), None)
+        if poly is None:
+            self.flash("That room is not there any more — ↻")
+            return
+        hide = doc.setdefault("fitout_hide", [])
+        room = self.fc_room.currentText().split("  (")[0]
+        if kind is None:
+            n0 = len(hide)
+            doc["fitout_hide"] = [h for h in hide if not (
+                h[0] == lid and poly.buffer(0.01).contains(
+                    Point(h[2], h[3])))]
+            self.commit(doc, f"{room}: lights and diffusers back "
+                             f"({n0 - len(doc['fitout_hide'])} rule(s) "
+                             "taken off; «Update from CAD» reads them "
+                             "again)")
+            return
+        keep, n = [], 0
+        for f_ in doc.get("fitout") or []:
+            if f_.get("kind") == kind and f_.get("level") == lid and \
+                    poly.buffer(0.01).contains(Point(f_.get("x", 1e9),
+                                                     f_.get("y", 1e9))):
+                n += 1
+                continue
+            keep.append(f_)
+        doc["fitout"] = keep
+        if not any(h[0] == lid and h[1] == kind and abs(h[2] - x) < 1e-3
+                   and abs(h[3] - y) < 1e-3 for h in hide):
+            hide.append([lid, kind, x, y])
+        what = {"light": "ceiling light", "diffuser": "AC diffuser"}[kind]
+        self.commit(doc, f"{room}: {n} {what}(s) deleted (kept off)")
 
     def _fit_delete(self, kind, all_levels=False, ids=None):
         """The ceiling lights / diffusers deleted: those selected
