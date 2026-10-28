@@ -82,6 +82,32 @@ def remove_level(doc, lid) -> None:
     (doc.get("ceilings") or {}).pop(lid, None)
 
 
+def at_room(doc, lid, poly) -> dict:
+    """The false ceiling set for one room by name (8A ▸ Room ▸ Ceiling
+    here / Face colour): {"type", "h", "off", "color", "led"} of the
+    entries of ``doc["ceil_at"]`` whose point lies in ``poly``."""
+    out = {}
+    try:
+        from shapely.geometry import Point
+        pb = poly.buffer(0.01)
+        for e in doc.get("ceil_at") or []:
+            if e[0] == lid and pb.contains(Point(e[1], e[2])):
+                out.update(e[3] or {})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def with_face(rec, ov) -> dict:
+    """The room record with the face colour / LED picked by room."""
+    r = dict(rec or {})
+    if ov.get("color"):
+        r["ceil_color"] = ov["color"]
+    if ov.get("led"):
+        r["ceil_led"] = ov["led"]
+    return r
+
+
 def room_ceiling(doc, lid, rkey) -> dict | None:
     """{"type", "h"} of a room's ceiling, or None (no ceiling there)."""
     c = (doc.get("ceilings") or {}).get(lid)
@@ -446,6 +472,7 @@ def build(doc, z_of, room_key) -> list:
             return None
     own_lids = {r["level"] for r in arch.get("rooms") or []
                 if r.get("ceiling") in BY}
+    own_lids |= {e[0] for e in doc.get("ceil_at") or []}
     for lid in list((doc.get("ceilings") or {}).keys()) + \
             sorted(own_lids - set((doc.get("ceilings") or {}).keys())):
         if lid not in z_of:
@@ -472,11 +499,14 @@ def build(doc, z_of, room_key) -> list:
             if room["area"] < 1.0:
                 continue
             rec_ = room.get("rec") or {}
+            ov = at_room(doc, lid, room["poly"])
+            if ov.get("off"):
+                continue
             hall = bool(re.search(r"VOID|STAIR|LOBBY|HALL",
                                   str(room.get("name", "")), re.I)) and \
                 any(room["poly"].intersects(f_) for f_ in stair_feet)
             if rec_.get("ceiling") not in BY and not hall and \
-                    _open_air(room, rails):
+                    ov.get("type") not in BY and _open_air(room, rails):
                 if rec_.get("ceiling") != "none" and \
                         doc["settings"].get("balcony_ceiling", True) and \
                         re.search(BALCONY, str(room.get("name", "")), re.I) \
@@ -487,6 +517,9 @@ def build(doc, z_of, room_key) -> list:
                     try:          # a balcony: its ceiling and edge beam
                         b_ = _balcony(doc, lid, room, order, z_of, rails)
                         if b_:
+                            if ov.get("color") or ov.get("led"):
+                                b_ = b_[:4] + (paint(b_[4], with_face(
+                                    rec_, ov)),)
                             out.append(b_ + (room_key(lid, room),))
                     except Exception:  # noqa: BLE001
                         from .host import log_error
@@ -504,6 +537,14 @@ def build(doc, z_of, room_key) -> list:
                                                               DEFAULT_H))}
             elif c is not None and rec.get("ceiling_h"):
                 c = dict(c, h=float(rec["ceiling_h"]))
+            if ov.get("type") in BY:          # set for this room by name
+                lvc = (doc.get("ceilings") or {}).get(lid) or {}
+                c = {"type": ov["type"],
+                     "h": float(ov.get("h") or rec.get("ceiling_h")
+                                or lvc.get("h", DEFAULT_H))}
+            elif c is not None and ov.get("h"):
+                c = dict(c, h=float(ov["h"]))
+            rec = with_face(rec, ov)
             if c is None:
                 continue
             poly = room["poly"]
@@ -730,8 +771,9 @@ def _rest(doc, lid, z_of, wells, done) -> list:
     walls (halls and corridors open to one another, a lobby): not over
     the walls, the shafts and wells, nor out on the balconies."""
     lvc = (doc.get("ceilings") or {}).get(lid)
-    if not lvc:
+    if not lvc and not any(e[0] == lid for e in doc.get("ceil_at") or []):
         return []
+    lvc = lvc or {}
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
@@ -782,17 +824,47 @@ def _rest(doc, lid, z_of, wells, done) -> list:
                 r"DUCT|SHAFT|LIFT", str(m.get("note", "")), re.I)):
             cut.append(Polygon(m["pts"]).buffer(0.05))
     rest = inside.difference(unary_union(cut))
+    # cut by the walkthrough's corridors / stair halls: one ceiling a
+    # space, named as the walkthrough names it
+    named = []
+    try:
+        from . import walk as WK
+        named = [(n, p) for n, p in WK.rooms(doc, lid)
+                 if re.match(r"(Corridor|Stair hall) \d", n)]
+    except Exception:  # noqa: BLE001
+        named = []
+    pieces = []
+    for g in getattr(rest, "geoms", [rest]):
+        if g.geom_type != "Polygon":
+            continue
+        left = g
+        for n, p in named:
+            try:
+                q = g.intersection(p.buffer(0.3, join_style=2))
+            except Exception:  # noqa: BLE001
+                continue
+            for qq in getattr(q, "geoms", [q]):
+                if qq.geom_type == "Polygon" and qq.area >= 1.0:
+                    pieces.append((n, qq))
+            left = left.difference(p.buffer(0.3, join_style=2))
+        for qq in getattr(left, "geoms", [left]):
+            if qq.geom_type == "Polygon":
+                pieces.append((None, qq))
     out = []
     k = 0
-    for g in getattr(rest, "geoms", [rest]):
-        if g.geom_type != "Polygon" or g.area < 1.0 or \
-                g.buffer(-0.25).is_empty:
+    for n, g in pieces:
+        if g.area < 1.0 or g.buffer(-0.25).is_empty:
             continue
+        ov = at_room(doc, lid, g)
+        if ov.get("off"):
+            continue
+        typ = ov["type"] if ov.get("type") in BY else lvc.get("type")
+        if typ not in BY:
+            continue
+        h = float(ov.get("h") or lvc.get("h", DEFAULT_H))
         k += 1
-        fs = faces(g, z_of[lid] + float(lvc.get("h", DEFAULT_H)),
-                   lvc.get("type", "gypsum"))
+        nm = n or f"Open area {k}"
+        fs = paint(faces(g, z_of[lid] + h, typ), with_face({}, ov))
         if fs:
-            out.append((lid, f"Open area {k}", lvc.get("type", "gypsum"),
-                        float(lvc.get("h", DEFAULT_H)), fs,
-                        f"{lid}|open{k}"))
+            out.append((lid, nm, typ, h, fs, f"{lid}|open{k}"))
     return out

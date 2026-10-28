@@ -308,7 +308,11 @@ FIELDS = {
              ("mat_wall", "Walls material (inside this room)", "choice",
               _ML.keys_for("wall")),
              ("mat_ceil", "Ceiling material", "choice",
-              _ML.keys_for("ceiling"))],
+              _ML.keys_for("ceiling")),
+             ("ceil_color", "Ceiling face colour", "choice",
+              tuple(k_ for k_, _l, _c in _CE_COLOURS)),
+             ("ceil_led", "Cove / panel light", "choice",
+              tuple(k_ for k_, _l, _c in _CE_LEDS))],
     "roof": [("kind", "Type", "choice", ("flat", "gable", "hip")),
              ("slope", "Slope", "deg", (5.0, 75.0)),
              ("overhang", "Overhang", "len", (0.0, 3.0)),
@@ -4543,6 +4547,28 @@ class Panel(QWidget):
                            "again from the CAD at the next «Update from "
                            "CAD»)"))
         f.addRow(row)
+        # the false ceiling of the room picked: type / height (above),
+        # face colour, cove light
+        row = QHBoxLayout()
+        row.addWidget(_btn("Ceiling here", lambda: self._ceil_room("type"),
+                           "The room picked takes the type and height "
+                           "picked above (only this room)"))
+        row.addWidget(_btn("No ceiling here",
+                           lambda: self._ceil_room("off")))
+        row.addWidget(_btn("As the level", lambda: self._ceil_room(None),
+                           "What was set for this room taken off"))
+        f.addRow(row)
+        from . import ceilings as _CE
+        self.fc_face = QComboBox()
+        for k_, lab_, _c in _CE.COLOURS:
+            self.fc_face.addItem(lab_, k_)
+        self.fc_led = QComboBox()
+        for k_, lab_, _c in _CE.LEDS:
+            self.fc_led.addItem(lab_, k_)
+        f.addRow("Ceiling face", self.fc_face)
+        f.addRow("Cove / panel light", self.fc_led)
+        f.addRow(_btn("Apply the face to the room picked",
+                      lambda: self._ceil_room("face")))
         try:
             self._fit_rooms()
         except Exception:  # noqa: BLE001
@@ -4590,30 +4616,88 @@ class Panel(QWidget):
             return
         hide = doc.setdefault("fitout_hide", [])
         room = self.fc_room.currentText().split("  (")[0]
+        pb = poly.buffer(0.01)
         if kind is None:
-            n0 = len(hide)
             doc["fitout_hide"] = [h for h in hide if not (
-                h[0] == lid and poly.buffer(0.01).contains(
-                    Point(h[2], h[3])))]
-            self.commit(doc, f"{room}: lights and diffusers back "
-                             f"({n0 - len(doc['fitout_hide'])} rule(s) "
-                             "taken off; «Update from CAD» reads them "
-                             "again)")
+                h[0] == lid and pb.contains(Point(h[2], h[3])))]
+            # those deleted before 3.43 (gone from the model): read again
+            # from the CAD for this level; the other rooms' stay off
+            had = [f_ for f_ in doc.get("fitout") or []
+                   if f_.get("level") == lid and f_.get("kind") in
+                   ("light", "diffuser") and pb.contains(
+                       Point(f_.get("x", 1e9), f_.get("y", 1e9)))]
+            if not had:
+                try:
+                    from . import fitout as FO
+                    pl, _P = PJ._placed_plan(doc, lid)
+                    if pl is not None:
+                        FO.analyze(doc, lid, pl)
+                except Exception:  # noqa: BLE001
+                    log_error("panel._fit_room bring back")
+            n = sum(1 for f_ in doc.get("fitout") or []
+                    if f_.get("level") == lid and f_.get("kind") in
+                    ("light", "diffuser") and pb.contains(
+                        Point(f_.get("x", 1e9), f_.get("y", 1e9))))
+            from . import fitout as FO
+            FO._HIDE_CACHE.clear()
+            self.commit(doc, f"{room}: {n} light(s) / diffuser(s) back")
             return
-        keep, n = [], 0
-        for f_ in doc.get("fitout") or []:
-            if f_.get("kind") == kind and f_.get("level") == lid and \
-                    poly.buffer(0.01).contains(Point(f_.get("x", 1e9),
-                                                     f_.get("y", 1e9))):
-                n += 1
-                continue
-            keep.append(f_)
-        doc["fitout"] = keep
+        n = sum(1 for f_ in doc.get("fitout") or []
+                if f_.get("kind") == kind and f_.get("level") == lid
+                and pb.contains(Point(f_.get("x", 1e9), f_.get("y", 1e9))))
         if not any(h[0] == lid and h[1] == kind and abs(h[2] - x) < 1e-3
                    and abs(h[3] - y) < 1e-3 for h in hide):
             hide.append([lid, kind, x, y])
         what = {"light": "ceiling light", "diffuser": "AC diffuser"}[kind]
         self.commit(doc, f"{room}: {n} {what}(s) deleted (kept off)")
+
+    def _ceil_room(self, what):
+        """The false ceiling of the room picked in 8A (by name): "type" the
+        type / height picked above, "off" none, "face" the face colour and
+        cove light picked, None back to the level's."""
+        from shapely.geometry import Point
+
+        from . import walk as WK
+        data = self.fc_room.currentData()
+        if not data:
+            self.flash("Pick a room (↻ lists the rooms of the level "
+                       "picked at the top)")
+            return
+        lid, x, y = data
+        doc = self.doc()
+        poly = next((p for _n, p in WK.rooms(doc, lid)
+                     if p.buffer(0.01).contains(Point(x, y))), None)
+        if poly is None:
+            self.flash("That room is not there any more — ↻")
+            return
+        pb = poly.buffer(0.01)
+        lst = doc.setdefault("ceil_at", [])
+        mine = [e for e in lst if e[0] == lid and pb.contains(
+            Point(e[1], e[2]))]
+        cur = {}
+        for e in mine:
+            cur.update(e[3] or {})
+        doc["ceil_at"] = [e for e in lst if e not in mine]
+        room = self.fc_room.currentText().split("  (")[0]
+        if what is None:
+            self.commit(doc, f"{room}: false ceiling as the level")
+            return
+        if what == "type":
+            cur.pop("off", None)
+            cur["type"] = self.fc_kind.currentData()
+            cur["h"] = round(float(self.fc_h.value()), 4)
+            msg = f"{room}: {self.fc_kind.currentText()} false ceiling"
+        elif what == "off":
+            cur = {"off": True}
+            msg = f"{room}: no false ceiling"
+        else:
+            cur.pop("off", None)
+            cur["color"] = self.fc_face.currentData()
+            cur["led"] = self.fc_led.currentData()
+            msg = (f"{room}: ceiling face {self.fc_face.currentText()}, "
+                   f"light {self.fc_led.currentText()}")
+        doc["ceil_at"].append([lid, x, y, cur])
+        self.commit(doc, msg)
 
     def _fit_delete(self, kind, all_levels=False, ids=None):
         """The ceiling lights / diffusers deleted: those selected

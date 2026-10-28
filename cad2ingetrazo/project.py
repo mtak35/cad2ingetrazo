@@ -205,7 +205,7 @@ def empty() -> dict:
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
-            "chhatris": [], "fitout": [], "fitout_hide": []}
+            "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": []}
 
 
 def load(raw) -> dict:
@@ -295,6 +295,15 @@ def load(raw) -> dict:
                      and f.get("kind") in ("glass", "clad", "diffuser",
                                            "light", "liftdoor")]
     # the rooms whose lights / diffusers were deleted: kept off
+    doc["ceil_at"] = []          # false ceilings set by room (8A ▸ Room)
+    for e in raw.get("ceil_at") or []:
+        try:
+            if str(e[0]) in ids and isinstance(e[3], dict):
+                doc["ceil_at"].append([str(e[0]), float(e[1]), float(e[2]),
+                                       {k: e[3][k] for k in ("type", "h",
+                                        "off", "color", "led") if k in e[3]}])
+        except Exception:  # noqa: BLE001
+            continue
     doc["fitout_hide"] = [[str(h[0]), str(h[1]), float(h[2]), float(h[3])]
                           for h in raw.get("fitout_hide") or []
                           if isinstance(h, (list, tuple)) and len(h) == 4
