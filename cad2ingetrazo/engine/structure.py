@@ -2274,10 +2274,53 @@ def build(doc: dict, elevations) -> list[dict]:
                             "name": nm.rsplit(" ·", 1)[0], "level": lid,
                             "okind": "window", "faces": fs})
         els = [e for e in struct if e["level"] == lid and why_not(e) is None]
+        # the columns run on through the floor slab they stand on (and
+        # the slab cast over them), the slab cut round them: no slab edge
+        # drawn across a column in the elevations
+        thru = bool(doc.get("_col_thru", True))
+        col_cut = []
+        floor_s, top_s = [], []
+        if thru:
+            try:
+                from shapely.geometry import Polygon as _Pg, Point as _Pt
+                for s_ in els:
+                    if s_["type"] != "slab" or s_.get("grade") or \
+                            s_.get("zone") or s_.get("user") or \
+                            s_.get("skip"):
+                        continue
+                    pg_ = _Pg([tuple(p) for p in s_["corners"]]).buffer(0)
+                    if s_.get("top"):
+                        top_s.append((pg_, float(s_["t"])))
+                    elif not s_.get("roof"):
+                        floor_s.append((pg_, float(s_["t"])))
+            except Exception:  # noqa: BLE001
+                floor_s, top_s = [], []
         # columns
         for c in (e for e in els if e["type"] == "column"):
             top = (under if c.get("height", "level") == "level"
                    else z0 + float(c["height"])) - SHRINK
+            if thru and abs(float(c.get("base", 0.0) or 0.0)) < 1e-6:
+                try:
+                    pt_ = _Pt(*column_outline(c, 0.0)[0])
+                    ctr_ = _Pg(column_outline(c, 0.0)).centroid
+                    for pg_, t_ in floor_s:
+                        if pg_.buffer(0.05).contains(ctr_):
+                            col_cut.append({"corners": [list(q) for q in
+                                                        column_outline(c,
+                                                                       0.0)],
+                                            "_floor": True})
+                            c = dict(c, _bot=-t_)
+                            break
+                    if c.get("height", "level") == "level":
+                        for pg_, t_ in top_s:
+                            if pg_.buffer(0.05).contains(ctr_):
+                                col_cut.append({"corners": [
+                                    list(q) for q in column_outline(c, 0.0)],
+                                    "_top": True})
+                                top = under + t_ - SHRINK
+                                break
+                except Exception:  # noqa: BLE001
+                    pass
             sh = FIT_SHRINK if c.get("fit") else SHRINK
             piece = {"outer": _ccw(column_outline(c, sh)), "holes": []}
             bot = z0 + float(c.get("base", 0.0)) + SHRINK   # its base
@@ -2285,6 +2328,8 @@ def build(doc: dict, elevations) -> list[dict]:
                 # down as the walls go (on the ground: to the outside
                 # floor / the ground — a porch column stands on it)
                 bot -= _down(doc, {"base": 0.0}, li)
+            if c.get("_bot"):          # on down through its floor slab
+                bot = min(bot, z0 + float(c["_bot"]) + SHRINK)
             if top - bot < 0.05:
                 continue
             out.append(dict(_el(c, lid, W.solid(piece, bot, top)),
@@ -2384,6 +2429,12 @@ def build(doc: dict, elevations) -> list[dict]:
             if down_cut and not s.get("top") and not s.get("roof") and \
                     not s.get("zone"):
                 cut = list(cut) + down_cut
+            if col_cut and not s.get("zone") and not s.get("user") and \
+                    not s.get("roof"):
+                cc_ = [x for x in col_cut
+                       if x.get("_top" if s.get("top") else "_floor")]
+                if cc_:
+                    cut = list(cut) + cc_
             if cut:
                 parts_ = _minus(s, cut) or parts_
             band_ = []

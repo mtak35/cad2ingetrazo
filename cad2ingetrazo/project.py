@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.9144, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -2153,10 +2153,16 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
                 names.append("BALCONY")
         if any(BATH_ROOM.search(x) for x in names):
             h_ = max(min(float(o.get("h", 0.6)), head - bsill), 0.3)
+            # one size for the bathrooms' windows: none wider than 3'-0"
+            # (``bath_win_w``) — a ventilator, not a room's window
+            bw_ = float(st.get("bath_win_w", 0.9144) or 0.9144)
+            w_ = min(float(o.get("w", 0.6)), bw_)
             if abs(float(o.get("sill", 0.0)) - bsill) > 0.01 or \
-                    abs(float(o.get("h", 0.0)) - h_) > 0.01:
+                    abs(float(o.get("h", 0.0)) - h_) > 0.01 or \
+                    abs(float(o.get("w", 0.0)) - w_) > 0.01:
                 o["sill"] = round(bsill, 4)
                 o["h"] = round(h_, 4)
+                o["w"] = round(w_, 4)
                 out["bath"] += 1
             continue
         # any window in a balcony's wall (onto the flat or its own outer

@@ -458,11 +458,25 @@ def build(doc, z_of, room_key) -> list:
         except Exception:  # noqa: BLE001
             rails = None
         done_ = []
+        stair_feet = []
+        for s_ in doc.get("stairs") or []:     # a stair hall the CAD calls
+            if s_.get("level") != lid:           # «VOID» / «STAIR»: ceiled
+                continue
+            try:
+                from shapely.geometry import Polygon as _Pg
+                stair_feet.append(_Pg([tuple(p[:2]) for p in
+                                       s_["corners"]]).buffer(0))
+            except Exception:  # noqa: BLE001
+                continue
         for room in spaces.of_level(arch, lid):
             if room["area"] < 1.0:
                 continue
             rec_ = room.get("rec") or {}
-            if rec_.get("ceiling") not in BY and _open_air(room, rails):
+            hall = bool(re.search(r"VOID|STAIR|LOBBY|HALL",
+                                  str(room.get("name", "")), re.I)) and \
+                any(room["poly"].intersects(f_) for f_ in stair_feet)
+            if rec_.get("ceiling") not in BY and not hall and \
+                    _open_air(room, rails):
                 if rec_.get("ceiling") != "none" and \
                         doc["settings"].get("balcony_ceiling", True) and \
                         re.search(BALCONY, str(room.get("name", "")), re.I) \
@@ -540,16 +554,26 @@ def _balcony(doc, lid, room, order, z_of, rails):
     from .engine import walls as W
     arch = doc["arch"]
     i = order.index(lid) if lid in order else -1
-    if i < 0 or i + 1 >= len(order):
-        return None                       # nothing over it
-    up = order[i + 1]
+    if i < 0:
+        return None
+    up = order[i + 1] if i + 1 < len(order) else None
     poly = room["poly"]
     over = []
-    for s_ in PJ._floor_slabs(doc, up):
+    roof_slabs = [s_ for s_ in arch["structure"] if s_["type"] == "slab"
+                  and s_["level"] == lid and s_.get("roof")]
+    for s_ in (PJ._floor_slabs(doc, up) if up else []) + roof_slabs:
         try:
             over.append(Polygon(s_["corners"]).buffer(0))
         except Exception:  # noqa: BLE001
             continue
+    if not over and up is None:
+        # the top floor with no roof slab drawn yet: under the floor's
+        # own outline, as the roof will be cast over it
+        for s_ in PJ._floor_slabs(doc, lid):
+            try:
+                over.append(Polygon(s_["corners"]).buffer(0))
+            except Exception:  # noqa: BLE001
+                continue
     if not over:
         return None
     cover = poly.intersection(unary_union(over))
@@ -567,11 +591,16 @@ def _balcony(doc, lid, room, order, z_of, rails):
     zc = z0 + h
     t_up = 0.15
     try:
-        t_up = max(float(s_.get("t", 0.15)) for s_ in PJ._floor_slabs(
-            doc, up))
+        t_up = max(float(s_.get("t", 0.15)) for s_ in (
+            PJ._floor_slabs(doc, up) if up else roof_slabs) or
+            PJ._floor_slabs(doc, lid))
     except Exception:  # noqa: BLE001
         pass
-    zs = z_of[up] - t_up                  # the soffit of the slab above
+    if up is not None:
+        zs = z_of[up] - t_up              # the soffit of the slab above
+    else:
+        lv_ = next((v for v in arch["levels"] if v["id"] == lid), {})
+        zs = z_of[lid] + float(lv_.get("height") or 3.0) - t_up
     if zs <= zc + 0.02:
         zs = zc + 0.02
     ws = [w for w in arch["walls"] if w["level"] == lid
