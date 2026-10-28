@@ -8442,7 +8442,7 @@ class Panel(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             from . import skpwriter
-            st = skpwriter.save_skp(self.vp.scene, path)
+            st = skpwriter.save_skp(self.vp.scene, path, doc=doc)
         except Exception as e:  # noqa: BLE001
             log_error("panel.export_skp")
             self.flash(f"SketchUp file not written — {e}", 12000)

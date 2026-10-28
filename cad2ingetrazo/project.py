@@ -2066,6 +2066,51 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
     bsill = float(st.get("bath_sill", 1.524) or 1.524)
     out = {"doors": 0, "bath": 0}
 
+    from shapely.geometry import LineString
+    rails = []
+    for w_ in arch["walls"]:
+        if w_["level"] != lid or not (w_.get("rail") or re.search(
+                r"RAIL|PARAPET|UPSTAND", str(w_.get("name", "")), re.I)):
+            continue
+        try:
+            rails.append(LineString([tuple(q[:2]) for q in
+                                     W.points_of(w_, 16)]))
+        except Exception:  # noqa: BLE001
+            continue
+
+    def balcony_out(c, nv, t2, u_, wid):
+        """Out of the window: open floor and then a balcony railing within
+        3.5 m, straight out from anywhere along the window's width (a
+        balcony the plan never closed into a room, or one it named
+        wrongly)."""
+        for f_ in (-0.4, -0.2, 0.0, 0.2, 0.4):
+            a_ = (c[0] + nv[0] * t2 + u_[0] * wid * f_,
+                  c[1] + nv[1] * t2 + u_[1] * wid * f_)
+            ray = LineString([a_, (a_[0] + nv[0] * 3.5,
+                                   a_[1] + nv[1] * 3.5)])
+            for r_ in rails:
+                if ray.intersects(r_) and Point(a_).distance(
+                        ray.intersection(r_)) > 0.3:
+                    return True
+        return False
+
+    foot = None
+    try:                      # the floor's own slab(s): inside the building
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        ps_ = [_Pg([tuple(q[:2]) for q in e["corners"]]).buffer(0)
+               for e in arch["structure"] if e.get("type") == "slab"
+               and e.get("level") == lid and not e.get("zone")
+               and not e.get("grade") and len(e.get("corners") or []) >= 3]
+        if ps_:
+            foot = _uu(ps_).buffer(-0.05)
+            # the balconies are on the slab too: their rooms taken out
+            for r in rooms:
+                if BALCONY_ROOM.search(str(r.get("name") or "")):
+                    foot = foot.difference(r["poly"].buffer(0.05))
+    except Exception:  # noqa: BLE001
+        foot = None
+
     def name_at(p):
         for r in rooms:
             try:
@@ -2090,7 +2135,22 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
         t2 = float(w["t"]) / 2 + 0.4
         sides = [name_at(Point(c[0] + n[0] * t2 * sg, c[1] + n[1] * t2 * sg))
                  for sg in (1, -1)]
+        # a side no room was found on (a room the plan never closed), but
+        # under the floor's slab and not a balcony: inside the flat
+        for k_, sg in enumerate((1, -1)):
+            if sides[k_] is None and foot is not None:
+                q_ = Point(c[0] + n[0] * t2 * sg, c[1] + n[1] * t2 * sg)
+                if foot.contains(q_):
+                    sides[k_] = "INSIDE"
         names = [x for x in sides if x is not None]
+        for k_, sg in enumerate((1, -1)):    # a railed balcony out there
+            if (sides[k_] is None or not BALCONY_ROOM.search(sides[k_])) \
+                    and balcony_out(c, (n[0] * sg, n[1] * sg),
+                                    float(w["t"]) / 2 + 0.05, u,
+                                    float(o.get("w", 1.0))):
+                if sides[k_] is not None and sides[k_] in names:
+                    names.remove(sides[k_])
+                names.append("BALCONY")
         if any(BATH_ROOM.search(x) for x in names):
             h_ = max(min(float(o.get("h", 0.6)), head - bsill), 0.3)
             if abs(float(o.get("sill", 0.0)) - bsill) > 0.01 or \
@@ -2099,8 +2159,9 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
                 o["h"] = round(h_, 4)
                 out["bath"] += 1
             continue
-        if any(BALCONY_ROOM.search(x) for x in names) and \
-                not all(BALCONY_ROOM.search(x) for x in names):
+        # any window in a balcony's wall (onto the flat or its own outer
+        # wall, the balcony glazed in) — a sliding door
+        if any(BALCONY_ROOM.search(x) for x in names):
             new = opening_as(o, "door", st)
             new.update(style="sliding", leaves=2, sill=0.0,
                        h=round(head, 4))
@@ -2126,6 +2187,149 @@ def _set_wall_end(doc, w, k, P) -> None:
                 if o.get("wall") == w["id"]:
                     o["pos"] = round(float(o["pos"]) + d, 4)
     w[k] = P
+
+
+def join_angled_walls(doc, lid, reach=0.6) -> int:
+    """Walls that meet at an angle joined the way the engine joins them
+    cleanly: an end left short of, or poking through, another wall (the
+    pairing of the CAD's lines leaves both at a slanted wall) is put on
+    that wall's line — at a corner both ends on the crossing of the two
+    lines (mitred), at a T the stem's end on the passing wall's line (cut
+    on its face), two pieces of one wall facing across a slit joined.
+    Square (90°) junctions already closed are left. The number of ends
+    moved."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and w.get("type") != "curtain"
+          and math.dist(w["a"], w["b"]) > 0.05]
+
+    def U(w):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        return ((b[0] - a[0]) / L, (b[1] - a[1]) / L), L
+
+    def end_dir(w, k):                      # pointing out of the wall
+        u, _L = U(w)
+        return (-u[0], -u[1]) if k == "a" else u
+
+    def cross(p, r, q, s_):                 # p + t r = q + v s
+        den = r[0] * s_[1] - r[1] * s_[0]
+        if abs(den) < 1e-9:
+            return None
+        t = ((q[0] - p[0]) * s_[1] - (q[1] - p[1]) * s_[0]) / den
+        return (p[0] + r[0] * t, p[1] + r[1] * t), t
+
+    def joined(w, k):
+        P = w[k]
+        for o in ws:
+            if o is w:
+                continue
+            for kk in ("a", "b"):
+                if math.dist(P, o[kk]) <= 0.02:
+                    return True
+            u, L = U(o)
+            d = (P[0] - o["a"][0], P[1] - o["a"][1])
+            along = d[0] * u[0] + d[1] * u[1]
+            off = abs(-d[0] * u[1] + d[1] * u[0])
+            if -0.02 <= along <= L + 0.02 and off <= float(o["t"]) / 2 + 0.02:
+                return True
+        return False
+
+    def ang(w, o):
+        u1, _ = U(w)
+        u2, _ = U(o)
+        c = abs(u1[0] * u2[0] + u1[1] * u2[1])
+        return math.degrees(math.acos(min(c, 1.0)))
+    n = 0
+    done = set()
+    for w in ws:
+        for k in ("a", "b"):
+            if (id(w), k) in done:
+                continue
+            P = tuple(w[k])
+            dv = end_dir(w, k)
+            loose = not joined(w, k)
+            cands = []
+            for o in ws:
+                if o is w:
+                    continue
+                th = ang(w, o)
+                R = max(float(w["t"]), float(o["t"])) / 2 + reach
+                u2, L2 = U(o)
+                if th < 10:                     # a slit: same line, facing
+                    for kk in ("a", "b"):
+                        Q = tuple(o[kk])
+                        g = math.dist(P, Q)
+                        if not 0.02 < g <= R:
+                            continue
+                        to = ((Q[0] - P[0]) / g, (Q[1] - P[1]) / g)
+                        side = abs(-(Q[0] - P[0]) * dv[1] +
+                                   (Q[1] - P[1]) * dv[0])
+                        if to[0] * dv[0] + to[1] * dv[1] > 0.95 and \
+                                side < 0.05:
+                            cands.append((0, g, "slit", o, kk, None))
+                    continue
+                # this end poking through o (past its far face)?
+                offp = abs(-(P[0] - o["a"][0]) * u2[1] +
+                           (P[1] - o["a"][1]) * u2[0])
+                dpa = (P[0] - o["a"][0]) * u2[0] + (P[1] - o["a"][1]) * u2[1]
+                poke = -0.02 <= dpa <= L2 + 0.02 and \
+                    float(o["t"]) / 2 + 0.02 < offp < R
+                if not (loose or poke):
+                    continue
+                X = cross(P, dv, o["a"], u2)
+                if X is None:
+                    continue
+                X, t = X
+                if abs(t) > R:
+                    continue
+                d = (X[0] - o["a"][0], X[1] - o["a"][1])
+                along = d[0] * u2[0] + d[1] * u2[1]
+                kk = min(("a", "b"), key=lambda e: math.dist(o[e], X))
+                if math.dist(o[kk], X) <= R and (
+                        along <= R or along >= L2 - R):
+                    cands.append((1, abs(t), "corner", o, kk, X))
+                if -0.05 < along < L2 + 0.05:
+                    cands.append((2, abs(t), "tee", o, None, X))
+            cands.sort(key=lambda c: (c[0], c[1]))
+
+            def node(o, kk):               # o's end already meets another
+                for x in ws:
+                    if x is o or x is w:
+                        continue
+                    for e in ("a", "b"):
+                        if math.dist(o[kk], x[e]) <= 0.02:
+                            return True
+                return (id(o), kk) in done
+            for _p, _g, kind, o, kk, X in cands:
+                other_w = w["b" if k == "a" else "a"]
+                if kind == "slit":
+                    if node(o, kk):
+                        continue
+                    M_ = ((P[0] + o[kk][0]) / 2, (P[1] + o[kk][1]) / 2)
+                    _set_wall_end(doc, w, k, M_)
+                    _set_wall_end(doc, o, kk, M_)
+                    done.update({(id(w), k), (id(o), kk)})
+                    n += 2
+                    break
+                if kind == "corner":
+                    if node(o, kk) or \
+                            math.dist(X, other_w) < 0.1 or \
+                            math.dist(X, o["b" if kk == "a" else "a"]) < 0.1:
+                        continue
+                    _set_wall_end(doc, w, k, X)
+                    _set_wall_end(doc, o, kk, X)
+                    done.update({(id(w), k), (id(o), kk)})
+                    n += 2
+                    break
+                if math.dist(X, other_w) < 0.1:
+                    continue
+                _set_wall_end(doc, w, k, X)
+                done.add((id(w), k))
+                n += 1
+                break
+    return n
 
 
 def trim_wall_stubs(doc, lid, most=0.2) -> int:
@@ -4894,6 +5098,21 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.trim_wall_stubs")
+    try:                       # slanted junctions joined clean
+        rep["wall_angles"] = join_angled_walls(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.join_angled_walls")
+    try:                       # once more, the rooms closed now
+        b2_ = balcony_doors_bath_windows(doc, lid)
+        if b2_:
+            bb_ = rep.setdefault("balcony_bath", {})
+            if isinstance(bb_, dict):
+                for k_, v_ in b2_.items():
+                    bb_[k_] = bb_.get(k_, 0) + v_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.balcony_doors_bath_windows 2")
     try:                       # a duct's box is not a column
         rep["false_columns"] = drop_false_columns(doc, lid)
     except Exception:  # noqa: BLE001

@@ -166,6 +166,156 @@ def _ensure_scaffold() -> None:
     mod._c2i_patched = True
 
 
+# ---- the walls of a floor as ONE continuous body --------------------------
+def _plane_of(pts):
+    """(unit normal, d) of a planar loop (Newell), d = n·p."""
+    nx = ny = nz = 0.0
+    for i, p in enumerate(pts):
+        q = pts[(i + 1) % len(pts)]
+        nx += (p[1] - q[1]) * (p[2] + q[2])
+        ny += (p[2] - q[2]) * (p[0] + q[0])
+        nz += (p[0] - q[0]) * (p[1] + q[1])
+    L = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if L < 1e-12:
+        return None
+    n = (nx / L, ny / L, nz / L)
+    d = sum(n[k] * pts[0][k] for k in range(3))
+    return n, d
+
+
+def _basis(n):
+    a = (1.0, 0.0, 0.0) if abs(n[0]) < 0.9 else (0.0, 1.0, 0.0)
+    u = (n[1] * a[2] - n[2] * a[1], n[2] * a[0] - n[0] * a[2],
+         n[0] * a[1] - n[1] * a[0])
+    L = math.sqrt(sum(c * c for c in u))
+    u = tuple(c / L for c in u)
+    v = (n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2],
+         n[0] * u[1] - n[1] * u[0])
+    return u, v
+
+
+def merge_walls(items, doc) -> tuple:
+    """The walls of each floor as one body, as a SketchUp user models them:
+    their faces in each plane joined (a facade of five walls one face, the
+    tops one face), the faces where two walls touch (an end against a
+    side) taken out of both — the walls run on into each other, the
+    openings stay cut. (consumed group ids, [(name, layer, [(loop m,
+    [holes m], rgba)])])."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    try:
+        from shapely import set_precision
+    except Exception:  # noqa: BLE001
+        set_precision = None
+    from .host import KEY
+    arch = doc["arch"]
+    recs = {w["id"]: w for w in arch["walls"]}
+    names = {lv["id"]: lv["name"] for lv in arch["levels"]}
+    by_lv: dict = {}
+    used = set()
+    for g, m, lay, mat in items:
+        t = ((getattr(g, "ext", None) or {}).get(KEY) or {})
+        if t.get("type") != "wall" or t.get("part"):
+            continue
+        w = recs.get(t.get("id"))
+        if w is None or w.get("rail") or w.get("type") == "curtain":
+            continue
+        by_lv.setdefault((t.get("level"), lay), []).append((g, m, mat))
+        used.add(id(g))
+    out = []
+    for (lid, lay), its in by_lv.items():
+        planes: dict = {}
+        loose = []
+        for g, m, mat in its:
+            for f in _faces(g.mesh):
+                pts = [_world(v.position, m) for v in f.loop]
+                holes = [[_world(v.position, m) for v in h]
+                         for h in getattr(f, "hole_loops", None) or []]
+                rgba = _face_paint(f, mat)
+                pl = _plane_of(pts)
+                if pl is None:
+                    continue
+                n, d = pl
+                sg = 1
+                for c in n:                       # one key per plane, both
+                    if abs(c) > 1e-6:             # facings under it
+                        sg = 1 if c > 0 else -1
+                        break
+                key = (tuple(round(sg * c, 3) for c in n), round(sg * d, 3))
+                planes.setdefault(key, []).append((sg, pts, holes, rgba))
+        faces = []
+        for (nk, dk), fl in planes.items():
+            n = nk
+            u, v = _basis(n)
+            o = tuple(n[k] * dk for k in range(3))
+
+            def to2(p):
+                q = (p[0] - o[0], p[1] - o[1], p[2] - o[2])
+                return (q[0] * u[0] + q[1] * u[1] + q[2] * u[2],
+                        q[0] * v[0] + q[1] * v[1] + q[2] * v[2])
+
+            def to3(xy):
+                return tuple(o[k] + u[k] * xy[0] + v[k] * xy[1]
+                             for k in range(3))
+            if len(fl) == 1:
+                sg, pts, holes, rgba = fl[0]
+                faces.append((pts, holes, rgba))
+                continue
+            side = {1: {}, -1: {}}
+            try:
+                for sg, pts, holes, rgba in fl:
+                    P = Polygon([to2(p) for p in pts],
+                                [[to2(p) for p in h] for h in holes])
+                    if not P.is_valid:
+                        P = P.buffer(0)
+                    if P.is_empty:
+                        continue
+                    side[sg].setdefault(rgba, []).append(P)
+                U = {sg: {c: unary_union(ps) for c, ps in d_.items()}
+                     for sg, d_ in side.items()}
+                allp = {sg: unary_union(list(d_.values())) if d_ else None
+                        for sg, d_ in U.items()}
+                touch = None
+                if allp[1] is not None and allp[-1] is not None:
+                    touch = allp[1].intersection(allp[-1])
+                    if touch.area < 1e-6:
+                        touch = None
+                for sg, d_ in U.items():
+                    for rgba, geo in d_.items():
+                        if touch is not None:
+                            geo = geo.difference(touch)
+                        if set_precision is not None:
+                            try:
+                                geo = set_precision(geo, 1e-4)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        for q in getattr(geo, "geoms", [geo]):
+                            if q.geom_type != "Polygon" or q.area < 1e-5:
+                                continue
+                            q = q.simplify(0.0002)
+                            ext = list(q.exterior.coords)[:-1]
+                            # facing: CCW in (u, v) faces +n
+                            ccw = Polygon(ext).exterior.is_ccw
+                            if (sg > 0) != ccw:
+                                ext = ext[::-1]
+                            hs = []
+                            for h in q.interiors:
+                                hp = list(h.coords)[:-1]
+                                hs.append([to3(x) for x in hp])
+                            faces.append(([to3(x) for x in ext], hs, rgba))
+            except Exception:  # noqa: BLE001 — that plane as it was
+                for sg, pts, holes, rgba in fl:
+                    faces.append((pts, holes, rgba))
+        out.append((f"Walls · {names.get(lid, lid)}", lay, faces))
+    return used, out
+
+
+def _world(v, m):
+    if m is not None:
+        v = m.map(v)
+    return (v.x(), v.y(), v.z())
+
+
 WRITER = ""          # which writer made the last file
 
 
@@ -192,13 +342,22 @@ def new_builder():
     return openskp.create()
 
 
-def save_skp(scene, path, progress=None) -> dict:
+def save_skp(scene, path, progress=None, doc=None, merge=True) -> dict:
     """Write ``scene`` to ``path`` as a .skp. {"definitions", "instances",
     "groups", "faces"}; raises RuntimeError when OpenSKP is missing."""
     from PySide6.QtGui import QMatrix4x4
 
     b = new_builder()
     items = list(_walk(getattr(scene, "groups", [])))
+    merged = []
+    if doc is not None and merge:
+        try:                       # the walls of each floor: one body
+            used, merged = merge_walls(items, doc)
+            items = [it for it in items if id(it[0]) not in used]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("skpwriter.merge_walls")
+            merged = []
     layers = {getattr(L, "name", ""): getattr(L, "visible", True)
               for L in getattr(scene, "layers", []) or []}
 
@@ -231,10 +390,14 @@ def save_skp(scene, path, progress=None) -> dict:
     if loose is not None:
         for f in _faces(loose):
             need(_face_paint(f, None))
+    for _n, _lay, fs_ in merged:
+        for _p, _h, rgba_ in fs_:
+            need(rgba_)
 
     # 2 tags
     tags: dict = {}
-    for lay in sorted({lay for _g, _m, lay, _mt in items if lay}):
+    for lay in sorted({lay for _g, _m, lay, _mt in items if lay} |
+                      {lay for _n, lay, _f in merged if lay}):
         tags[lay] = b.add_layer(_nm(lay) or "Tag", **_kw(b.add_layer,
                                            hidden=not layers.get(lay, True)))
 
@@ -298,6 +461,36 @@ def save_skp(scene, path, progress=None) -> dict:
             for f in fs:
                 stats["faces"] += put(gb, f, None, mat, None)
         stats["groups"] += 1
+    # 4b the walls of each floor, joined into one body
+    for nm_, lay_, fs_ in merged:
+        if not fs_:
+            continue
+        with b.add_group(**_kw(b.add_group, name=_nm(nm_),
+                               layer=tags.get(lay_))) as gb:
+            for pts, holes, rgba in fs_:
+                P = _clean([tuple(round(c * M_TO_IN, 4) for c in p)
+                            for p in pts])
+                if len(P) < 3:
+                    continue
+                H = [h_ for h_ in (_clean([tuple(round(c * M_TO_IN, 4)
+                                                 for c in p) for p in h])
+                                   for h in holes) if len(h_) >= 3]
+                kw = dict(material=mats.get(rgba), layer=None)
+                try:
+                    if H and not has_holes:
+                        raise ValueError("holes")
+                    gb.add_face(P, **_kw(gb.add_face, holes=H or None,
+                                         auto_triangulate=True, **kw))
+                    stats["faces"] += 1
+                except Exception:  # noqa: BLE001
+                    try:
+                        gb.add_face(P, **_kw(gb.add_face,
+                                             auto_triangulate=True, **kw))
+                        stats["faces"] += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+        stats["groups"] += 1
+
     # 5 the instances (after every definition and group)
     for k, uses in defs.items():
         for g, m, lay, _mat in uses:
