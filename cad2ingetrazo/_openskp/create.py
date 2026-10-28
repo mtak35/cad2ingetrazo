@@ -1236,7 +1236,8 @@ class _ArchiveWriter:
         self.buf += _u32(0)  # placeholder entity count, patched by the caller
         return slot, count_patch_pos
 
-    def write_definition_tail(self, name: str, behavior: int = 0) -> None:
+    def write_definition_tail(self, name: str, behavior: int = 0,
+                              is_group: bool = False) -> None:
         """Close out a ``CComponentDefinition`` record: relationship count,
         GUID, name, timestamp, behavior flags, and a default thumbnail.
 
@@ -1256,6 +1257,13 @@ class _ArchiveWriter:
         # _read_definition reads exactly that byte).
         gap = bytearray(43)
         gap[43 - 9] = behavior & 0xFF
+        # byte -4: the definition is a GROUP's (ground truth: a group made
+        # in SketchUp 2025 and saved as 2017 carries 01 here, a component
+        # definition 00) - without it SketchUp opens every group as a
+        # component definition: listed among the components, copies not
+        # made unique when edited (CAD2IngeTrazo 3.38.1)
+        if is_group:
+            gap[43 - 4] = 1
         self.buf += bytes(gap)
         self.write_thumbnail()
 
@@ -1671,7 +1679,12 @@ class _ArchiveWriter:
         else:
             self._preamble()
         self._drawbase(mat=face_material, layer=face_layer, hidden=hidden)
-        self.buf += _f64(nx) + _f64(ny) + _f64(nz) + _f64(d)
+        # SketchUp stores the plane as a*x + b*y + c*z + d = 0 (what it
+        # writes itself, re-saving one of these files), so the offset goes
+        # out negated - with n.p = d written as is, every face sits on the
+        # wrong plane in SketchUp: clicks miss it, push/pull and inference
+        # misbehave (CAD2IngeTrazo 3.38.1).
+        self.buf += _f64(nx) + _f64(ny) + _f64(nz) + _f64(-d)
         self.buf += _u32(1 + len(holes))  # nloops
 
         loop_slot = self._new_of_known_class("CLoop", schema=1)
@@ -2143,7 +2156,9 @@ class ComponentDefinitionBuilder:
             raise SkpWriteError(f"component definition {self.name!r} has no geometry - add at least one face")
         writer = self._skp._definition_writer
         struct.pack_into("<I", writer.buf, self._count_patch_pos, self._new_entity_count)
-        writer.write_definition_tail(self.name, behavior=self.behavior)
+        writer.write_definition_tail(
+            self.name, behavior=self.behavior,
+            is_group=self._group_placement is not None)
         self._closed = True
         self._skp._open_definition = None
         if self._group_placement is not None:
