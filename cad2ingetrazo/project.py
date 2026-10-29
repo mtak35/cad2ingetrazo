@@ -2219,6 +2219,87 @@ def _set_wall_end(doc, w, k, P) -> None:
     w[k] = P
 
 
+def tidy_wall_junctions(doc, lid, slit=0.12) -> dict:
+    """Junction clean-up the CAD's line-pairing leaves:
+
+    * a slit (up to ``slit``) between two parallel walls side by side —
+      both widened toward each other till they touch (one solid wall);
+    * a short piece (under 1 m) going on in line from a longer wall but a
+      little thicker or thinner (up to 5 cm) — a box sticking out at the
+      junction: given the longer wall's thickness and line.
+
+    {"slits": n, "pieces": m}."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and w.get("type") != "curtain"
+          and math.dist(w["a"], w["b"]) > 0.05]
+
+    def U(w):
+        L = math.dist(w["a"], w["b"])
+        return ((w["b"][0] - w["a"][0]) / L, (w["b"][1] - w["a"][1]) / L), L
+    ns = npc = 0
+    done = set()
+    for i, A in enumerate(ws):                 # slits
+        u, L = U(A)
+        n = (-u[1], u[0])
+        for B in ws[i + 1:]:
+            ub, LB = U(B)
+            if abs(u[0] * ub[0] + u[1] * ub[1]) < 0.999:
+                continue
+            sB = [(p[0] - A["a"][0]) * u[0] + (p[1] - A["a"][1]) * u[1]
+                  for p in (B["a"], B["b"])]
+            if min(L, max(sB)) - max(0.0, min(sB)) < 0.2:
+                continue
+            oB = sum((p[0] - A["a"][0]) * n[0] + (p[1] - A["a"][1]) * n[1]
+                     for p in (B["a"], B["b"])) / 2
+            tA, tB = float(A["t"]), float(B["t"])
+            gap = abs(oB) - tA / 2 - tB / 2
+            if not 0.002 < gap <= slit:
+                continue
+            sg = 1 if oB > 0 else -1
+            g2 = gap / 2 + 0.003
+            for W_, sgn, t_ in ((A, sg, tA), (B, -sg, tB)):
+                # thicker by g2 and its line moved g2/2 toward the other
+                d = (n[0] * sgn * g2 / 2, n[1] * sgn * g2 / 2)
+                W_["a"] = [round(W_["a"][0] + d[0], 4),
+                           round(W_["a"][1] + d[1], 4)]
+                W_["b"] = [round(W_["b"][0] + d[0], 4),
+                           round(W_["b"][1] + d[1], 4)]
+                W_["t"] = round(t_ + g2, 4)
+            ns += 1
+    for S in ws:                               # short odd pieces in line
+        u, L = U(S)
+        if L > 1.0 or S["id"] in done:
+            continue
+        best = None
+        for N in ws:
+            if N is S:
+                continue
+            un, LN = U(N)
+            if LN <= L or abs(u[0] * un[0] + u[1] * un[1]) < 0.999:
+                continue
+            if not any(math.dist(S[e], N[f]) < 0.25 for e in ("a", "b")
+                       for f in ("a", "b")):
+                continue
+            dt = abs(float(S["t"]) - float(N["t"]))
+            if 0.003 < dt <= 0.05 and (best is None or LN > best[1]):
+                best = (N, LN)
+        if best is None:
+            continue
+        N = best[0]
+        un, _LN = U(N)
+        nn = (-un[1], un[0])
+        for e in ("a", "b"):                   # onto N's line
+            p = S[e]
+            off = (p[0] - N["a"][0]) * nn[0] + (p[1] - N["a"][1]) * nn[1]
+            S[e] = [round(p[0] - nn[0] * off, 4), round(p[1] - nn[1] * off, 4)]
+        S["t"] = N["t"]
+        done.add(S["id"])
+        npc += 1
+    return {"slits": ns, "pieces": npc}
+
+
 def close_wall_gaps(doc, lid, corner=1.0, jog=0.65) -> int:
     """The gaps the CAD's line-pairing leaves between two walls that
     should meet, closed:
@@ -2325,6 +2406,60 @@ def close_wall_gaps(doc, lid, corner=1.0, jog=0.65) -> int:
     if adds:
         from .engine import model as M_
         arch["walls"] += M_.new_walls(arch["walls"], adds)
+    return n
+
+
+def square_t_nodes(doc, lid) -> int:
+    """Three walls ending on one point, two of them in line (a run carried
+    on through, perhaps two thicknesses): the third — the stem of the T —
+    stopped on the run's face instead of the shared point, so the engine
+    butts it square and leaves the run straight (no slanted cut across
+    the run). The number of stems moved."""
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and w.get("type") != "curtain"
+          and math.dist(w["a"], w["b"]) > 0.3]
+    nodes = []
+    for w in ws:
+        for k in ("a", "b"):
+            P = tuple(w[k])
+            for nd in nodes:
+                if math.dist(nd[0], P) <= 0.02:
+                    nd[1].append((w, k))
+                    break
+            else:
+                nodes.append((P, [(w, k)]))
+
+    def out_dir(w, k):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        return (-u[0], -u[1]) if k == "a" else u
+    n = 0
+    for P, ends in nodes:
+        if len(ends) != 3:
+            continue
+        dirs = [out_dir(w, k) for w, k in ends]
+        pair = None
+        for i in range(3):
+            for j in range(i + 1, 3):
+                if dirs[i][0] * dirs[j][0] + dirs[i][1] * dirs[j][1] < -0.99:
+                    pair = (i, j)
+        if pair is None:
+            continue
+        st = 3 - pair[0] - pair[1]
+        w, k = ends[st]
+        dv = dirs[st]
+        c = abs(dv[0] * dirs[pair[0]][1] - dv[1] * dirs[pair[0]][0])
+        if c < 0.5:                     # the stem nearly in line too
+            continue
+        t_run = min(float(ends[pair[0]][0]["t"]), float(ends[pair[1]][0]["t"]))
+        back = t_run / 2 / c            # to the run's face, along the stem
+        if math.dist(w["a"], w["b"]) - back < 0.2:
+            continue
+        _set_wall_end(doc, w, k, (P[0] - dv[0] * back, P[1] - dv[1] * back))
+        n += 1
     return n
 
 
@@ -2444,8 +2579,11 @@ def join_angled_walls(doc, lid, reach=0.6) -> int:
             for _p, _g, kind, o, kk, X in cands:
                 other_w = w["b" if k == "a" else "a"]
                 if kind == "slit":
-                    if node(o, kk):
-                        continue
+                    if node(o, kk):         # o's end held by a third wall:
+                        _set_wall_end(doc, w, k, tuple(o[kk]))  # w on to it
+                        done.add((id(w), k))
+                        n += 1
+                        break
                     M_ = ((P[0] + o[kk][0]) / 2, (P[1] + o[kk][1]) / 2)
                     _set_wall_end(doc, w, k, M_)
                     _set_wall_end(doc, o, kk, M_)
@@ -2663,12 +2801,50 @@ def slab_to_inner_faces(doc, lid) -> int:
     if not ws:
         return 0
     n = 0
+    # the building's own footprint: what its walls, piers and railings
+    # close round — a slab never reaches out past it (a corner, a pier, a
+    # fin the CAD's slab line runs round)
+    encl = None
+    try:
+        parts_ = SE.wall_polys([w for w in arch["walls"] if w["level"] == lid
+                                and "a" in w and not w.get("rail")
+                                and W.why_not(w) is None])
+        from .ceilings import _rail_line
+        for w in arch["walls"]:              # the balconies' railings
+            if w["level"] == lid and "a" in w and w.get("rail"):
+                try:
+                    parts_.append(_rail_line(w).buffer(max(float(
+                        w.get("curb_t") or 0.0762) / 2, 0.04)))
+                except Exception:  # noqa: BLE001
+                    continue
+        # (the columns left out: a pier standing proud of the wall keeps
+        # no ledge of slab round it)
+        WU_ = unary_union(parts_)
+        # (closed only over the slits where walls nearly meet: a notch
+        # round a pier or a corner stays out of the slab)
+        cl_ = WU_.buffer(0.45, join_style=2).buffer(-0.45, join_style=2)
+        encl = unary_union([Polygon(g.exterior) for g in getattr(
+            cl_, "geoms", [cl_]) if g.geom_type == "Polygon"
+            and Polygon(g.exterior).area > 10.0]) or None
+    except Exception:  # noqa: BLE001
+        encl = None
     for e in arch["structure"]:
         if e["type"] != "slab" or e["level"] != lid or not e.get("corners") \
                 or e.get("user") or e.get("roof") or e.get("zone"):
             continue
         try:
             sp = Polygon(e["corners"]).buffer(0)
+            if encl is not None and not encl.is_empty:
+                sp2 = sp.intersection(encl.buffer(0.005, join_style=2))
+                ps_ = [g for g in getattr(sp2, "geoms", [sp2])
+                       if g.geom_type == "Polygon" and g.area > 0.05]
+                if ps_ and 0.85 * sp.area < sum(g.area for g in ps_) < \
+                        sp.area - 0.02:
+                    sp = max(ps_, key=lambda g: g.area)
+                    e["corners"] = [[round(x, 4), round(y, 4)] for x, y in
+                                    list(sp.simplify(0.003).exterior
+                                         .coords)[:-1]]
+                    n += 1
             cut = []
             for w in ws:
                 c = LineString([w["a"], w["b"]])
@@ -5247,6 +5423,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.close_wall_gaps")
+    try:                       # T junctions butted square
+        rep["wall_tees"] = square_t_nodes(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.square_t_nodes")
+    try:                       # slits closed, odd pieces made in line
+        rep["wall_tidy"] = tidy_wall_junctions(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.tidy_wall_junctions")
     try:                       # once more, the rooms closed now
         b2_ = balcony_doors_bath_windows(doc, lid)
         if b2_:

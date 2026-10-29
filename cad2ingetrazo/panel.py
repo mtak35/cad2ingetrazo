@@ -5279,6 +5279,40 @@ class Panel(QWidget):
         self.commit(doc, f"Floor finish {FN.label(key) if key != 'none' else 'as built'}: "
                          f"{n} room(s)")
 
+    def _ceiling_point(self, cid):
+        """(level, x, y) of a point inside the false ceiling ``cid`` built
+        in the model (a corridor's, a part of a room's), or None."""
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        for g in PJ.all_groups(self.vp.scene):
+            t = PJ.tag_of(g) or {}
+            if t.get("type") != "ceiling" or t.get("id") != cid:
+                continue
+            mesh = getattr(g, "mesh", None)
+            if mesh is None:
+                continue
+            M = getattr(g, "xform", None)
+            polys = []
+            for f in mesh.faces:
+                try:
+                    vs = [M.map(v) if M is not None else v
+                          for v in f.vertices]
+                    if max(v.z() for v in vs) - min(v.z() for v in vs) \
+                            > 0.01 or len(vs) < 3:
+                        continue
+                    pg = Polygon([(v.x(), v.y()) for v in vs]).buffer(0)
+                    if pg.area > 0.05:
+                        polys.append(pg)
+                except Exception:  # noqa: BLE001
+                    continue
+            if not polys:
+                continue
+            u = unary_union(polys)
+            big = max(getattr(u, "geoms", [u]), key=lambda q: q.area)
+            p = big.representative_point()
+            return t.get("level"), round(p.x, 3), round(p.y, 3)
+        return None
+
     def apply_clad(self, kind):
         doc = self.doc()
         n = 0
@@ -5307,8 +5341,20 @@ class Panel(QWidget):
         if rids:
             n = 0
             for rid in rids:
-                rec = PJ.room_record(doc, rid)
-                if rec is None:
+                rec = PJ.room_record(doc, rid) if "#" not in str(rid) \
+                    else None
+                if rec is None:          # a corridor / a part of a room:
+                    pt = self._ceiling_point(rid)   # set where it is
+                    if pt is None:
+                        continue
+                    lid_, x_, y_ = pt
+                    lst = doc.setdefault("ceil_at", [])
+                    lst[:] = [e for e in lst if not (
+                        e[0] == lid_ and math.hypot(e[1] - x_, e[2] - y_)
+                        < 0.05)]
+                    lst.append([lid_, x_, y_, {"off": True} if
+                                kind == "none" else {"type": kind}])
+                    n += 1
                     continue
                 rec["ceiling"] = kind
                 n += 1
