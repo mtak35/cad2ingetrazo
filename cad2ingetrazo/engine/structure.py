@@ -2598,10 +2598,31 @@ def _merge_level(doc, lid, li, mine, plans, openings, out, z0, under):
         if cad is not None and not cad.is_empty:
             try:
                 near = cad.intersection(model.buffer(0.3, join_style=2))
-                rest = model.difference(cad.buffer(0.15, join_style=2))
-                over = [fp.intersection(model) for fp, _a, _b in fps]
-                U = unary_union([near, rest] + over).buffer(
-                    0.003, join_style=2).buffer(-0.003, join_style=2)
+                cb = cad.buffer(0.35, join_style=2)
+                # a wall the CAD draws (a band along most of it): its band
+                # only, as drawn; a wall the CAD closes no band for: the
+                # wall read (less where a band is)
+                rest = [pl.difference(cad.buffer(0.02, join_style=2))
+                        for _w, pl, _o in items
+                        if pl.intersection(cb).area < 0.6 * pl.area]
+                over = []                # over / under the openings: the
+                for w, _pl, ops in items:    # CAD's band carried across
+                    if not ops:
+                        continue
+                    seg = W.centre(w)
+                    for o in ops:
+                        span = WM.footprint(w, o, seg, extra=0.5)
+                        wide = WM.footprint(dict(w), dict(
+                            o, w=float(o["w"]) + 0.6), seg, extra=0.5)
+                        side = cad.intersection(wide)
+                        if not side.is_empty and side.area > 0.01:
+                            over.append(side.convex_hull.intersection(span))
+                        else:
+                            over.append(WM.footprint(w, o, seg)
+                                        .intersection(model))
+                U = unary_union([near] + rest + over)
+                # the slits under 0.2 m between two bands closed
+                U = U.buffer(0.1, join_style=2).buffer(-0.1, join_style=2)
             except Exception:  # noqa: BLE001
                 U = model
         faces = WM.merged_faces(U, fps, b, top)
