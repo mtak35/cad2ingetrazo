@@ -410,7 +410,10 @@ def save_skp(scene, path, progress=None, doc=None, merge=True) -> dict:
         holes = [h_ for h_ in (_clean([_pt(v.position, m) for v in h])
                                for h in getattr(f, "hole_loops", None) or [])
                  if len(h_) >= 3]
-        kw = dict(material=mats.get(_face_paint(f, mat)), layer=layer)
+        m_ = mats.get(_face_paint(f, mat))
+        # both sides painted: glass seen from inside stays glass (the
+        # back's default material is opaque), a wall the same both faces
+        kw = dict(material=m_, back_material=m_, layer=layer)
         try:
             if holes and not has_holes:
                 raise ValueError("holes")
@@ -475,7 +478,8 @@ def save_skp(scene, path, progress=None, doc=None, merge=True) -> dict:
                 H = [h_ for h_ in (_clean([tuple(round(c * M_TO_IN, 4)
                                                  for c in p) for p in h])
                                    for h in holes) if len(h_) >= 3]
-                kw = dict(material=mats.get(rgba), layer=None)
+                kw = dict(material=mats.get(rgba),
+                          back_material=mats.get(rgba), layer=None)
                 try:
                     if H and not has_holes:
                         raise ValueError("holes")

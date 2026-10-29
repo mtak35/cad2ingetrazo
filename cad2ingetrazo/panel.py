@@ -5119,6 +5119,44 @@ class Panel(QWidget):
                              lambda s_=sd: self._set_finish(wid, s_, None,
                                                             None))
 
+    def _curtain_menu(self, menu) -> None:
+        """«Curtain / blind» for the windows / glazed doors selected."""
+        from . import curtains as CT
+        doc = self.doc()
+        oids = [i for k, i in self._selected_all() if k == "opening"]
+        recs = [o for o in doc["arch"]["openings"] if o.get("id") in oids
+                and (o.get("kind") == "window" or (
+                    o.get("kind") == "door" and str(o.get("style") or "")
+                    in CT.DOOR_STYLES))]
+        if not recs:
+            return
+        now = recs[0].get("curtain") or "curtain_auto"
+        what = f"{len(recs)} openings" if len(recs) > 1 else \
+            str(recs[0].get("name") or recs[0].get("kind"))
+        m_ = menu.addMenu(f"CAD2IngeTrazo · Curtain / blind — {what}")
+        for k_, lab_ in (("curtain_on", "Curtains (pleated)"),
+                         ("blind_v", "Vertical louvre blinds"),
+                         ("blind_h", "Horizontal venetian blinds"),
+                         ("roller", "Roller blind"),
+                         ("curtain_off", "None"),
+                         ("curtain_auto", "As the project setting")):
+            a_ = m_.addAction(lab_, lambda k=k_, ids=[o["id"] for o in recs]:
+                              self._set_curtain(ids, k))
+            a_.setCheckable(True)
+            a_.setChecked(now == k_)
+
+    def _set_curtain(self, ids, key):
+        doc = self.doc()
+        n = 0
+        for o in doc["arch"]["openings"]:
+            if o.get("id") in ids:
+                if key == "curtain_auto":
+                    o.pop("curtain", None)
+                else:
+                    o["curtain"] = key
+                n += 1
+        self.commit(doc, f"{CHOICE_LABELS.get(key, key)}: {n} opening(s)")
+
     def _set_finish(self, wid, side, mat, band):
         from . import finishes as FN
         doc = self.doc()
@@ -6830,6 +6868,10 @@ class Panel(QWidget):
             self._floor_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu floor finish")
+        try:            # curtains / blinds at the windows / doors selected
+            self._curtain_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu curtain")
         try:            # the selected walls' interior cladding
             self._clad_menu(menu)
         except Exception:  # noqa: BLE001
@@ -9457,7 +9499,7 @@ class Panel(QWidget):
 OPENING_FIELDS = {
     "door": {"kind", "w", "h", "pos", "swing", "face", "style", "leaves",
              "head", "ring", "frame", "frame_w", "frame_d", "panel",
-             "handle", "glass", "arch_w", "grille", "grille_side"},
+             "handle", "glass", "arch_w", "grille", "grille_side", "curtain"},
     "window": {"kind", "w", "h", "sill", "pos", "style", "head", "ring",
                "frame", "frame_w", "frame_d", "glass", "curtain", "grille",
                "grille_side"},

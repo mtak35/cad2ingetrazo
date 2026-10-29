@@ -480,7 +480,7 @@ def build(doc, z_of, room_key) -> list:
             continue
         wells = wells_over(lid)
         try:
-            rails = unary_union([LineString([w["a"], w["b"]]).buffer(0.25)
+            rails = unary_union([_rail_line(w).buffer(0.25)
                                  for w in arch["walls"] if w["level"] == lid
                                  and w.get("rail") and "a" in w]) or None
         except Exception:  # noqa: BLE001
@@ -496,7 +496,24 @@ def build(doc, z_of, room_key) -> list:
                                        s_["corners"]]).buffer(0))
             except Exception:  # noqa: BLE001
                 continue
-        for room in spaces.of_level(arch, lid):
+        try:
+            gaps = _gap_lines(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("ceilings._gap_lines")
+            gaps = []
+        try:
+            from . import slabedges as SE_
+            from .engine import walls as W_
+            wall_u = unary_union(SE_.wall_polys(
+                [w for w in arch["walls"] if w["level"] == lid and "a" in w
+                 and not w.get("rail") and W_.why_not(w) is None]))
+            if rails is not None and not rails.is_empty:
+                wall_u = unary_union([wall_u, rails.buffer(-0.19)])
+        except Exception:  # noqa: BLE001
+            wall_u = None
+        for room in _split_rooms(spaces.of_level(arch, lid), gaps,
+                                 stair_feet, rails, room_key, lid, wall_u):
             if room["area"] < 1.0:
                 continue
             rec_ = room.get("rec") or {}
@@ -521,12 +538,13 @@ def build(doc, z_of, room_key) -> list:
                             if ov.get("color") or ov.get("led"):
                                 b_ = b_[:4] + (paint(b_[4], with_face(
                                     rec_, ov)),)
-                            out.append(b_ + (room_key(lid, room),))
+                            out.append(b_ + (room.get("key") or room_key(lid, room),))
                     except Exception:  # noqa: BLE001
                         from .host import log_error
                         log_error("ceilings._balcony")
+                done_.append(room["poly"])   # not again as a leftover
                 continue
-            c = room_ceiling(doc, lid, room_key(lid, room))
+            c = room_ceiling(doc, lid, room.get("key") or room_key(lid, room))
             rec = room.get("rec") or {}
             own = rec.get("ceiling")
             if own == "none":
@@ -559,7 +577,7 @@ def build(doc, z_of, room_key) -> list:
             fs = paint(faces(poly, z_of[lid] + c["h"], c["type"]), rec)
             if fs:
                 out.append((lid, room["name"], c["type"], c["h"], fs,
-                            room_key(lid, room)))
+                            room.get("key") or room_key(lid, room)))
                 done_.append(poly)
         try:                 # the beams round the stair well over it
             out += _well_beams(doc, lid, order, z_of, wells)
@@ -567,7 +585,7 @@ def build(doc, z_of, room_key) -> list:
             from .host import log_error
             log_error("ceilings._well_beams")
         try:                 # the rest inside the outside walls (a hall,
-            out += _rest(doc, lid, z_of, wells, done_)   # a corridor, a
+            out += _rest(doc, lid, z_of, wells, done_, order, rails)   # a
         except Exception:  # noqa: BLE001                  # lobby…)
             from .host import log_error
             log_error("ceilings._rest")
@@ -666,6 +684,231 @@ def _run_into_walls(open_, WU, reach=0.30):
     if not out:
         return open_
     return out[0] if len(out) == 1 else MultiLineString(out)
+
+
+def _rail_line(w):
+    """A railing's line (an arc one as a polyline)."""
+    from shapely.geometry import LineString
+    if w.get("kind", "line") == "line":
+        return LineString([w["a"], w["b"]])
+    try:
+        from .engine import walls as W
+        seg = W.centre(w)
+        return LineString([tuple(seg.at(k / 16))[:2] for k in range(17)])
+    except Exception:  # noqa: BLE001
+        return LineString([w["a"], w["b"]])
+
+
+def _gap_lines(doc, lid) -> list:
+    """Lines across the openings with no door between two spaces of a
+    level (a wall end facing another wall across a gap, a corridor's
+    mouth between two parallel wall ends): where one room's false
+    ceiling ends and the next one's begins."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    from .engine import walls as W
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and W.why_not(w) is None and math.dist(w["a"], w["b"]) > 0.05]
+    if len(ws) < 2:
+        return []
+    polys = {}
+    for w in ws:
+        try:
+            g = unary_union(SE.wall_polys([w]))
+            if not g.is_empty:
+                polys[id(w)] = g
+        except Exception:  # noqa: BLE001
+            continue
+
+    def U(w):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        return ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+
+    rail_ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+               and w.get("rail")]
+    for w in rail_ws:                   # a railing closes a space too
+        try:
+            polys[id(w)] = _rail_line(w).buffer(0.06)
+        except Exception:  # noqa: BLE001
+            continue
+    targets = ws + rail_ws
+    ends = []                           # (wall, point, out direction)
+    for w in ws:
+        u = U(w)
+        for k, dv in (("a", (-u[0], -u[1])), ("b", u)):
+            P = Point(w[k])
+            if any(o is not w and id(o) in polys and
+                   polys[id(o)].distance(P) < 0.03 for o in targets):
+                continue                  # joined to another wall
+            ends.append((w, tuple(w[k]), dv))
+    out = []
+    for w, P, dv in ends:               # a wall end facing a wall
+        ray = LineString([P, (P[0] + dv[0] * 2.8, P[1] + dv[1] * 2.8)])
+        best = None
+        for o in targets:
+            if o is w or id(o) not in polys:
+                continue
+            x = ray.intersection(polys[id(o)])
+            if x.is_empty:
+                continue
+            dd = Point(P).distance(x)
+            if 0.45 <= dd and (best is None or dd < best):
+                best = dd
+        if best is not None:
+            out.append(LineString([P, (P[0] + dv[0] * (best + 0.05),
+                                       P[1] + dv[1] * (best + 0.05))]))
+    free = {(id(w), tuple(P)) for w, P, _d in ends}
+    for w in ws:                        # every wall run on a little past
+        u = U(w)                        # a free end: the slits between a
+        ea = 0.35 if (id(w), tuple(w["a"])) in free else 0.0   # wall end
+        eb = 0.35 if (id(w), tuple(w["b"])) in free else 0.0   # and the
+        if ea or eb:                                           # next wall
+            out.append(LineString([(w["a"][0] - u[0] * ea,     # closed
+                                    w["a"][1] - u[1] * ea),
+                                   (w["b"][0] + u[0] * eb,
+                                    w["b"][1] + u[1] * eb)]))
+    with_ops = {o.get("wall") for o in arch["openings"]
+                if o.get("kind") in ("door", "void")}
+    for w in ws:                        # a wall with a door in it: the
+        if w["id"] not in with_ops:     # rooms found through the door
+            continue                    # parted along it
+        u = U(w)
+        out.append(LineString([(w["a"][0] - u[0] * 0.1,
+                                w["a"][1] - u[1] * 0.1),
+                               (w["b"][0] + u[0] * 0.1,
+                                w["b"][1] + u[1] * 0.1)]))
+    for i, (w1, P1, d1) in enumerate(ends):   # a corridor's mouth
+        for w2, P2, d2 in ends[i + 1:]:
+            if w2 is w1:
+                continue
+            if d1[0] * d2[0] + d1[1] * d2[1] < 0.985:
+                continue                  # not pointing the same way
+            g = math.dist(P1, P2)
+            if not 0.8 <= g <= 3.2:
+                continue
+            v = ((P2[0] - P1[0]) / g, (P2[1] - P1[1]) / g)
+            if abs(v[0] * d1[0] + v[1] * d1[1]) > 0.2:
+                continue                  # the ends not level
+            n1 = (-d1[1], d1[0])
+            ext = max(float(w1["t"]), float(w2["t"])) / 2 + 0.05
+            sg = 1 if v[0] * n1[0] + v[1] * n1[1] > 0 else -1
+            out.append(LineString([
+                (P1[0] - n1[0] * sg * ext, P1[1] - n1[1] * sg * ext),
+                (P2[0] + n1[0] * sg * ext, P2[1] + n1[1] * sg * ext)]))
+    return out
+
+
+def _split_rooms(rooms, gaps, stair_feet, rails, room_key, lid,
+                 wall_u=None):
+    """The level's rooms, each cut where an opening with no door joins it
+    to the next space (``gaps``): a ceiling a space — the corridor, the
+    stair hall, the lobby, a balcony the walls leave open to a hall."""
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    for room in rooms:
+        poly = room.get("poly")
+        if poly is None or poly.is_empty or not gaps or room["area"] < 6.0:
+            yield room
+            continue
+        cuts = []
+        for g in gaps:
+            try:
+                if g.intersects(poly) and \
+                        g.intersection(poly).length >= 0.08:
+                    cuts.append(g)
+            except Exception:  # noqa: BLE001
+                continue
+        if not cuts and wall_u is None:
+            yield room
+            continue
+        try:
+            cutter = [c.buffer(0.012, cap_style=2) for c in cuts]
+            if wall_u is not None and not wall_u.is_empty:
+                # the slits under 0.36 m between two walls (or a wall and a
+                # railing) closed: where the walls nearly meet, a room ends
+                cutter.append(wall_u.buffer(0.18, join_style=2))
+            rest = poly.difference(unary_union(cutter))
+        except Exception:  # noqa: BLE001
+            yield room
+            continue
+        try:                 # necks under 0.5 m (a wall end short of a
+            core = rest.buffer(-0.45, join_style=2).buffer(  # railing)
+                0.45, join_style=2).intersection(rest)        # parted too
+            left = rest.difference(core.buffer(0.001))
+            parts = [g for g in getattr(core, "geoms", [core])
+                     if g.geom_type == "Polygon" and g.area > 0.05] + \
+                [g for g in getattr(left, "geoms", [left])
+                 if g.geom_type == "Polygon" and g.area > 0.05]
+        except Exception:  # noqa: BLE001
+            parts = [g for g in getattr(rest, "geoms", [rest])
+                     if g.geom_type == "Polygon" and g.area > 0.05]
+        big = [g for g in parts if g.area >= 2.0 and
+               not g.buffer(-0.25).is_empty]
+        if len(big) < 2:
+            yield room
+            continue
+        small = [g for g in parts if not any(g is b for b in big)]
+        for g in small:                  # slivers to the piece they touch
+            j = max(range(len(big)), key=lambda k: big[k].buffer(0.25)
+                    .intersection(g).area)
+            if big[j].buffer(0.25).intersection(g).area < 1e-4:
+                if g.area >= 1.0:
+                    big.append(g)        # a space of its own
+                continue
+            big[j] = unary_union([big[j], g.buffer(0.013)]).buffer(-0.001)
+        if wall_u is not None:          # back out to the room's edges
+            grown, taken = [], None
+            for g in sorted(big, key=lambda q: -q.area):
+                g2 = g.buffer(0.2, join_style=2).intersection(poly)
+                if taken is not None:
+                    g2 = g2.difference(taken)
+                g2 = g2.difference(unary_union(
+                    [c.buffer(0.012, cap_style=2) for c in cuts])) \
+                    if cuts else g2
+                pick = [q for q in getattr(g2, "geoms", [g2])
+                        if q.geom_type == "Polygon" and q.intersects(g)]
+                g2 = unary_union(pick) if pick else g
+                grown.append(g2)
+                taken = g2 if taken is None else unary_union([taken, g2])
+            big = grown
+        at = room.get("at")
+        lab = Point(at) if at else poly.representative_point()
+        key0 = room_key(lid, room)
+        big.sort(key=lambda g: (0 if g.buffer(0.02).contains(lab) else 1,
+                                -g.area))
+        for k, g in enumerate(big):
+            if g.geom_type != "Polygon":
+                g = max(getattr(g, "geoms", [g]), key=lambda q: q.area)
+            name = room["name"]
+            if k:
+                railed = rails is not None and not rails.is_empty and \
+                    g.exterior.intersection(rails).length > \
+                    0.2 * g.exterior.length
+                if any(g.intersects(f_) for f_ in stair_feet):
+                    name = "Stair hall"
+                elif railed:
+                    name = "BALCONY"
+                elif re.search(r"VOID|STAIR|HALL|LOBBY|PASSAGE|CORRIDOR|"
+                               r"LOUNGE|FOYER|ENTRANCE", str(room["name"]),
+                               re.I):
+                    mr = g.minimum_rotated_rectangle
+                    cs = list(mr.exterior.coords)
+                    s1, s2 = sorted((math.dist(cs[0], cs[1]),
+                                     math.dist(cs[1], cs[2])))
+                    name = "Corridor" if s1 < 2.2 or s2 > 2.6 * s1 \
+                        else "Room"
+                else:
+                    name = f"{room['name']} {k + 1}"
+            r2 = dict(room, poly=g, area=g.area, name=name,
+                      key=key0 if not k else f"{key0}#{k}")
+            if k:
+                r2["rec"] = {}
+            yield r2
 
 
 def _balcony(doc, lid, room, order, z_of, rails):
@@ -821,7 +1064,7 @@ def _well_beams(doc, lid, order, z_of, wells) -> list:
     return out
 
 
-def _rest(doc, lid, z_of, wells, done) -> list:
+def _rest(doc, lid, z_of, wells, done, order=None, rails=None) -> list:
     """The level's ceiling over what its rooms leave inside the outside
     walls (halls and corridors open to one another, a lobby): not over
     the walls, the shafts and wells, nor out on the balconies."""
@@ -840,8 +1083,11 @@ def _rest(doc, lid, z_of, wells, done) -> list:
     if not ws:
         return []
     WU = unary_union(SE.wall_polys(ws))
-    # (a corridor open at its end to a balcony, up to 4 m: inside)
-    close = WU.buffer(2.0, join_style=2).buffer(-2.0, join_style=2)
+    # (a corridor open at its end to a balcony, up to 4 m: inside; the
+    # railings close the balconies the CAD left unnamed)
+    WR = WU if rails is None or rails.is_empty else unary_union(
+        [WU, rails.buffer(-0.2)])
+    close = WR.buffer(2.0, join_style=2).buffer(-2.0, join_style=2)
     inside = unary_union([Polygon(g.exterior) for g in getattr(
         close, "geoms", [close]) if g.geom_type == "Polygon"
         and Polygon(g.exterior).area >= 20.0])
@@ -913,6 +1159,22 @@ def _rest(doc, lid, z_of, wells, done) -> list:
         ov = at_room(doc, lid, g)
         if ov.get("off"):
             continue
+        if order and rails is not None and not rails.is_empty and \
+                ov.get("type") not in BY and \
+                doc["settings"].get("balcony_ceiling", True):
+            try:                 # railed round: a balcony the CAD left
+                railed = g.exterior.intersection(rails).length > \
+                    0.2 * g.exterior.length               # unnamed
+            except Exception:  # noqa: BLE001
+                railed = False
+            if railed:
+                k += 1
+                b_ = _balcony(doc, lid, {"poly": g, "name": "BALCONY",
+                                         "rec": {}, "area": g.area},
+                              order, z_of, rails)
+                if b_:
+                    out.append(b_ + (f"{lid}|open{k}",))
+                continue
         typ = ov["type"] if ov.get("type") in BY else lvc.get("type")
         if typ not in BY:
             continue

@@ -50,14 +50,22 @@ def _room_side(doc, w, seg, pos, rooms):
     n = (-seg.u[1], seg.u[0])
     c = (seg.p0[0] + seg.u[0] * pos, seg.p0[1] + seg.u[1] * pos)
     t2 = float(w["t"]) / 2
+    import re
     hit = []
+    out_ = []
     for sd in (1, -1):
         q = Point(c[0] + n[0] * sd * (t2 + 0.4), c[1] + n[1] * sd * (t2 + 0.4))
-        hit.append(any(r["poly"].contains(q) for r in rooms))
+        r_ = next((r for r in rooms if r["poly"].contains(q)), None)
+        hit.append(r_ is not None)
+        out_.append(r_ is not None and bool(re.search(
+            r"BALCON|TERRACE|SIT\s*OUT|VERANDA|PORCH|LOGGIA|OTS|OPEN",
+            str(r_.get("name", "")), re.I)))
     if hit[0] and not hit[1]:
         return 1
     if hit[1] and not hit[0]:
         return -1
+    if hit[0] and hit[1] and out_[0] != out_[1]:    # a balcony door / window:
+        return -1 if out_[0] else 1                   # on the room's side
     return 0
 
 
