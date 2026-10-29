@@ -2265,6 +2265,13 @@ def build(doc: dict, elevations) -> list[dict]:
                                               z0 + li["height"] - 0.001)
             out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
                         "name": w["name"], "level": lid, "faces": faces})
+        if doc.get("_merge_walls"):     # the floor's walls as ONE solid
+            try:
+                _merge_level(doc, lid, li, mine, plans, openings, out, z0,
+                             under)
+            except Exception:  # noqa: BLE001
+                import traceback
+                traceback.print_exc()
         for cid, legs in cwins.items():
             try:
                 fs = corner_window_faces(legs)
@@ -2531,3 +2538,81 @@ def in_one_wall(e: dict, walls: list[dict]) -> bool:
 def _el(e: dict, lid: str, faces) -> dict:
     return {"kind": e["type"], "id": e["id"], "name": e["name"],
             "level": lid, "faces": faces}
+
+
+def _merge_level(doc, lid, li, mine, plans, openings, out, z0, under):
+    """The plain walls of a floor (solid, straight or curved, their doors
+    and windows square-headed) put into one solid per height — on the
+    CAD's own wall outline where it has one: no joints between walls."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from . import wallmerge as WM
+    groups = {}
+    for w in mine:
+        if w.get("rail") or w.get("type") == "curtain" or w.get("cwin") \
+                or w.get("_orig"):
+            continue
+        pieces = plans.get(w["id"])
+        if not pieces:
+            continue
+        b = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
+        top = under if w.get("height", "level") == "level" \
+            else z0 + float(w["height"])
+        if top - b < 0.05:
+            continue
+        ops = [o for o in openings if o["wall"] == w["id"]
+               and opening_room(o, w, openings, top - z0) is None
+               and (not w.get("rcc") or o.get("lift")
+                    or o.get("kind") in ("door", "void"))]
+        if any(str(o.get("head") or "flat").startswith("arch") or
+               o.get("shape") == "round" for o in ops):
+            continue
+        if ops and w.get("kind", "line") != "line":
+            continue
+        try:
+            poly = unary_union([Polygon(pc["outer"], pc.get("holes") or [])
+                                .buffer(0) for pc in pieces])
+        except Exception:  # noqa: BLE001
+            continue
+        key = (round(b, 3), round(top, 3))
+        groups.setdefault(key, []).append((w, poly, ops))
+    if not groups:
+        return
+    cad = WM.region_of((doc.get("_wall_outline") or {}).get(lid))
+    merged_ids = set()
+    k = 0
+    for (b, top), items in groups.items():
+        if len(items) < 2:
+            continue
+        model = unary_union([pl for _w, pl, _o in items])
+        fps = []
+        for w, _pl, ops in items:
+            if not ops:
+                continue
+            seg = W.centre(w)
+            for o in ops:
+                zs = z0 + float(o.get("sill", 0.0))
+                zt = zs + float(o["h"])
+                fps.append((WM.footprint(w, o, seg), zs, zt))
+        U = model
+        if cad is not None and not cad.is_empty:
+            try:
+                near = cad.intersection(model.buffer(0.3, join_style=2))
+                rest = model.difference(cad.buffer(0.15, join_style=2))
+                over = [fp.intersection(model) for fp, _a, _b in fps]
+                U = unary_union([near, rest] + over).buffer(
+                    0.003, join_style=2).buffer(-0.003, join_style=2)
+            except Exception:  # noqa: BLE001
+                U = model
+        faces = WM.merged_faces(U, fps, b, top)
+        if not faces:
+            continue
+        ids = [w["id"] for w, _pl, _o in items]
+        merged_ids.update(ids)
+        out.append({"kind": "wall", "id": f"merged|{lid}|{k}",
+                    "name": "Walls", "level": lid, "faces": faces,
+                    "merged": ids})
+        k += 1
+    if merged_ids:
+        out[:] = [e for e in out if not (e.get("kind") == "wall" and
+                                         e.get("id") in merged_ids)]

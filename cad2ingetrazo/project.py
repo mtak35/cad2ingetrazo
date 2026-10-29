@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor", "curtain_type": "curtain",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -205,7 +205,7 @@ def empty() -> dict:
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
-            "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": []}
+            "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {}}
 
 
 def load(raw) -> dict:
@@ -295,6 +295,8 @@ def load(raw) -> dict:
                      and f.get("kind") in ("glass", "clad", "diffuser",
                                            "light", "liftdoor")]
     # the rooms whose lights / diffusers were deleted: kept off
+    doc["wall_outline"] = {k: v for k, v in (raw.get("wall_outline") or {})
+                           .items() if k in ids and isinstance(v, list)}
     doc["ceil_at"] = []          # false ceilings set by room (8A ▸ Room)
     for e in raw.get("ceil_at") or []:
         try:
@@ -5428,6 +5430,19 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.square_t_nodes")
+    try:                       # the CAD's own wall outline (merged walls)
+        from .engine import wallmerge as WMG
+        from . import slabedges as SE_
+        mp_ = SE_.wall_polys([w for w in doc["arch"]["walls"]
+                              if w["level"] == lid and "a" in w
+                              and not w.get("rail")
+                              and W.why_not(w) is None])
+        ol_ = WMG.cad_region(wall_segs, mp_)
+        doc.setdefault("wall_outline", {})[lid] = ol_
+        rep["wall_outline"] = len(ol_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.wall_outline")
     try:                       # slits closed, odd pieces made in line
         rep["wall_tidy"] = tidy_wall_junctions(doc, lid)
     except Exception:  # noqa: BLE001
@@ -7817,9 +7832,15 @@ def _groups(arch, doc=None):
         st_ = doc.get("settings") or {}
         arch["_fin_t"] = float(st_.get("finish_t", 0.0508) or 0.0) \
             if st_.get("finish_on", True) else 0.0
+    if doc is not None and (doc.get("settings") or {}).get("merge_walls",
+                                                            True):
+        arch["_merge_walls"] = True
+        arch["_wall_outline"] = doc.get("wall_outline") or {}
     try:
         elems = S.build(arch, M.elevations)
     finally:
+        arch.pop("_merge_walls", None)
+        arch.pop("_wall_outline", None)
         arch.pop("_ramps", None)
         arch.pop("_door_lift", None)
         arch.pop("_fin_t", None)
@@ -7895,6 +7916,8 @@ def _groups(arch, doc=None):
         cls = OPENING_IFC.get(e.get("okind")) if e["kind"] == "opening" \
             else IFC.get(e["kind"])
         tag = {KEY: {"type": e["kind"], "id": e["id"], "level": e["level"],
+                     **({"merged": list(e["merged"])} if e.get("merged")
+                        else {}),
                      **({"okind": e["okind"]} if e.get("okind") else {}),
                      **({"ctype": tkey, "mark": t["mark"]} if t else {})}}
         if e["kind"] == "column" and \

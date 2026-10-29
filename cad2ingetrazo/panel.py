@@ -4967,6 +4967,44 @@ class Panel(QWidget):
         nn = nrm(face, M)
         return hit[1], FN.side_of_face(w, nn) if nn else None
 
+    def _merged_wall_at(self, ids, pos=None):
+        """The wall (of ``ids``, merged into one solid) the camera ray
+        under the mouse meets first, or None."""
+        r = self._ray(pos)
+        if r is None:
+            return None
+        (ox, oy, oz), (dx, dy, dz) = r
+        doc = self.doc()
+        best = None
+        for wid in ids:
+            w = PJ.find_record(doc, "wall", wid)
+            if w is None or "a" not in w:
+                continue
+            a, b = w["a"], w["b"]
+            L = math.dist(a, b)
+            if L < 1e-6:
+                continue
+            u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            n = (-u[1], u[0])
+            off = float(w["t"]) / 2 + 0.03
+            for sg in (1, -1):
+                nx, ny = n[0] * sg, n[1] * sg
+                den = nx * dx + ny * dy
+                if abs(den) < 1e-9:
+                    continue
+                px, py = a[0] + nx * off, a[1] + ny * off
+                t = (nx * (px - ox) + ny * (py - oy)) / den
+                if t <= 0:
+                    continue
+                hx, hy = ox + dx * t, oy + dy * t
+                s_ = (hx - a[0]) * u[0] + (hy - a[1]) * u[1]
+                if -0.2 <= s_ <= L + 0.2 and (best is None or t < best[0]):
+                    best = (t, wid)
+            # its top, seen from above
+            if dz < -1e-6:
+                pass
+        return best[1] if best else None
+
     def _ray(self, pos=None):
         """(origin, direction) of the camera ray under the mouse, as
         tuples, or None."""
@@ -6084,7 +6122,8 @@ class Panel(QWidget):
         for e in list(self.vp.scene.selection):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
-                if tag and tag["type"] == "levelgroup":
+                if tag and (tag["type"] == "levelgroup" or str(
+                        tag.get("id") or "").startswith("merged|")):
                     floor = True
                     continue
                 if tag and tag["type"] == "finish_edge" and tag.get("slab"):
@@ -6140,6 +6179,9 @@ class Panel(QWidget):
             if face is None or pl is None:
                 return self._ray_hit(pos)
             tag = PJ.tag_of(pl)
+            if tag and str(tag.get("id") or "").startswith("merged|"):
+                wid = self._merged_wall_at(tag.get("merged") or [], pos)
+                return ("wall", wid, None) if wid else None
             if tag and tag["type"] not in ("symbols", "levelgroup"):
                 return tag["type"], tag["id"], tag.get("seg")
             mesh = getattr(pl, "mesh", None)
@@ -6151,6 +6193,11 @@ class Panel(QWidget):
                 t = PJ.tag_of(g)
                 if not t or t["type"] in ("symbols", "levelgroup"):
                     continue
+                if str(t.get("id") or "").startswith("merged|"):
+                    wid = self._merged_wall_at(t.get("merged") or [], pos)
+                    if not wid:
+                        continue
+                    t = dict(t, id=wid)
                 d = _xf_gap(xf, want)
                 if best is None or d < best[0]:
                     best = (d, (t["type"], t["id"], t.get("seg")))
@@ -6856,7 +6903,8 @@ class Panel(QWidget):
         for e in list(self.vp.scene.selection):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
-                if tag and tag["type"] == "levelgroup":
+                if tag and (tag["type"] == "levelgroup" or str(
+                        tag.get("id") or "").startswith("merged|")):
                     floor = True
                     continue
                 if tag and tag["type"] != "symbols" and \
