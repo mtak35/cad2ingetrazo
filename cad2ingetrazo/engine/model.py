@@ -317,6 +317,23 @@ def _walls(raw, level_ids: set) -> list[dict]:
                                    ("clad_off", -100.0, 100.0)):
                     if w.get(k_) not in (None, ""):
                         rec[k_] = min(max(float(w[k_]), lo), hi)
+            fins = []                        # face finishes (finishes.py)
+            for f_ in w.get("fin") or []:
+                try:
+                    if f_.get("side") in ("l", "r") and f_.get("mat"):
+                        fins.append({
+                            "side": f_["side"], "mat": str(f_["mat"])[:120],
+                            "band": str(f_.get("band") or "full")[:10],
+                            "z0": min(max(float(f_.get("z0") or 0.0), 0.0),
+                                      20.0),
+                            "z1": min(max(float(f_.get("z1") or 0.0), 0.0),
+                                      20.0)})
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            if fins:
+                rec["fin"] = fins[:12]
+            if w.get("jog"):
+                rec["jog"] = True
             if w.get("cwin"):                # a leg of a corner window
                 rec["cwin"] = str(w["cwin"])[:40]
                 rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
@@ -659,7 +676,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
                 rec["arch_w"] = min(max(float(o["arch_w"]), 0.0), 0.30)
             except (TypeError, ValueError):
                 pass
-        if o.get("curtain") in ("curtain_on", "curtain_off"):
+        if o.get("curtain") in ("curtain_on", "curtain_off", "blind_v",
+                                "blind_h", "roller"):
             rec["curtain"] = o["curtain"]
         if o.get("panel") in PANEL_KEYS and o.get("panel") != "auto":
             rec["panel"] = o["panel"]

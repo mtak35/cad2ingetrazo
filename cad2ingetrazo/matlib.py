@@ -13,10 +13,12 @@ import json
 import math
 
 #: which library categories each surface offers
-FOR = {"floor": ("floor", "wood", "stone", "concrete", "rug", "ground"),
-       "wall": ("wall", "wallpaper", "concrete", "brick", "stone", "wood"),
-       "ceiling": ("wall", "wood", "concrete", "misc"),
-       "terrace": ("floor", "stone", "concrete", "ground", "wood")}
+FOR = {"floor": ("finish", "floor", "wood", "stone", "misc", "concrete",
+                 "rug", "ground"),
+       "wall": ("finish", "wall", "wallpaper", "misc", "concrete", "brick",
+                "stone", "wood"),
+       "ceiling": ("finish", "wall", "wood", "concrete", "misc"),
+       "terrace": ("finish", "floor", "stone", "concrete", "ground", "wood")}
 _CACHE = {}
 
 
@@ -48,6 +50,17 @@ def items() -> dict:
                             "cat": cat["id"]}
     except Exception:  # noqa: BLE001
         out = {}
+    try:                 # CAD2IngeTrazo's own finishes: marble, porcelain,
+        from pathlib import Path         # ceramic, wood, stone, paint
+        here = Path(__file__).resolve().parent / "textures"
+        for it in json.loads((here / "finishes.json").read_text(
+                encoding="utf-8")):
+            key = f"finish/{it['file']}"
+            out[key] = {"name": it["name"], "path": str(here / it["file"]),
+                        "sw": float(it["sw"]), "sh": float(it["sh"]),
+                        "cat": "finish", "group": it.get("cat", "")}
+    except Exception:  # noqa: BLE001
+        pass
     _CACHE["items"] = out
     return out
 
@@ -62,7 +75,8 @@ def keys_for(surface) -> tuple:
 
 
 def labels() -> dict:
-    out = {k: f"{v['name']} ({v['cat']})" for k, v in items().items()}
+    out = {k: (f"{v['name']} — CAD2IngeTrazo" if v["cat"] == "finish"
+               else f"{v['name']} ({v['cat']})") for k, v in items().items()}
     out["none"] = "As built (no material)"
     return out
 

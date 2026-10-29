@@ -2171,9 +2171,12 @@ def build(doc: dict, elevations) -> list[dict]:
                 else z0 + float(w["height"])
             if top - b < 0.01:
                 continue
-            ops = [] if w.get("rcc") else \
-                [o for o in openings if o["wall"] == w["id"]
-                   and opening_room(o, w, openings, top - z0) is None]
+            # an RCC wall (a hatched shear wall, a lift core) keeps its
+            # doors and its lift landing openings; its windows closed
+            ops = [o for o in openings if o["wall"] == w["id"]
+                   and opening_room(o, w, openings, top - z0) is None
+                   and (not w.get("rcc") or o.get("lift")
+                        or o.get("kind") in ("door", "void"))]
             if w.get("rail"):                    # a railing, not a wall
                 from . import railings as RL
                 seg = W.centre(w)

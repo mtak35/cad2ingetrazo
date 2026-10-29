@@ -100,7 +100,7 @@ DEFAULTS = {
     "bike_model": "lib", "bike_lib": None,              # motorbikes: library
     "slab_extend_cad": True, "rail_h": 1.0668,          # 3'-6" railings
     "thresholds": True, "finish_to_edge": True,
-    "curtains": True, "curtain_color": "cream", "curtain_len": "floor",
+    "curtains": True, "curtain_color": "cream", "curtain_len": "floor", "curtain_type": "curtain",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
     "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
@@ -2217,6 +2217,115 @@ def _set_wall_end(doc, w, k, P) -> None:
                 if o.get("wall") == w["id"]:
                     o["pos"] = round(float(o["pos"]) + d, 4)
     w[k] = P
+
+
+def close_wall_gaps(doc, lid, corner=1.0, jog=0.65) -> int:
+    """The gaps the CAD's line-pairing leaves between two walls that
+    should meet, closed:
+
+    * a corner both walls stop short of (each end up to ``corner`` from
+      the crossing of their lines, the crossing ahead of both): both ends
+      put on the crossing (the engine mitres it);
+    * a jog — two parallel walls offset by less than ``jog`` whose ends
+      face each other: the second wall's end brought level with the
+      first's and a short return wall built between them.
+
+    Ends already on another wall, and gaps a door or window fills, are
+    left. The number of junctions closed."""
+    from shapely.geometry import LineString, Point
+    arch = doc["arch"]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and w.get("type") != "curtain"
+          and math.dist(w["a"], w["b"]) > 0.1]
+    if len(ws) < 2:
+        return 0
+
+    def U(w):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        return ((b[0] - a[0]) / L, (b[1] - a[1]) / L), L
+
+    def poly(w):
+        return LineString([w["a"], w["b"]]).buffer(float(w["t"]) / 2 + 0.01,
+                                                   cap_style=2)
+
+    polys = {id(w): poly(w) for w in ws}
+
+    def free(w, k):                       # no other wall at this end
+        P = Point(w[k])
+        return all(o is w or polys[id(o)].distance(P) > 0.02 for o in ws)
+
+    def out_dir(w, k):
+        u, _L = U(w)
+        return (-u[0], -u[1]) if k == "a" else u
+    n = 0
+    used = set()
+    adds = []
+    for w in ws:
+        for k in ("a", "b"):
+            if (id(w), k) in used or not free(w, k):
+                continue
+            P = tuple(w[k])
+            dv = out_dir(w, k)
+            best = None
+            for o in ws:
+                if o is w:
+                    continue
+                for kk in ("a", "b"):
+                    if (id(o), kk) in used:
+                        continue
+                    Q = tuple(o[kk])
+                    if math.dist(P, Q) > corner * 2:
+                        continue
+                    dq = out_dir(o, kk)
+                    c = dv[0] * dq[0] + dv[1] * dq[1]
+                    den = dv[0] * dq[1] - dv[1] * dq[0]
+                    if abs(c) < math.cos(math.radians(20)) and \
+                            abs(den) > 1e-6:      # a corner
+                        t1 = ((Q[0] - P[0]) * dq[1] -
+                              (Q[1] - P[1]) * dq[0]) / den
+                        t2 = ((Q[0] - P[0]) * dv[1] -
+                              (Q[1] - P[1]) * dv[0]) / den
+                        if 0.0 < t1 <= corner and 0.0 < t2 <= corner:
+                            X = (P[0] + dv[0] * t1, P[1] + dv[1] * t1)
+                            sc = t1 + t2
+                            if best is None or sc < best[0]:
+                                best = (sc, "corner", o, kk, X)
+                    elif c < -0.996 and free(o, kk):   # facing: a jog
+                        d = (Q[0] - P[0], Q[1] - P[1])
+                        along = d[0] * dv[0] + d[1] * dv[1]
+                        perp = abs(-d[0] * dv[1] + d[1] * dv[0])
+                        tt = max(float(w["t"]), float(o["t"]))
+                        if 0.6 * tt < perp <= jog and \
+                                -0.45 <= along <= jog:
+                            sc = abs(along) + perp
+                            if best is None or sc < best[0]:
+                                best = (sc, "jog", o, kk, None)
+            if best is None:
+                continue
+            _sc, kind, o, kk, X = best
+            if kind == "corner":
+                _set_wall_end(doc, w, k, X)
+                _set_wall_end(doc, o, kk, X)
+            else:
+                Q = tuple(o[kk])
+                d = (Q[0] - P[0], Q[1] - P[1])
+                along = d[0] * dv[0] + d[1] * dv[1]
+                Q2 = (Q[0] - dv[0] * along, Q[1] - dv[1] * along)
+                _set_wall_end(doc, o, kk, Q2)     # level with P
+                t_ = min(float(w["t"]), float(o["t"]))
+                adds.append({k_: v_ for k_, v_ in w.items() if k_ not in (
+                    "id", "name", "a", "b", "clad", "fin")} | {
+                    "a": [round(P[0], 4), round(P[1], 4)],
+                    "b": [round(Q2[0], 4), round(Q2[1], 4)],
+                    "t": round(t_, 4), "jog": True})
+            used.update({(id(w), k), (id(o), kk)})
+            n += 1
+    if adds:
+        from .engine import model as M_
+        arch["walls"] += M_.new_walls(arch["walls"], adds)
+    return n
 
 
 def join_angled_walls(doc, lid, reach=0.6) -> int:
@@ -5133,6 +5242,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.join_angled_walls")
+    try:                       # corners / jogs left open closed
+        rep["wall_gaps"] = close_wall_gaps(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.close_wall_gaps")
     try:                       # once more, the rooms closed now
         b2_ = balcony_doors_bath_windows(doc, lid)
         if b2_:
@@ -11370,6 +11484,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.wallclad groups")
+    try:
+        from . import finishes as FN_
+        new_groups += FN_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.finishes groups")
     try:
         from . import fitout as FO
         new_groups += FO.groups(doc)

@@ -9,6 +9,7 @@ differ (another type or height, or none).
 """
 from __future__ import annotations
 
+import math
 import re
 
 #: key → (label, thickness m, colour rgba, grid m (0 = plain), grid colour)
@@ -623,6 +624,50 @@ BEAM_W = 0.2286
 BEAM_COLOR = (0.93, 0.92, 0.89, 1.0)
 
 
+def _run_into_walls(open_, WU, reach=0.30):
+    """The open edges a beam runs along, each end that stops short of a
+    wall carried on into it (the 0.12 m kept off the walls, and the
+    wall's thickness half way): the beam meets the wall, no gap."""
+    from shapely.geometry import LineString, MultiLineString
+    from shapely.ops import linemerge
+    if open_ is None or open_.is_empty or WU is None:
+        return open_
+    try:
+        ln = linemerge(open_) if open_.geom_type != "LineString" else open_
+    except Exception:  # noqa: BLE001
+        ln = open_
+    out = []
+    for g in getattr(ln, "geoms", [ln]):
+        if g.geom_type != "LineString" or g.length < 0.05:
+            continue
+        cs = [tuple(c[:2]) for c in g.coords]
+        for end in (0, -1):
+            p = cs[end]
+            q = cs[1] if end == 0 else cs[-2]
+            L = math.dist(p, q)
+            if L < 1e-6:
+                continue
+            u = ((p[0] - q[0]) / L, (p[1] - q[1]) / L)
+            from shapely.geometry import Point
+            if WU.distance(Point(p)) > reach:
+                continue                  # a free end: as it is
+            step = 0.0                    # on till inside the wall
+            while step < reach + 0.25:
+                step += 0.03
+                tip = (p[0] + u[0] * step, p[1] + u[1] * step)
+                if WU.buffer(-0.02).contains(Point(tip)):
+                    break
+            tip = (p[0] + u[0] * step, p[1] + u[1] * step)
+            if end == 0:
+                cs.insert(0, tip)
+            else:
+                cs.append(tip)
+        out.append(LineString(cs))
+    if not out:
+        return open_
+    return out[0] if len(out) == 1 else MultiLineString(out)
+
+
 def _balcony(doc, lid, room, order, z_of, rails):
     """(level, name, kind, h, [(faces, colour)]) of a balcony's false
     ceiling with the periphery beam along its open sides (its railings,
@@ -694,8 +739,14 @@ def _balcony(doc, lid, room, order, z_of, rails):
     open_ = edge.difference(WU.buffer(0.12)) if WU is not None else edge
     band = None
     if not open_.is_empty:
-        band = open_.buffer(BEAM_W, cap_style=2, join_style=2) \
-            .intersection(cover)
+        run = _run_into_walls(open_, WU)
+        clip = cover if WU is None else cover.union(
+            WU.intersection(cover.buffer(0.45, join_style=2))) \
+            .buffer(0.008, join_style=2).buffer(-0.008, join_style=2)
+        band = run.buffer(BEAM_W, cap_style=2, join_style=2) \
+            .intersection(clip)
+        # the ceiling stays inside the room; the beam's end in the wall
+        # is hidden in it
     fs = []
     ceil = cover.difference(band) if band is not None and \
         not band.is_empty else cover
@@ -754,7 +805,11 @@ def _well_beams(doc, lid, order, z_of, wells) -> list:
         open_ = edge.difference(WU.buffer(0.12)) if WU is not None else edge
         if open_.is_empty or open_.length < 0.5:
             continue
-        band = open_.buffer(BEAM_W, cap_style=2, join_style=2).difference(g)
+        run = _run_into_walls(open_, WU)
+        band = run.buffer(BEAM_W, cap_style=2, join_style=2).difference(g)
+        if WU is not None:     # not out past the walls round the well
+            band = band.intersection(g.buffer(BEAM_W + 0.01,
+                                              join_style=2).union(WU))
         fs = []
         for q in getattr(band, "geoms", [band]):
             if q.geom_type == "Polygon" and q.area > 0.01:

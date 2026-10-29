@@ -1,0 +1,149 @@
+[
+ {
+  "file": "statuario_marble.jpg",
+  "name": "Statuario white marble (600\u00d7600)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "carrara_marble.jpg",
+  "name": "Carrara grey-veined marble (600\u00d71200)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 2.4
+ },
+ {
+  "file": "botticino_marble.jpg",
+  "name": "Botticino beige marble (600\u00d7600)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "emperador_marble.jpg",
+  "name": "Emperador brown marble (600\u00d7600)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "marquina_marble.jpg",
+  "name": "Nero Marquina black marble (600\u00d7600)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "black_galaxy_granite.jpg",
+  "name": "Black galaxy granite (600\u00d7600)",
+  "cat": "marble",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "porcelain_grey.jpg",
+  "name": "Porcelain matt grey (600\u00d71200)",
+  "cat": "tile",
+  "sw": 1.2,
+  "sh": 2.4
+ },
+ {
+  "file": "porcelain_beige.jpg",
+  "name": "Porcelain matt beige (600\u00d71200)",
+  "cat": "tile",
+  "sw": 1.2,
+  "sh": 2.4
+ },
+ {
+  "file": "ceramic_white.jpg",
+  "name": "Ceramic glossy white (300\u00d7600)",
+  "cat": "tile",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "subway_white.jpg",
+  "name": "Subway tile white (75\u00d7150, staggered)",
+  "cat": "tile",
+  "sw": 0.6,
+  "sh": 0.6
+ },
+ {
+  "file": "ceramic_blue.jpg",
+  "name": "Ceramic glazed teal (300\u00d7300)",
+  "cat": "tile",
+  "sw": 0.9,
+  "sh": 0.9
+ },
+ {
+  "file": "terrazzo.jpg",
+  "name": "Terrazzo (cast, chips)",
+  "cat": "tile",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "oak_planks.jpg",
+  "name": "Oak planks, natural (200 wide)",
+  "cat": "wood",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "walnut_planks.jpg",
+  "name": "Walnut planks (200 wide)",
+  "cat": "wood",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "teak_panel.jpg",
+  "name": "Teak wall panelling, vertical grooves",
+  "cat": "wood",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "ash_white.jpg",
+  "name": "White-washed ash planks",
+  "cat": "wood",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "oak_chevron.jpg",
+  "name": "Oak chevron parquet",
+  "cat": "wood",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "sandstone_cladding.jpg",
+  "name": "Sandstone cladding (random strips)",
+  "cat": "stone",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "slate_tiles.jpg",
+  "name": "Slate stone tiles (300\u00d7600)",
+  "cat": "stone",
+  "sw": 1.2,
+  "sh": 1.2
+ },
+ {
+  "file": "plaster_white.jpg",
+  "name": "Smooth plaster, off-white paint",
+  "cat": "paint",
+  "sw": 2.0,
+  "sh": 2.0
+ },
+ {
+  "file": "texture_paint.jpg",
+  "name": "Textured paint, warm beige",
+  "cat": "paint",
+  "sw": 1.0,
+  "sh": 1.0
+ }
+]

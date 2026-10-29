@@ -178,7 +178,9 @@ FIELDS = {
              ("clad_len", "Cladding length (0 = the whole wall)", "len",
               (0.0, 200.0)),
              ("clad_off", "Cladding centre moved along the wall", "len",
-              (-100.0, 100.0))],
+              (-100.0, 100.0)),
+             ("fin_info", "Face finishes (right-click the face ▸ Wall "
+              "finish)", "info", None)],
     "opening": [("kind", "Type", "choice", ("door", "window", "void",
                                             "curtain")),
                 ("w", "Width", "len", (0.2, 20.0)),
@@ -222,8 +224,9 @@ FIELDS = {
                   "blue_ref", "silver_ref", "frosted")),
                 ("arch_w", "Door architrave width (0 = none)", "len",
                  (0.0, 0.30)),
-                ("curtain", "Window curtain", "choice",
-                 ("curtain_auto", "curtain_on", "curtain_off"))],
+                ("curtain", "Curtain / blind (windows, sliding doors)",
+                 "choice", ("curtain_auto", "curtain_on", "blind_v",
+                            "blind_h", "roller", "curtain_off"))],
     "column": [("role", "Column type", "choice",
                 ("structural", "architectural")),
                ("astyle", "Architectural style", "choice",
@@ -343,7 +346,10 @@ def _choice_labels() -> dict:
                 "tuscan": "Tuscan (plain, simple capital)",
                 "curtain_auto": "As the project setting",
                 "curtain_on": "Curtain on this window",
-                "curtain_off": "No curtain on this window"})
+                "curtain_off": "No curtain on this window",
+                "blind_v": "Vertical louvre blinds",
+                "blind_h": "Horizontal venetian blinds",
+                "roller": "Roller blind"})
     try:
         from . import stairs as ST_
         out.update({k: lab for k, lab, _c in ST_.FINISHES })
@@ -4801,6 +4807,226 @@ class Panel(QWidget):
             a_.setCheckable(True)
             a_.setChecked(k_ == now)
 
+    def _face_pick(self):
+        """(wall id, "l" / "r" / None) of the wall face selected (inside the
+        wall's group) or under the mouse, or None."""
+        from PySide6.QtGui import QCursor, QVector3D
+
+        from . import finishes as FN
+        vp = self.vp
+        doc = self.doc()
+
+        def nrm(face, M=None):
+            n_ = getattr(face, "normal", None)
+            n_ = n_() if callable(n_) else n_
+            if n_ is None:
+                return None
+            if M is not None:
+                p0 = M.map(QVector3D(0, 0, 0))
+                p1 = M.map(QVector3D(n_.x(), n_.y(), n_.z()))
+                n_ = p1 - p0
+            return (n_.x(), n_.y(), n_.z())
+        eg = getattr(vp.scene, "edit_group", None)
+        for e in list(vp.scene.selection):          # a face picked inside
+            if not hasattr(e, "loop"):
+                continue
+            for g in (getattr(e, "owner", None), eg):
+                t = PJ.tag_of(g) if g is not None else None
+                if t and t.get("type") == "wall":
+                    w = PJ.find_record(doc, "wall", t["id"])
+                    if w is not None and "a" in w:
+                        nn = nrm(e, getattr(g, "xform", None))
+                        return t["id"], FN.side_of_face(w, nn) if nn \
+                            else None
+        try:                                         # under the mouse
+            pos = vp.mapFromGlobal(QCursor.pos())
+            if not vp.rect().contains(pos):
+                return None
+            face, pl = vp.pick_face_placement(float(pos.x()), float(pos.y()))
+        except Exception:  # noqa: BLE001
+            return None
+        if face is None:
+            return None
+        hit = self._under_cursor_raw()
+        if not hit or hit[0] != "wall":
+            return None
+        w = PJ.find_record(doc, "wall", hit[1])
+        if w is None or "a" not in w or w.get("kind", "line") != "line":
+            return None
+        M = getattr(pl, "xform", None) if pl is not None else None
+        nn = nrm(face, M)
+        return hit[1], FN.side_of_face(w, nn) if nn else None
+
+    def _toward(self, w, side) -> str:
+        """The room the face ``side`` of wall ``w`` looks into."""
+        from shapely.geometry import Point
+
+        from .engine import spaces
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b) or 1.0
+        sg = 1 if side == "l" else -1
+        n = (-(b[1] - a[1]) / L * sg, (b[0] - a[0]) / L * sg)
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        d = float(w["t"]) / 2 + 0.3
+        pt = Point(m[0] + n[0] * d, m[1] + n[1] * d)
+        for r in spaces.of_level(self.doc()["arch"], w["level"]):
+            if r["poly"].contains(pt):
+                return str(r.get("name") or "room")
+        return "outside"
+
+    def _finish_menu(self, menu) -> None:
+        """«Wall finish» for the face right-clicked: a band (floor to
+        ceiling, dado, above the dado, skirting) ▸ a group (marble, tiles,
+        wood…) ▸ the finish; the face's finishes off; the same on every
+        wall of the room."""
+        from . import finishes as FN
+        pick = self._face_pick()
+        if not pick:
+            return
+        wid, side = pick
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wid)
+        if w is None:
+            return
+        groups_ = FN.groups_menu()
+        if not groups_:
+            return
+        sides = [side] if side else ["l", "r"]
+        for sd in sides:
+            toward = self._toward(w, sd)
+            now = {f_.get("band"): f_.get("mat") for f_ in w.get("fin") or []
+                   if f_.get("side") == sd}
+            m_ = menu.addMenu(f"CAD2IngeTrazo · Wall finish — "
+                              f"{'this' if side else ('left' if sd == 'l' else 'right')}"
+                              f" face (toward {toward})")
+            for band, lab, _z0, _z1 in FN.BANDS:
+                mb = m_.addMenu(lab + ("  ✓" if band in now else ""))
+                for title, ks in groups_:
+                    mg = mb.addMenu(title)
+                    for k_, lab_ in ks:
+                        a_ = mg.addAction(lab_, lambda k=k_, b_=band, s_=sd:
+                                          self._set_finish(wid, s_, k, b_))
+                        a_.setCheckable(True)
+                        a_.setChecked(now.get(band) == k_)
+                if band in now:
+                    mb.addSeparator()
+                    mb.addAction("Take this band off",
+                                 lambda b_=band, s_=sd:
+                                 self._set_finish(wid, s_, None, b_))
+            m_.addSeparator()
+            if now:
+                if toward != "outside":
+                    m_.addAction(f"This face's finishes on every wall of "
+                                 f"{toward}", lambda s_=sd:
+                                 self._finish_room(wid, s_))
+                m_.addAction("Take this face's finishes off",
+                             lambda s_=sd: self._set_finish(wid, s_, None,
+                                                            None))
+
+    def _set_finish(self, wid, side, mat, band):
+        from . import finishes as FN
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wid)
+        if w is None:
+            self.flash("That wall is gone — right-click it again")
+            return
+        FN.set_band(w, side, mat, band)
+        face = "left" if side == "l" else "right"
+        if mat:
+            self.commit(doc, f"{w.get('name') or 'Wall'}, {face} face: "
+                             f"{FN.label(mat)} — {FN.BAND[band][0]}")
+        else:
+            self.commit(doc, f"{w.get('name') or 'Wall'}, {face} face: "
+                             "finish taken off")
+
+    def _finish_room(self, wid, side):
+        """The finishes of a wall's face copied onto every wall face of
+        the room it looks into."""
+        from shapely.geometry import Point
+
+        from .engine import spaces
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wid)
+        if w is None:
+            return
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b) or 1.0
+        sg = 1 if side == "l" else -1
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        d = float(w["t"]) / 2 + 0.3
+        pt = Point(m[0] - (b[1] - a[1]) / L * sg * d,
+                   m[1] + (b[0] - a[0]) / L * sg * d)
+        room = next((r for r in spaces.of_level(doc["arch"], w["level"])
+                     if r["poly"].contains(pt)), None)
+        if room is None:
+            return
+        src = [dict(f_) for f_ in w.get("fin") or [] if f_.get("side") == side]
+        poly = room["poly"].buffer(0.02)
+        n = 0
+        for o in doc["arch"]["walls"]:
+            if o["level"] != w["level"] or "a" not in o or o.get("rail") or \
+                    o.get("kind", "line") != "line" or \
+                    o.get("type") == "curtain":
+                continue
+            a2, b2 = o["a"], o["b"]
+            L2 = math.dist(a2, b2)
+            if L2 < 0.2:
+                continue
+            m2 = ((a2[0] + b2[0]) / 2, (a2[1] + b2[1]) / 2)
+            d2 = float(o["t"]) / 2 + 0.15
+            for s2, g2 in (("l", 1), ("r", -1)):
+                q = Point(m2[0] - (b2[1] - a2[1]) / L2 * g2 * d2,
+                          m2[1] + (b2[0] - a2[0]) / L2 * g2 * d2)
+                if not poly.contains(q):
+                    continue
+                o["fin"] = [f_ for f_ in o.get("fin") or []
+                            if f_.get("side") != s2] + \
+                    [dict(f_, side=s2) for f_ in src]
+                n += 1
+        self.commit(doc, f"{room.get('name') or 'Room'}: the finishes on "
+                         f"{n} wall face(s)")
+
+    def _floor_menu(self, menu) -> None:
+        """«Floor finish» for the rooms selected (their floors)."""
+        from . import finishes as FN
+        doc = self.doc()
+        rids = [i for k, i in self._selected_all() if k == "room"]
+        if not rids:
+            return
+        groups_ = FN.groups_menu(floor=True)
+        if not groups_:
+            return
+        r0 = PJ.room_record(doc, rids[0]) or {}
+        now = r0.get("mat_floor")
+        what = f"{len(rids)} rooms" if len(rids) > 1 else \
+            str(r0.get("name") or "the room")
+        m_ = menu.addMenu(f"CAD2IngeTrazo · Floor finish — {what}")
+        for title, ks in groups_:
+            mg = m_.addMenu(title)
+            for k_, lab_ in ks:
+                a_ = mg.addAction(lab_, lambda k=k_: self._set_floor(rids, k))
+                a_.setCheckable(True)
+                a_.setChecked(now == k_)
+        m_.addSeparator()
+        m_.addAction("As built (no material)",
+                     lambda: self._set_floor(rids, "none"))
+
+    def _set_floor(self, rids, key):
+        from . import finishes as FN
+        doc = self.doc()
+        n = 0
+        for rid in rids:
+            rec = PJ.room_record(doc, rid)
+            if rec is None:
+                continue
+            if key == "none":
+                rec.pop("mat_floor", None)
+            else:
+                rec["mat_floor"] = key
+            n += 1
+        self.commit(doc, f"Floor finish {FN.label(key) if key != 'none' else 'as built'}: "
+                         f"{n} room(s)")
+
     def apply_clad(self, kind):
         doc = self.doc()
         n = 0
@@ -5126,7 +5352,7 @@ class Panel(QWidget):
                            "Every kitchen on every level"))
         v.addLayout(row)
         row = QHBoxLayout()
-        self.r_curt = QCheckBox("Curtains at windows")
+        self.r_curt = QCheckBox("Curtains / blinds")
         self.r_curt.setToolTip("A rod over each window and two pleated "
                                "curtains drawn open, on the room side (the "
                                "windows between two rooms left bare)")
@@ -5136,6 +5362,14 @@ class Panel(QWidget):
         for k_, lab_, _c in _CT.COLORS:
             self.r_curt_col.addItem(lab_, k_)
         row.addWidget(self.r_curt_col)
+        self.r_curt_type = QComboBox()
+        for k_, lab_ in _CT.TYPES:
+            self.r_curt_type.addItem(lab_, k_)
+        self.r_curt_type.setToolTip("Curtains, vertical / horizontal "
+                                    "louvre blinds or roller blinds — at "
+                                    "the windows and the glazed sliding "
+                                    "doors")
+        row.addWidget(self.r_curt_type)
         self.r_curt_len = QComboBox()
         self.r_curt_len.addItem("to the floor", "floor")
         self.r_curt_len.addItem("under the sill", "sill")
@@ -5361,6 +5595,9 @@ class Panel(QWidget):
             sp.blockSignals(False)
         k_ = self.r_curt_col.findData(st.get("curtain_color", "cream"))
         self.r_curt_col.setCurrentIndex(max(k_, 0))
+        k_ = self.r_curt_type.findData(st.get("curtain_type", "curtain"))
+        if k_ >= 0:
+            self.r_curt_type.setCurrentIndex(k_)
         k_ = self.r_curt_len.findData(st.get("curtain_len", "floor"))
         self.r_curt_len.setCurrentIndex(max(k_, 0))
         try:
@@ -5398,6 +5635,7 @@ class Panel(QWidget):
         st["curtains"] = self.r_curt.isChecked()
         st["curtain_color"] = self.r_curt_col.currentData()
         st["curtain_len"] = self.r_curt_len.currentData()
+        st["curtain_type"] = self.r_curt_type.currentData()
         self.commit(doc, "Curtains at the windows" if st["curtains"]
                     else "Curtains off")
 
@@ -6073,6 +6311,13 @@ class Panel(QWidget):
                 w = QLineEdit(str(rec.get(key, "") or ""))
             elif typ == "info":
                 txt = ""
+                if kind == "wall" and key == "fin_info":
+                    from . import finishes as FN_
+                    txt = "\n".join(
+                        f"{'Left' if f_['side'] == 'l' else 'Right'} face: "
+                        f"{FN_.label(f_['mat'])} — "
+                        f"{FN_.BAND.get(f_.get('band'), ('',))[0]}"
+                        for f_ in rec.get("fin") or [])
                 if kind == "room" and key == "size":
                     sz = PJ.room_size(self.doc(), rec)
                     if sz:
@@ -6363,6 +6608,14 @@ class Panel(QWidget):
                                    lambda: self.fc_diff.setChecked(False))
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu fitout")
+        try:            # a finish on the wall face right-clicked
+            self._finish_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu finish")
+        try:            # the floor finish of the rooms selected
+            self._floor_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu floor finish")
         try:            # the selected walls' interior cladding
             self._clad_menu(menu)
         except Exception:  # noqa: BLE001
