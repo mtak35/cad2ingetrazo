@@ -4575,6 +4575,31 @@ class Panel(QWidget):
         f.addRow("Cove / panel light", self.fc_led)
         f.addRow(_btn("Apply the face to the room picked",
                       lambda: self._ceil_room("face")))
+        # the room picked's floor and walls: finishes
+        from . import finishes as _FN
+        self.fn_floor = QComboBox()
+        for title_, ks_ in _FN.groups_menu(floor=True):
+            for k_, lab_ in ks_:
+                self.fn_floor.addItem(f"{title_} · {lab_}", k_)
+        self.fn_floor.addItem("As built (no material)", "none")
+        f.addRow("Floor finish", self.fn_floor)
+        f.addRow(_btn("Apply the floor finish to the room picked",
+                      self._fn_floor_room))
+        self.fn_wall = QComboBox()
+        for title_, ks_ in _FN.groups_menu():
+            for k_, lab_ in ks_:
+                self.fn_wall.addItem(f"{title_} · {lab_}", k_)
+        self.fn_band = QComboBox()
+        for k_, lab_, _a, _b in _FN.BANDS:
+            self.fn_band.addItem(lab_, k_)
+        f.addRow("Wall finish", self.fn_wall)
+        f.addRow("Wall finish height", self.fn_band)
+        row = QHBoxLayout()
+        row.addWidget(_btn("On every wall of the room picked",
+                           lambda: self._fn_wall_room(False)))
+        row.addWidget(_btn("Take them off", lambda: self._fn_wall_room(
+            True)))
+        f.addRow(row)
         try:
             self._fit_rooms()
         except Exception:  # noqa: BLE001
@@ -4656,6 +4681,85 @@ class Panel(QWidget):
             hide.append([lid, kind, x, y])
         what = {"light": "ceiling light", "diffuser": "AC diffuser"}[kind]
         self.commit(doc, f"{room}: {n} {what}(s) deleted (kept off)")
+
+    def _room_picked(self):
+        """(room poly, level id, room id, name) of the room picked in 8A,
+        or None (with a word why)."""
+        from shapely.geometry import Point
+
+        from . import walk as WK
+        from .engine import spaces
+        data = self.fc_room.currentData()
+        if not data:
+            self.flash("Pick a room (↻ lists the rooms of the level "
+                       "picked at the top)")
+            return None
+        lid, x, y = data
+        doc = self.doc()
+        poly = next((p for _n, p in WK.rooms(doc, lid)
+                     if p.buffer(0.01).contains(Point(x, y))), None)
+        if poly is None:
+            self.flash("That room is not there any more — ↻")
+            return None
+        room = next((r for r in spaces.of_level(doc["arch"], lid)
+                     if r["poly"].buffer(0.01).contains(Point(x, y))), None)
+        rid = PJ.room_key(lid, room) if room is not None else None
+        return poly, lid, rid, self.fc_room.currentText().split("  (")[0]
+
+    def _fn_floor_room(self):
+        got = self._room_picked()
+        if not got:
+            return
+        _poly, _lid, rid, name = got
+        if rid is None:
+            self.flash(f"{name}: no floor of its own to finish (a corridor "
+                       "or hall the rooms leave) — right-click its floor")
+            return
+        self._set_floor([rid], self.fn_floor.currentData())
+
+    def _fn_wall_room(self, off):
+        """The finish / height picked on every wall face of the room
+        picked (``off``: their finishes taken off)."""
+        from shapely.geometry import Point
+
+        from . import finishes as FN
+        got = self._room_picked()
+        if not got:
+            return
+        poly, lid, _rid, name = got
+        doc = self.doc()
+        mat = self.fn_wall.currentData()
+        band = self.fn_band.currentData()
+        pb = poly.buffer(0.02)
+        n = 0
+        for o in doc["arch"]["walls"]:
+            if o["level"] != lid or "a" not in o or o.get("rail") or \
+                    o.get("kind", "line") != "line" or \
+                    o.get("type") == "curtain":
+                continue
+            a2, b2 = o["a"], o["b"]
+            L2 = math.dist(a2, b2)
+            if L2 < 0.2:
+                continue
+            d2 = float(o["t"]) / 2 + 0.15
+            for s2, g2 in (("l", 1), ("r", -1)):
+                hits = 0
+                for k in (0.2, 0.5, 0.8):          # along the wall
+                    m2 = (a2[0] + (b2[0] - a2[0]) * k,
+                          a2[1] + (b2[1] - a2[1]) * k)
+                    q = Point(m2[0] - (b2[1] - a2[1]) / L2 * g2 * d2,
+                              m2[1] + (b2[0] - a2[0]) / L2 * g2 * d2)
+                    hits += pb.contains(q)
+                if hits < 2:
+                    continue
+                FN.set_band(o, s2, None if off else mat, None if off
+                            else band)
+                n += 1
+        if off:
+            self.commit(doc, f"{name}: finishes taken off {n} wall face(s)")
+        else:
+            self.commit(doc, f"{name}: {FN.label(mat)} — "
+                             f"{FN.BAND[band][0]} on {n} wall face(s)")
 
     def _ceil_room(self, what):
         """The false ceiling of the room picked in 8A (by name): "type" the
@@ -4853,9 +4957,101 @@ class Panel(QWidget):
         w = PJ.find_record(doc, "wall", hit[1])
         if w is None or "a" not in w or w.get("kind", "line") != "line":
             return None
+        # the face the camera ray meets first (the wall's own two faces,
+        # worked out from its line — not from the mesh's winding, which a
+        # mirrored placement turns round)
+        sd = self._ray_side(w, pos)
+        if sd is not None:
+            return hit[1], sd
         M = getattr(pl, "xform", None) if pl is not None else None
         nn = nrm(face, M)
         return hit[1], FN.side_of_face(w, nn) if nn else None
+
+    def _ray(self, pos=None):
+        """(origin, direction) of the camera ray under the mouse, as
+        tuples, or None."""
+        from PySide6.QtGui import QCursor
+        vp = self.vp
+        try:
+            if pos is None:
+                pos = vp.mapFromGlobal(QCursor.pos())
+            o, d = vp._pixel_to_ray(float(pos.x()), float(pos.y()))
+        except Exception:  # noqa: BLE001
+            return None
+        if o is None or d is None:
+            return None
+        return (o.x(), o.y(), o.z()), (d.x(), d.y(), d.z())
+
+    def _ray_side(self, w, pos=None):
+        """"l" / "r": the face of wall ``w`` the camera ray under the mouse
+        meets first, facing the camera; None when it meets neither."""
+        r = self._ray(pos)
+        if r is None:
+            return None
+        (ox, oy, oz), (dx, dy, dz) = r
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 1e-6:
+            return None
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        n = (-u[1], u[0])
+        off = float(w["t"]) / 2 + 0.05
+        best = None
+        for sd, sg in (("l", 1), ("r", -1)):
+            nx, ny = n[0] * sg, n[1] * sg
+            den = nx * dx + ny * dy
+            if den >= -1e-9:                  # faces away from the camera
+                continue
+            px, py = a[0] + nx * off, a[1] + ny * off
+            t = (nx * (px - ox) + ny * (py - oy)) / den
+            if t <= 0:
+                continue
+            hx, hy = ox + dx * t, oy + dy * t
+            s_ = (hx - a[0]) * u[0] + (hy - a[1]) * u[1]
+            if -0.6 <= s_ <= L + 0.6 and (best is None or t < best[0]):
+                best = (t, sd)
+        return best[1] if best else None
+
+    def _floor_pick(self):
+        """(room id, name) of the room floor under the mouse (the camera
+        ray down onto each level's floor, the nearest), or None."""
+        from shapely.geometry import Point
+
+        from .engine import spaces
+        r = self._ray()
+        if r is None:
+            return None
+        (ox, oy, oz), (dx, dy, dz) = r
+        if abs(dz) < 1e-6:
+            return None
+        doc = self.doc()
+        arch = doc["arch"]
+        st = doc["settings"]
+        fin = float(st.get("finish_t", 0.0508) or 0.0) \
+            if st.get("finish_on", True) else 0.0
+        elev = PJ.elevations(arch)
+        best = None
+        hidden = set()
+        try:
+            hidden = {lv["id"] for lv in arch["levels"] if lv.get("hidden")}
+        except Exception:  # noqa: BLE001
+            pass
+        for i, lv in enumerate(arch["levels"]):
+            if lv["id"] in hidden:
+                continue
+            z = elev[i] + fin
+            t = (z - oz) / dz
+            if t <= 0 or (best is not None and t >= best[0]):
+                continue
+            pt = Point(ox + dx * t, oy + dy * t)
+            for room in spaces.of_level(arch, lv["id"]):
+                if room["poly"].contains(pt):
+                    rid = room["rec"]["id"] if room.get("rec") else \
+                        f"{lv['id']}@{pt.x:.3f},{pt.y:.3f}"
+                    best = (t, rid, str(room.get("name") or "room"),
+                            lv["name"])
+                    break
+        return best[1:] if best else None
 
     def _toward(self, w, side) -> str:
         """The room the face ``side`` of wall ``w`` looks into."""
@@ -4992,11 +5188,29 @@ class Panel(QWidget):
         doc = self.doc()
         rids = [i for k, i in self._selected_all() if k == "room"]
         if not rids:
+            hit = None
+            try:
+                hit = self._under_cursor_raw()
+            except Exception:  # noqa: BLE001
+                hit = None
+            if hit is not None and hit[0] == "room":
+                rids = [hit[1]]
+            elif hit is None or hit[0] in ("slab", "finish_edge",
+                                         "levelgroup", "ceiling", "fitout",
+                                         "furniture"):
+                fp = self._floor_pick()
+                if fp:
+                    rids = [fp[0]]
+        if not rids:
             return
         groups_ = FN.groups_menu(floor=True)
         if not groups_:
             return
-        r0 = PJ.room_record(doc, rids[0]) or {}
+        r0 = next((r for r in doc["arch"]["rooms"] if r["id"] == rids[0]),
+                  None) or {}
+        if not r0 and "@" in str(rids[0]):
+            fp = self._floor_pick()
+            r0 = {"name": fp[1] if fp else "the room"}
         now = r0.get("mat_floor")
         what = f"{len(rids)} rooms" if len(rids) > 1 else \
             str(r0.get("name") or "the room")

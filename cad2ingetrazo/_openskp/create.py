@@ -1066,7 +1066,7 @@ class _ArchiveWriter:
         self._write_str("")  # texture path (empty - no texture)
         self.buf += bytes(8)  # unknown/padding - ground truth is all-zero here
         # Stored TRANSPARENCY (0 = opaque); see write_textured_material.
-        self.buf += _f64(1.0 if opacity is None else float(opacity))  # OPACITY (legacy.py reads it so; 1.0 = opaque) - CAD2IngeTrazo 3.40
+        self.buf += _f64(0.0 if opacity is None else 1.0 - float(opacity))  # TRANSPARENCY: SketchUp 2025 shows alpha = 1 - this (checked 3.45: written 0.35 read alpha 0.65)
         self.buf.append(0 if opacity is None else 1)  # use_opacity gates it
         return slot
 
@@ -1146,7 +1146,7 @@ class _ArchiveWriter:
         # inverted and round-trips as itself. Hardcoding 1.0/False meant a
         # translucent material came out solid: a pool's water, 0.6 in the
         # source, exported as an opaque slab.
-        self.buf += _f64(1.0 if opacity is None else float(opacity))  # OPACITY (legacy.py reads it so; 1.0 = opaque) - CAD2IngeTrazo 3.40
+        self.buf += _f64(0.0 if opacity is None else 1.0 - float(opacity))  # TRANSPARENCY: SketchUp 2025 shows alpha = 1 - this (checked 3.45: written 0.35 read alpha 0.65)
         self.buf.append(0 if opacity is None else 1)
         return slot
 
