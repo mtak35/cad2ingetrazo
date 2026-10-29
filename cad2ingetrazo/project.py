@@ -2411,6 +2411,163 @@ def close_wall_gaps(doc, lid, corner=1.0, jog=0.65) -> int:
     return n
 
 
+def openings_follow_cad(doc, lid, pl, P) -> dict:
+    """The doors and windows checked against the CAD, one by one: a window
+    with no window lines drawn in it and a door with no door drawn at it
+    made what the CAD shows there — the other kind when that is drawn,
+    else a plain opening (a doorway: the CAD's wall lines stop, nothing
+    drawn across); an opening with a door drawn in it made a door; a
+    door block no wall holds put in, the wall run on across its gap.
+    {"to_void", "to_door", "to_window", "added"}."""
+    from shapely.geometry import LineString, Point, Polygon
+    from . import detect
+    arch = doc["arch"]
+    st = doc["settings"]
+    lay = pl["layers"]
+    rep = {"to_void": 0, "to_door": 0, "to_window": 0, "added": 0}
+    walls = {w["id"]: w for w in arch["walls"]}
+    dsegs = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+             for s_ in pl["segs"] if _match(lay[s_[4]], P["doors"])
+             and math.dist((s_[0], s_[1]), (s_[2], s_[3])) > 1e-4]
+    wsegs = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+             for s_ in pl["segs"] if _match(lay[s_[4]], P["windows"])
+             and math.dist((s_[0], s_[1]), (s_[2], s_[3])) > 1e-4]
+    dblocks, wblocks = [], []
+    for ins in pl.get("inserts", ()):
+        if not ins.get("ocorners") and not ins.get("corners"):
+            continue
+        k_ = detect.block_kind(ins.get("name", ""), "")
+        if k_ is None:
+            if _match(ins["layer"], P["doors"]):
+                k_ = "door"
+            elif _match(ins["layer"], P["windows"]):
+                k_ = "window"
+        if k_ is None:
+            continue
+        try:
+            pg = Polygon(ins.get("ocorners") or ins["corners"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        (dblocks if k_ == "door" else wblocks).append((pg, ins))
+    if not (dsegs or wsegs or dblocks or wblocks):
+        return rep               # a plan with no doors / windows drawn
+
+    def foot(o, w, ext):
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b) or 1.0
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        n = (-u[1], u[0])
+        s0 = float(o["pos"]) - float(o["w"]) / 2
+        s1 = float(o["pos"]) + float(o["w"]) / 2
+        h = float(w["t"]) / 2 + ext
+        return Polygon([(a[0] + u[0] * s_ + n[0] * c, a[1] + u[1] * s_ +
+                         n[1] * c) for s_, c in ((s0, -h), (s1, -h),
+                                                 (s1, h), (s0, h))])
+    taken = []
+    for o in list(arch["openings"]):
+        w = walls.get(o.get("wall"))
+        if w is None or w["level"] != lid or "a" not in w or \
+                w.get("kind", "line") != "line" or w.get("rail") or \
+                w.get("type") == "curtain" or o.get("lift") or \
+                o.get("user"):
+            continue
+        f1 = foot(o, w, 0.05)
+        f6 = foot(o, w, 0.6)
+        taken.append(foot(o, w, 0.3))
+        dev = any(pg.intersects(f6) for pg, _i in dblocks) or \
+            any(g.intersects(f6) for g in dsegs)
+        wev = any(pg.intersects(f1) for pg, _i in wblocks) or \
+            any(g.intersects(f1) for g in wsegs)
+        k = o["kind"]
+        conv = str(o.get("name", "")).startswith("Window") and k == "door"
+        if k == "window" and not wev:
+            if dev:
+                o.update(kind="door", h=float(st["door_h"]), sill=0.0,
+                         style="hinged")
+                door_rule(o)
+                opening_types(o, st)
+                rep["to_door"] += 1
+            else:
+                o.update(kind="void", h=float(st["door_h"]), sill=0.0,
+                         style="")
+                rep["to_void"] += 1
+        elif k == "door" and not dev and not conv:
+            if wev:
+                o.update(kind="window", h=float(st["win_h"]),
+                         sill=float(st["sill"]),
+                         style=st.get("win_style", "sliding"))
+                opening_types(o, st)
+                rep["to_window"] += 1
+            else:
+                o.update(kind="void", style="")
+                rep["to_void"] += 1
+        elif k == "void" and dev:
+            o.update(kind="door", h=float(st["door_h"]), sill=0.0,
+                     style="hinged")
+            door_rule(o)
+            opening_types(o, st)
+            rep["to_door"] += 1
+    # door blocks no opening stands in: the wall that stops short of the
+    # door run on across it, the door put in
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"
+          and math.dist(w["a"], w["b"]) > 0.1]
+    for pg, ins in dblocks:
+        if any(pg.intersects(t_) for t_ in taken):
+            continue
+        dw = float((ins.get("ldim") or [0.9])[0] or 0.9)
+        if not 0.5 <= dw <= 2.5:
+            continue
+        best = None
+        for w in ws:
+            a, b = w["a"], w["b"]
+            L = math.dist(a, b)
+            u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            for k_, P_, dv in (("a", a, (-u[0], -u[1])), ("b", b, u)):
+                if pg.distance(Point(P_)) > 0.35:
+                    continue
+                ray = LineString([P_, (P_[0] + dv[0] * (dw + 0.6),
+                                       P_[1] + dv[1] * (dw + 0.6))])
+                for o_ in ws:
+                    if o_ is w:
+                        continue
+                    x = ray.intersection(LineString([o_["a"], o_["b"]]))
+                    if x.is_empty or x.geom_type != "Point":
+                        continue
+                    dd = Point(P_).distance(x)
+                    if 0.4 <= dd <= dw + 0.6 and (best is None or
+                                                  dd < best[0]):
+                        best = (dd, w, k_, (x.x, x.y))
+        if best is None:
+            continue
+        dd, w, k_, X = best
+        _set_wall_end(doc, w, k_, X)
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        c = pg.centroid
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        pos = (c.x - a[0]) * u[0] + (c.y - a[1]) * u[1]
+        # the door centred in the gap the wall now crosses
+        g0 = L - dd if k_ == "b" else 0.0
+        g1 = L if k_ == "b" else dd
+        pos = min(max(pos, g0 + dw / 2), g1 - dw / 2) if g1 - g0 > dw \
+            else (g0 + g1) / 2
+        rec = {"kind": "door", "wall": w["id"], "pos": round(pos, 4),
+               "w": round(min(dw, g1 - g0), 3), "h": float(st["door_h"]),
+               "sill": 0.0, "swing": "left", "face": 1, "style": "hinged"}
+        door_rule(rec)
+        opening_types(rec, st)
+        arch["openings"] += M.new_openings(arch["openings"], [rec])
+        taken.append(pg)
+        rep["added"] += 1
+    # walls of no length (left by the joins): away
+    arch["walls"] = [w for w in arch["walls"] if not (
+        w["level"] == lid and "a" in w and w.get("kind", "line") == "line"
+        and math.dist(w["a"], w["b"]) < 0.02 and not any(
+            o.get("wall") == w["id"] for o in arch["openings"]))]
+    return rep
+
+
 def square_t_nodes(doc, lid) -> int:
     """Three walls ending on one point, two of them in line (a run carried
     on through, perhaps two thicknesses): the third — the stem of the T —
@@ -5430,6 +5587,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.square_t_nodes")
+    try:                       # the doors / windows as the CAD draws them
+        rep["openings_cad"] = openings_follow_cad(doc, lid, pl, P)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.openings_follow_cad")
     try:                       # the CAD's own wall outline (merged walls)
         from .engine import wallmerge as WMG
         from . import slabedges as SE_
