@@ -2040,7 +2040,8 @@ def drop_unsupported_walls(doc, lid, pl, P) -> int:
     for w in arch["walls"]:
         if w["level"] != lid or w.get("rail") or "a" not in w or \
                 w.get("kind", "line") != "line" or w.get("user") or \
-                w["id"] in hosts or w.get("type") == "curtain":
+                w["id"] in hosts or w.get("type") == "curtain" or \
+                w.get("cwin"):           # a corner window's leg: glass
             continue
         a, b = w["a"], w["b"]
         L = math.dist(a, b)
@@ -2061,7 +2062,7 @@ def drop_unsupported_walls(doc, lid, pl, P) -> int:
     return len(drop)
 
 
-BALCONY_ROOM = re.compile(r"BALCON|SIT\s*OUT|VERANDA|TERRACE|TERACE|"
+BALCONY_ROOM = re.compile(r"BALCON|SIT\s*OUT|VERANDA|VARANDA|TERRACE|TERACE|"
                           r"LOGGIA", re.I)
 BATH_ROOM = re.compile(r"BATH|TOILET|\bWC\b|W\.C|WASH|POWDER|LAV|"
                        r"\bT\s*/\s*B\b|SHOWER", re.I)
@@ -2204,6 +2205,81 @@ def balcony_doors_bath_windows(doc, lid) -> dict:
     return out
 
 
+def open_air_sliding_doors(doc, lid, wide=3.0) -> int:
+    """The ground floor's glazing out to the open (the plan names no room
+    there): a window or a plain opening, 4' wide or more, looking out onto
+    a verandah / balcony the CAD names (its text within reach outside) —
+    and any window ``wide`` or wider out to the open — made a full-height
+    sliding glass door (two leaves). Openings set by hand stay. The number
+    made."""
+    from shapely.geometry import Point
+    arch = doc["arch"]
+    st = doc["settings"]
+    lv = next((l_ for l_ in arch["levels"] if l_["id"] == lid), None)
+    if lv is None or lv.get("kind") != "ground":
+        return 0
+    rooms = spaces.of_level(arch, lid)
+    walls = {w["id"]: w for w in arch["walls"] if w["level"] == lid}
+    head = float(st.get("door_h", 2.1336) or 2.1336)
+    texts = [(Point(float(t_["x"]), float(t_["y"])), str(t_.get("text", "")))
+             for t_ in doc.get("texts") or []
+             if t_.get("level") == lid and "x" in t_]
+    ver = [p_ for p_, tx_ in texts if BALCONY_ROOM.search(tx_)]
+
+    def room_at(p):
+        for r in rooms:
+            try:
+                if r["poly"].contains(p):
+                    return str(r.get("name") or "ROOM")
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+    n = 0
+    for i, o in enumerate(arch["openings"]):
+        w = walls.get(o.get("wall"))
+        if w is None or o.get("user") or o.get("kind") not in (
+                "window", "void") or w.get("kind", "line") != "line" or \
+                w.get("rail") or w.get("cwin") or w.get("type") == "curtain":
+            continue
+        wd = float(o.get("w", 0.0))
+        if wd < 1.2:
+            continue
+        try:
+            seg = W.centre(w)
+        except Exception:  # noqa: BLE001
+            continue
+        u = seg.u
+        nv = (-u[1], u[0])
+        c = (seg.p0[0] + u[0] * float(o["pos"]),
+             seg.p0[1] + u[1] * float(o["pos"]))
+        t2 = float(w["t"]) / 2 + 0.3
+        sides = [room_at(Point(c[0] + nv[0] * t2 * sg, c[1] + nv[1] * t2 * sg))
+                 for sg in (1, -1)]
+        if (sides[0] is None) == (sides[1] is None):
+            continue                     # inside (or both out): not glazing
+        if any(BATH_ROOM.search(x) for x in sides if x):
+            continue
+        sg = 1 if sides[0] is None else -1
+        out_ = (nv[0] * sg, nv[1] * sg)
+        onto = False
+        for p_ in ver:
+            dx, dy = p_.x - c[0], p_.y - c[1]
+            along = dx * out_[0] + dy * out_[1]
+            lat = abs(dx * u[0] + dy * u[1])
+            if 0.1 < along < 4.0 and lat < wd / 2 + 4.0:
+                onto = True
+                break
+        if not onto and not (o["kind"] == "window" and wd >= wide):
+            continue
+        new = opening_as(o, "door", st)
+        new.update(style="sliding", leaves=2, sill=0.0, h=round(head, 4))
+        new.pop("curtain", None)
+        new["id"] = o["id"]
+        arch["openings"][i] = new
+        n += 1
+    return n
+
+
 def _set_wall_end(doc, w, k, P) -> None:
     """A straight wall's end ``k`` moved to ``P`` (on its line): its doors
     and windows stay where they are in the world (their places are along
@@ -2219,6 +2295,41 @@ def _set_wall_end(doc, w, k, P) -> None:
                 if o.get("wall") == w["id"]:
                     o["pos"] = round(float(o["pos"]) + d, 4)
     w[k] = P
+
+
+def meet_corner_legs(doc, lid, reach=0.6) -> int:
+    """The legs of each corner window (walls sharing a «cwin») met again
+    at the corner they turn — their centre lines' crossing — after the
+    junction tidying moved their ends. The number of ends set."""
+    legs = {}
+    for w in doc["arch"]["walls"]:
+        if w["level"] == lid and w.get("cwin") and "a" in w and \
+                w.get("kind", "line") == "line":
+            legs.setdefault(w["cwin"], []).append(w)
+    n = 0
+    for ws in legs.values():
+        for i in range(len(ws)):
+            for j in range(i + 1, len(ws)):
+                A, B = ws[i], ws[j]
+                a0, a1, b0, b1 = A["a"], A["b"], B["a"], B["b"]
+                ux, uy = a1[0] - a0[0], a1[1] - a0[1]
+                vx, vy = b1[0] - b0[0], b1[1] - b0[1]
+                den = ux * vy - uy * vx
+                La, Lb = math.hypot(ux, uy), math.hypot(vx, vy)
+                if La < 1e-6 or Lb < 1e-6 or abs(den) < 0.3 * La * Lb:
+                    continue
+                t = ((b0[0] - a0[0]) * vy - (b0[1] - a0[1]) * vx) / den
+                X = (a0[0] + ux * t, a0[1] + uy * t)
+                ka = min(("a", "b"), key=lambda k: math.dist(A[k], X))
+                kb = min(("a", "b"), key=lambda k: math.dist(B[k], X))
+                if math.dist(A[ka], X) > reach or \
+                        math.dist(B[kb], X) > reach:
+                    continue
+                for w_, k_ in ((A, ka), (B, kb)):
+                    if math.dist(w_[k_], X) > 1e-3:
+                        _set_wall_end(doc, w_, k_, X)
+                        n += 1
+    return n
 
 
 def tidy_wall_junctions(doc, lid, slit=0.12) -> dict:
@@ -5694,6 +5805,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.join_angled_walls 2")
+    try:                       # a corner window's legs met at its corner
+        meet_corner_legs(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.meet_corner_legs")
     try:                       # the doors / windows as the CAD draws them
         rep["openings_cad"] = openings_follow_cad(doc, lid, pl, P)
     except Exception:  # noqa: BLE001
@@ -5722,6 +5838,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.balcony_doors_bath_windows 2")
+    try:                       # glass out onto a verandah, a wide glazing
+        rep["sliding_doors"] = open_air_sliding_doors(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.open_air_sliding_doors")
     try:                       # a duct's box is not a column
         rep["false_columns"] = drop_false_columns(doc, lid)
     except Exception:  # noqa: BLE001
@@ -10504,6 +10625,32 @@ def platform_parts(doc) -> dict:
                     top = elev + floor_offset_at(doc, lid, (c.x, c.y)) - dz_
                     if top - zg > 0.01:
                         out["pieces"].append((qg, top))
+    # the entrance steps' landing (the porch their top step bounds) where
+    # no slab reaches it: the platform carried out to it, at the floor's
+    # finished level (the porch floor the main door opens onto)
+    try:
+        if zone is not None and not zone.is_empty:
+            done_ = unary_union([pg_ for pg_, _t in out["pieces"]] +
+                                [G, WP]) if out["pieces"] else \
+                unary_union([G, WP])
+            # (the top step's L / U and the walls close the porch round:
+            # its hull, less the slab, walls and rooms)
+            zb_ = zone.buffer(0.3)
+            land_ = unary_union([zone.intersection(zg_).convex_hull
+                                 for zg_ in getattr(zb_, "geoms", [zb_])
+                                 ]).difference(
+                unary_union([done_, R]).buffer(0.005))
+            for qg in getattr(land_, "geoms", [land_]):
+                if qg.geom_type != "Polygon" or qg.area < 0.05:
+                    continue
+                qg = qg.buffer(0.004, join_style=2)
+                c = qg.representative_point()
+                top = elev + floor_offset_at(doc, lid, (c.x, c.y)) + fin
+                if top - zg > 0.01:
+                    out["pieces"].append((qg, top))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.platform_parts landing")
     # the entrance steps as the CAD draws them, from the rooms' floor
     # (the landing) down to the ground
     csets = cad_steps(doc, lid)

@@ -480,6 +480,19 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Rows of small arched openings in the selected walls** (section 5): a clerestory / attic band, in groups, with CNC grilles.
 - The roof level's parapet follows the building's main body when its outline pinches.
 
+## 3.23.1
+- **CNC grilles (jali) in tall openings** are made in panels about 1.2 m high, each with its own frame. A 35-ft jali window used to be one face with hundreds of holes, which made IngeTrazo redraw slowly every time the model changed.
+- **Example:** `examples/court_masjid` builds a mosque from a multi-floor DWG (five plans laid out side by side, aligned by their offsets). It then shapes the building as its elevations draw it: the façade in one wall from ground to the attic, tall pointed jali windows placed where the elevations put them, an arcade on each row of paired round columns (portico and riwaqs), attic bands with groups of small arches, chhatris from the roof plan's circles, a dome on its stepped block, and minarets on the stair towers.
+
+## 3.23.2
+- **A dome's base block and its tiers** turn with the building (`rot`), no longer square to the world axes.
+- **Court Masjid example**, checked against the CAD's own elevations laid over the model:
+  - the long sides' end-bay windows are placed from the riwaq's ends;
+  - the riwaqs' open ends are closed on the outer face, as the elevations draw them;
+  - the roof plan's glazing on the attic goes;
+  - the dome stands over the middle of the riwaqs;
+  - a masjid built before is replaced when the build runs again.
+
 ## 3.23.3
 - **The ⟳ button only checks for a newer version.** It reads the version listed in the IngeTrazo extension catalogue and tells you when it is newer than yours; you install it from IngeTrazo's Extension Manager, which checks the download against the catalogue's SHA-256. The extension no longer downloads its own code or writes over its folder. (Earlier versions' update copies, `cad2ingetrazo_backup_…`, are still renamed `_cad2ingetrazo_backup_…`, so IngeTrazo never loads them as a second extension.)
 
@@ -565,3 +578,44 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Ceiling lights and AC diffusers**: round slim LED panels (linear for long symbols) flush in the ceiling, and square 4-way diffusers with stepped louvres.
 - **Lift lobby**: each lift's landing door is a stainless frame with two centre-opening leaves (not one block). The ACP cladding strips each side of a door are joined across above its head.
 - **Columns: structural or architectural** (Selected element ▸ Column type). Architectural columns take the wall finish, carry no load (IFC), and get no footing.
+
+## 3.31.0
+- **False ceiling has its own section** in the panel (**8A  False ceiling**, below Roof): pick the type, then apply it to the rooms selected in the model, the level picked, or every level; Remove takes them off. The toolbar **False ceiling…** menu offers the same types.
+- **Ceiling types as built on site**, each with its own form: Gypsum (plain board); POP (a tray: border band, raised centre, cornice and a hidden cove LED glow); Wooden planks; PVC panels; Metal 600×600 tiles; Glass (back-lit panels in a gypsum frame); Fabric / cloth (draped folds inside a gypsum border); Mineral fibre 600×600 with flush light panels; Combination (gypsum border, wooden centre). The earlier types stay (2×2 / 2×4 grid, cove, coffered, baffles, slats, open-cell, stretch, ACP, metal linear strips).
+- **Architectural columns are their own object**, not a renamed RCC column: plinth, moulded base, shaft and capital, in four styles (Selected element ▸ Architectural style): round smooth, round fluted, fluted with Corinthian capital, square smooth (plinth and cap). Finished in white plaster, no load (IFC), no footing. **Structural columns** stay plain RCC prisms (rectangular or circular) in concrete grey, labelled "RCC column".
+
+## 3.32.0
+- **Structural columns as cast RCC**: every column is structural unless set otherwise, built as bare reinforced concrete — plain rectangular section with chamfered arrises (or round), shuttering joints every 1.2 m and a kicker at the foot, concrete grey, no base or capital. Architectural columns keep their classical form (plinth, base, shaft, capital): round smooth, round fluted, Corinthian, square smooth, or the IngeTrazo library column (Selected element ▸ Column type / Architectural style). Round columns are no longer given the decorative library column by default.
+- **No column in a duct**: crossed boxes of ducts / shafts are not read as columns, and a box drawn out in the open (off the floor and its walls) is left out.
+- **False ceiling from the right-click menu**: right-click in the model ▸ «False ceiling type» — the rooms / ceilings selected (or the level picked) take the type chosen; the current type is ticked; «No false ceiling» too.
+- **Railings continuous**: a balcony railing that stopped short of the wall, a column or the next railing is carried on along the slab edge to meet it (the balcony corners and pointed ends included); pieces of one curved railing a few cm apart are joined.
+- **Bath fixtures and beds as in the CAD**: blocks drawn turned inside their definition (a plan at 45°) are measured on their true sides, so WCs, vanities and beds get their real size and turn. A WC has its cistern to the wall behind it, a vanity its long side to the wall, always square with the block as drawn (also in bathrooms the plan leaves unnamed). Beds head between their bedside tables, the tables square with the bed.
+- **Walkthrough** (Extensions ▸ CAD2IngeTrazo ▸ Walkthrough): pick a room (or the biggest room of a level): the eye goes inside at eye height looking along the room, the floors above are hidden, and First Person takes over (W/A/S/D or arrows to walk, mouse to look). Next / Previous room; «End walkthrough» puts the floors and the camera back.
+
+## 3.33.0
+- **Balconies get a false ceiling** (under the floor above) with a **periphery beam** along their open sides — the railing side and every edge no wall closes: 9" wide, from the soffit of the slab above down to the false-ceiling level, the ceiling inside it. Balconies open to the sky (the top floor without a roof) get neither. Settings: `balcony_ceiling` (on), `balcony_ceiling_type` (the level's type unless set); a balcony set to «No false ceiling» keeps none.
+- **Toolbar: Walkthrough** in place of the False ceiling button (the false ceiling stays in panel section 8A and the right-click menu). A click walks into the biggest room of the level picked; its arrow lists the rooms, the other levels, «Wide angle», next / previous room.
+- **Walkthrough is its own mode until Esc**: W/A/S/D or the arrows walk and turn (Shift faster), a mouse drag looks round, the wheel sets the angle of view (35°–120°, keys 1–4 = 60/75/90/110°, «Wide angle» = 100°), PgUp/PgDn go to the floor above / below at the same place. Walls are no obstacle (walk through them room to room); the eye stays fixed at eye level; zoom, orbit and the view buttons cannot take the camera out — only Esc ends it, putting the floors and the camera back.
+
+## 3.34.0
+- **Walkthrough**: walls stop you, but doors, openings, French windows and lift doors let you through into the next room («Walk through walls» in its menu lets you go anywhere). The view stays the normal one (the camera's own angle) until «Wide angle» is ticked.
+- **Doors: architrave width** (Selected element ▸ Door architrave width; 0 = none).
+- **Windows: curtain** per window (As the project setting / Curtain on this window / No curtain on this window).
+- **Columns, as on the reference plates**: architectural columns in the five orders — **Doric** (fluted, no base, cushion capital), **Ionic** (scroll volutes), **Corinthian** (acanthus leaves, corner helices), **Composite** (big volutes over the leaves), **Tuscan** (plain shaft, simple capital) — besides round smooth / fluted, square smooth and the library column. **Structural** columns are bare RCC (rectangular / round, one clean pour, no lines); «Structural columns: show the reinforcement» (section 6) shows their main bars and links / helix through see-through concrete.
+- **Clean wall junctions**: L corners that stopped short of each other (a notch the CAD does not draw, e.g. the lift lobby) are closed to the outer faces; small stubs past a wall's far face are cut back.
+- **No slab / floor-finish lines on the elevations**: the floor finish stops at the walls and 20 mm short of the slab edge; structural columns no longer show joint or kicker lines.
+
+## 3.34.1
+- **No band at the floor line on the elevations**: a floor slab standing a little proud of the outside walls above it (the CAD outline drawn a couple of cm out) is trimmed back flush with the walls' outer face, so the walls running down over its edge cover it; balconies and canopies stay.
+
+## 3.35.0
+- **Walkthrough keeps every edit tool**: the left mouse button selects and edits as ever (the panel, Move, every tool work while you walk); drag with the right (or middle) button to look round; a right click still opens the menu. Doorways stay open their full width — every door, opening, French window and lift door lets you through; walls stop you («Walk through walls» in its menu to go anywhere). Esc ends it.
+- **Slab to the inner face of the outside walls**: the floor slab stops at the inside face of the outside walls (and of the piers in them); the outside walls run on floor to floor over its edge — no slab or floor-finish line on the elevations. Balconies and canopies keep the slab running out past their wall. Setting `slab_inner_face` (on).
+- **No CNC jali by mistake**: «None» picked for a window's jali (e.g. while taking its curtain off) now means no jali; models saved that way are cleaned when opened.
+- **Square / rectangular architectural columns** (piers, pilasters) keep their own section in every order — base, fluted shaft (Tuscan plain), capital (Ionic volutes, Corinthian / Composite leaves).
+
+## 3.36.0
+- **Walls merged face to face**: pieces of one wall run (in line, end to end or across a junction) drawn a few cm off each other are put on one line — the same thickness on one centre line, a thinner one going on from a thicker with their shared face flush. A wall the line-pairing made out of the cavity between two walls drawn face to face (a lift shaft beside a stair) is taken out, so the two walls stand side by side as drawn.
+- **Curtain on a window**: «Curtain on this window» now always hangs one — also on windows where the rooms do not tell the inside (both sides rooms, or none read: the side under the slab and not on a balcony is taken).
+- **Door and window dialogs apart**: a door's edit dialog shows the door's fields (hinge, opens to, door types, leaves, panel, handle, architrave…), a window's the window's (sill, window types, glass, curtain, jali…). A field whose value is not in its list keeps its own value (nothing changes by just opening and closing a dialog).
+- **Balcony upstand everywhere**: every balcony railing stands on the project's upstand (the terrace upstand height, run down over the slab's edge), including railings read from the CAD lines and those carried on to the walls.

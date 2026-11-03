@@ -426,11 +426,11 @@ def u_stack(flights, n, mx=MAX_FLIGHT, room=None):
         pts += [(p[0] + d[0] * depth, p[1] + d[1] * depth) for p in pts]
         lands.append({"corners": [list(p) for p in _box_along(pts, d)],
                       "after": count})
-    # the arrival: a landing at the floor above, past the last riser
+    # the arrival: the last step at the floor above, past the last riser
     f = out[-1]
     la, lb = f["lines"][-1]
     d = f["d"]
-    depth = float(f.get("w", 1.0))
+    depth = float(f.get("g", 0.28) or 0.28)
     g = float(f.get("g", 0.28))
     a2 = (la[0] + d[0] * g, la[1] + d[1] * g)
     b2 = (lb[0] + d[0] * g, lb[1] + d[1] * g)
@@ -570,6 +570,11 @@ def auto(doc, cad=None, flip=False) -> dict:
             m = _mid(flights[0]["lines"][0])
             room = next((r["poly"] for r in rooms
                          if r["poly"].buffer(0.3).contains(Point(m))), None)
+            if room is None and flights:      # its foot outside: the hall
+                m2 = _mid(flights[-1]["lines"][-1])   # it climbs into
+                room = next((r["poly"] for r in rooms
+                             if r["poly"].buffer(0.3).contains(Point(m2))),
+                            None)
             # the plan's own risers when they climb the storey at a
             # riser of 8" at most: no return flight invented beside them
             have = sum(len(f["lines"]) for f in flights)
@@ -587,7 +592,17 @@ def auto(doc, cad=None, flip=False) -> dict:
             if u_ is not None:
                 fl, lands = u_
             else:
-                fl, lands = complete(flights, n_use, room)
+                try:                 # the walls round it (no hall room)
+                    from . import slabedges as _SE
+                    from shapely.ops import unary_union as _uu
+                    blk_ = _uu(_SE.wall_polys([
+                        w_ for w_ in arch["walls"] if w_["level"] == lv["id"]
+                        and not w_.get("rail")]))
+                except Exception:  # noqa: BLE001
+                    blk_ = None
+                fl, lands = complete(flights, n_use, room,
+                                     n_min=int(math.ceil(H / 0.2032 - 1e-6)),
+                                     blocked=blk_)
                 if stt0.get("stair_shape", "u") == "u" and \
                         (room is not None and len(fl) == 2 or
                          room is None and len(flights) == 2):
@@ -612,8 +627,9 @@ def auto(doc, cad=None, flip=False) -> dict:
                 except Exception:  # noqa: BLE001
                     from .host import log_error
                     log_error("stairs.winders")
-            fl, lands, _nl = split_flights(
-                fl, lands, int(stt0.get("stair_max_flight", MAX_FLIGHT)))
+            if not any(f.get("_ext") for f in fl):
+                fl, lands, _nl = split_flights(
+                    fl, lands, int(stt0.get("stair_max_flight", MAX_FLIGHT)))
             n = sum(len(f["lines"]) for f in fl)
             st = {"traced": True, "flights": [
                 dict({"lines": [[list(a), list(b)] for a, b in f["lines"]],
@@ -1845,7 +1861,7 @@ def _chain(fl, words):
     return order
 
 
-def complete(flights, n_needed, room=None):
+def complete(flights, n_needed, room=None, n_min=None, blocked=None):
     """The flights drawn, and — when they hold fewer risers than the
     storey needs (a plan shows the lower flight only) — a half landing and
     a return flight beside the last one, on the side the stair room
@@ -1869,6 +1885,43 @@ def complete(flights, n_needed, room=None):
         # corner square of an L, the full width of a U's half landing
         landings.append({"corners": _box_along(pts, d), "after": count})
     have = sum(len(f["lines"]) for f in flights)
+    # the last flight carried straight on where the stair room leaves it
+    # room (a plan cut before the top: the run continues, its last step
+    # at the floor above — no landing made up to turn on)
+    if n_needed > have and flights and (room is not None or
+                                        blocked is not None):
+        try:
+            f = flights[-1]
+            d, w, g = f["d"], float(f["w"]), float(f["g"])
+            a, b = f["lines"][-1]
+            from shapely.geometry import box as _bx
+            others = [_bx(*_fbox(f_)).buffer(-0.02) for f_ in flights[:-1]
+                      if len(f_["lines"]) > 1]
+            rb_ = room.buffer(0.03) if room is not None else None
+
+            def fits(j):            # j more risers and the top step past
+                run = g * (j + 1)
+                ext = Polygon([a, b, (b[0] + d[0] * run, b[1] + d[1] * run),
+                               (a[0] + d[0] * run, a[1] + d[1] * run)]
+                              ).buffer(0)
+                if rb_ is not None and not rb_.contains(ext):
+                    return False
+                if blocked is not None and blocked.intersection(
+                        ext).area > 0.002:
+                    return False
+                return not any(
+                    o_.intersects(ext.buffer(-0.02)) for o_ in others)
+            k = n_needed - have
+            m = next((j for j in range(k, 0, -1) if fits(j)), 0)
+            if m and have + m >= (n_min or n_needed):
+                f["lines"] = list(f["lines"]) + [
+                    ((a[0] + d[0] * g * j, a[1] + d[1] * g * j),
+                     (b[0] + d[0] * g * j, b[1] + d[1] * g * j))
+                    for j in range(1, m + 1)]
+                f["_ext"] = True      # as drawn, carried on: not re-split
+                have = n_needed
+        except Exception:  # noqa: BLE001
+            pass
     if n_needed > have and len(flights) >= 2 and abs(
             flights[-2]["d"][0] * flights[-1]["d"][0] +
             flights[-2]["d"][1] * flights[-1]["d"][1]) < 0.3:
@@ -1928,11 +1981,11 @@ def complete(flights, n_needed, room=None):
             lines.append(((b2[0] + back[0] * s, b2[1] + back[1] * s),
                           (a2[0] + back[0] * s, a2[1] + back[1] * s)))
         flights.append({"lines": lines, "d": back, "w": w, "g": g})
-    # the arrival: a landing at the floor above, the width of the last
-    # flight, square past its last riser (the stair never ends on a hole)
+    # the arrival: the stair's last step at the floor above — one tread
+    # past its last riser (no landing: the floor above is there)
     if flights:
         f = flights[-1]
-        d, w = f["d"], float(f["w"])
+        d, w = f["d"], float(f.get("g", 0.28) or 0.28)
         la, lb = f["lines"][-1]
         pts = [la, lb, (la[0] + d[0] * w, la[1] + d[1] * w),
                (lb[0] + d[0] * w, lb[1] + d[1] * w)]
@@ -2251,6 +2304,8 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
     land_ext = {}                     # landing «after» → finish run-ons
     from .engine import walls as W
     flights, landings = as_flights(st)
+    landings = [_last_step(lg, flights) if lg.get("arrival") else lg
+                for lg in landings]
     rise = st["rise"]
     out = []
     count = 0
@@ -2445,6 +2500,37 @@ def build(st, z0, kind="monolithic", waist=0.15, nosing=0.025,
             except Exception:  # noqa: BLE001
                 pass
     return out
+
+
+def _last_step(lg, flights):
+    """The arrival at the floor above as the stair's last step only: one
+    going past the last riser (a stair made before 3.52 kept a landing
+    there, as deep as the flight is wide)."""
+    try:
+        from shapely.geometry import Polygon as _Pg
+        f = next(f_ for f_ in reversed(flights) if f_.get("lines"))
+        d = f["d"]
+        g = float(f.get("g", 0.28) or 0.28)
+        la, lb = f["lines"][-1]
+        s0 = la[0] * d[0] + la[1] * d[1]
+        pg = _Pg([tuple(p[:2]) for p in lg["corners"]]).buffer(0)
+        u = (-d[1], d[0])
+        big = 50.0
+        c = (la[0] + d[0] * 0.0, la[1] + d[1] * 0.0)
+        strip = _Pg([(c[0] - u[0] * big, c[1] - u[1] * big),
+                     (c[0] + u[0] * big, c[1] + u[1] * big),
+                     (c[0] + u[0] * big + d[0] * g, c[1] + u[1] * big +
+                      d[1] * g),
+                     (c[0] - u[0] * big + d[0] * g, c[1] - u[1] * big +
+                      d[1] * g)])
+        _ = s0
+        q = pg.intersection(strip)
+        if q.is_empty or q.geom_type != "Polygon" or q.area < 0.01:
+            return lg
+        return dict(lg, corners=[list(p) for p in
+                                 list(q.exterior.coords)[:-1]])
+    except Exception:  # noqa: BLE001
+        return lg
 
 
 def _ext(path, ext, at_end):
