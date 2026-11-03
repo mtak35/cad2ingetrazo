@@ -488,14 +488,13 @@ class PortionDialog(QDialog):
         self._changed()
 
     def _layers_box(self, drawing, detected):
-        """Every layer of the CAD: on / off (shown here, and read at the
-        import) and what it is read as."""
+        """Every layer of the CAD on / off: shown here, and read at the
+        import (off: left out)."""
         box = QWidget()
         lv = QVBoxLayout(box)
         lv.setContentsMargins(0, 0, 0, 0)
-        t = QLabel("<b>Layers</b> — tick to show / read; set what each "
-                   "layer is (walls, doors, windows…). «Auto» keeps the "
-                   "detection.")
+        t = QLabel("<b>Layers</b> — untick a layer to leave it out (not "
+                   "shown, not read at the import).")
         t.setWordWrap(True)
         lv.addWidget(t)
         counts = {}
@@ -507,84 +506,45 @@ class PortionDialog(QDialog):
                 if n is not None:
                     counts[n] = counts.get(n, 0) + 1
         names = sorted(counts)
-        self.tbl = QTableWidget(len(names), 3)
-        self.tbl.setHorizontalHeaderLabels(["On", "Layer", "Read as"])
+        self.tbl = QTableWidget(len(names), 2)
+        self.tbl.setHorizontalHeaderLabels(["On", "Layer"])
         self.tbl.verticalHeader().setVisible(False)
         hh = self.tbl.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
         self._rows = []
-        keys = [k for k, _l in LAYER_ROLES]
+        from PySide6.QtWidgets import QTableWidgetItem
         for i, n in enumerate(names):
-            role = self.layer_roles.get(n, "auto")
             cb = QCheckBox()
-            cb.setChecked(role != "off")
+            cb.setChecked(self.layer_roles.get(n) != "off")
             self.tbl.setCellWidget(i, 0, cb)
-            from PySide6.QtWidgets import QTableWidgetItem
             it = QTableWidgetItem(f"{n}  ({counts[n]})")
-            det = detected.get(n)
-            if det:
-                it.setToolTip(f"Detected: {det}")
+            if detected.get(n):
+                it.setToolTip(f"Read as: {detected[n]}")
             self.tbl.setItem(i, 1, it)
-            co = QComboBox()
-            for k, lab in LAYER_ROLES:
-                co.addItem(lab + (f"  [{det}]" if k == "auto" and det
-                                  else ""), k)
-            co.setCurrentIndex(keys.index(role) if role in keys else 0)
-            self.tbl.setCellWidget(i, 2, co)
-            cb.toggled.connect(lambda on, c=co: self._on_toggle(c, on))
-            co.currentIndexChanged.connect(lambda _i, c=cb, o=co:
-                                           self._on_role(c, o))
-            self._rows.append((n, cb, co))
+            cb.toggled.connect(lambda _on: self._apply_off())
+            self._rows.append((n, cb))
         lv.addWidget(self.tbl, 1)
         row = QHBoxLayout()
-        for lab, fn in (("All on", lambda: self._all(True)),
-                        ("All off", lambda: self._all(False)),
-                        ("Walls only", self._walls_only)):
+        for lab, on in (("All on", True), ("All off", False)):
             b = QPushButton(lab)
-            b.clicked.connect(fn)
+            b.clicked.connect(lambda _c=False, o=on: self._all(o))
             row.addWidget(b)
         lv.addLayout(row)
         self._apply_off()
         return box
 
-    def _on_toggle(self, co, on):
-        if not on:
-            co.blockSignals(True)
-            co.setCurrentIndex(co.findData("off"))
-            co.blockSignals(False)
-        elif co.currentData() == "off":
-            co.blockSignals(True)
-            co.setCurrentIndex(0)
-            co.blockSignals(False)
-        self._apply_off()
-
-    def _on_role(self, cb, co):
-        cb.blockSignals(True)
-        cb.setChecked(co.currentData() != "off")
-        cb.blockSignals(False)
-        self._apply_off()
-
     def _all(self, on):
-        for _n, cb, _co in self._rows:
+        for _n, cb in self._rows:
+            cb.blockSignals(True)
             cb.setChecked(on)
-
-    def _walls_only(self):
-        """Only the layers read as walls shown — to check them."""
-        for _n, cb, co in self._rows:
-            vis = co.currentData() == "walls" or "WALL" in \
-                co.currentText().upper() and co.currentData() == "auto"
-            self.canvas.off.discard(_n)
-            if not vis:
-                self.canvas.off.add(_n)
-        self.canvas.set_off(self.canvas.off)
+            cb.blockSignals(False)
+        self._apply_off()
 
     def _apply_off(self):
-        off = [n for n, cb, _co in self._rows if not cb.isChecked()]
+        off = [n for n, cb in self._rows if not cb.isChecked()]
         self.canvas.set_off(off)
-        self.layer_roles = {n: co.currentData() for n, _cb, co in self._rows
-                            if co.currentData() != "auto"}
+        self.layer_roles = {n: "off" for n in off}
 
     @property
     def region(self):

@@ -2568,6 +2568,71 @@ def openings_follow_cad(doc, lid, pl, P) -> dict:
     return rep
 
 
+def snap_walls_to_cad(doc, lid, wall_segs) -> int:
+    """Every straight wall put exactly between the two wall lines the CAD
+    draws for it: its thickness the lines' distance apart, its centre line
+    half way between them (measured at a quarter, the middle and three
+    quarters of its length; the side lines nearest it, under 0.45 m off).
+    The number of walls moved or resized."""
+    arch = doc["arch"]
+    segs = []
+    for s_ in wall_segs or ():
+        L_ = math.dist((s_[0], s_[1]), (s_[2], s_[3]))
+        if L_ > 0.1:
+            segs.append(((s_[0], s_[1]), (s_[2], s_[3]), L_))
+    if not segs:
+        return 0
+    n_ = 0
+    for w in arch["walls"]:
+        if w["level"] != lid or "a" not in w or w.get("rail") or \
+                w.get("kind", "line") != "line" or \
+                w.get("type") == "curtain" or w.get("jog"):
+            continue
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 0.3:
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        nv = (-u[1], u[0])
+        pos, neg = [], []
+        for f in (0.25, 0.5, 0.75):
+            m = (a[0] + u[0] * L * f, a[1] + u[1] * L * f)
+            ps, ns = [], []
+            for p0, p1, Ls in segs:
+                v = ((p1[0] - p0[0]) / Ls, (p1[1] - p0[1]) / Ls)
+                if abs(v[0] * u[1] - v[1] * u[0]) > 0.035:
+                    continue           # not parallel
+                t0 = (p0[0] - m[0]) * u[0] + (p0[1] - m[1]) * u[1]
+                t1 = (p1[0] - m[0]) * u[0] + (p1[1] - m[1]) * u[1]
+                if min(t0, t1) > 0.01 or max(t0, t1) < -0.01:
+                    continue           # not beside this point
+                off = (p0[0] - m[0]) * nv[0] + (p0[1] - m[1]) * nv[1]
+                if 0.02 < off < 0.45:
+                    ps.append(off)
+                elif -0.45 < off < -0.02:
+                    ns.append(off)
+            if ps and ns:
+                pos.append(min(ps))
+                neg.append(max(ns))
+        if not pos:
+            continue
+        pos.sort()
+        neg.sort()
+        po, ne = pos[len(pos) // 2], neg[len(neg) // 2]
+        t = po - ne
+        if not 0.05 <= t <= 0.8:
+            continue
+        sh = (po + ne) / 2
+        if abs(t - float(w["t"])) < 0.003 and abs(sh) < 0.003:
+            continue
+        w["a"] = [round(a[0] + nv[0] * sh, 4), round(a[1] + nv[1] * sh, 4)]
+        w["b"] = [round(b[0] + nv[0] * sh, 4), round(b[1] + nv[1] * sh, 4)]
+        w["t"] = round(t, 4)
+        w["align"] = "centre"
+        n_ += 1
+    return n_
+
+
 def square_t_nodes(doc, lid) -> int:
     """Three walls ending on one point, two of them in line (a run carried
     on through, perhaps two thicknesses): the third — the stem of the T —
@@ -5583,6 +5648,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.align_wall_runs")
+    try:                       # each wall exactly between its CAD lines
+        rep["walls_snapped"] = snap_walls_to_cad(doc, lid, wall_segs)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.snap_walls_to_cad")
     try:                       # L corners closed solid
         rep["wall_corners"] = close_wall_corners(doc, lid)
     except Exception:  # noqa: BLE001
@@ -5608,6 +5678,22 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.square_t_nodes")
+    try:                       # slits closed, odd pieces made in line
+        rep["wall_tidy"] = tidy_wall_junctions(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.tidy_wall_junctions")
+    try:                       # and again, after the joins
+        rep["walls_snapped"] = rep.get("walls_snapped", 0) + \
+            snap_walls_to_cad(doc, lid, wall_segs)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.snap_walls_to_cad 2")
+    try:                       # the ends the snap moved off met again
+        join_angled_walls(doc, lid, reach=0.15)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.join_angled_walls 2")
     try:                       # the doors / windows as the CAD draws them
         rep["openings_cad"] = openings_follow_cad(doc, lid, pl, P)
     except Exception:  # noqa: BLE001
@@ -5626,11 +5712,6 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.wall_outline")
-    try:                       # slits closed, odd pieces made in line
-        rep["wall_tidy"] = tidy_wall_junctions(doc, lid)
-    except Exception:  # noqa: BLE001
-        from .host import log_error
-        log_error("project.tidy_wall_junctions")
     try:                       # once more, the rooms closed now
         b2_ = balcony_doors_bath_windows(doc, lid)
         if b2_:
