@@ -2578,7 +2578,11 @@ def _merge_level(doc, lid, li, mine, plans, openings, out, z0, under):
         groups.setdefault(key, []).append((w, poly, ops))
     if not groups:
         return
-    cad = WM.region_of((doc.get("_wall_outline") or {}).get(lid))
+    # the walls are set on the CAD's lines at the import (their thickness
+    # and centre): their own plan is the CAD's; the CAD's closed cells are
+    # used only when asked for (they slant where an opening's sides miss)
+    cad = WM.region_of((doc.get("_wall_outline") or {}).get(lid)) \
+        if doc.get("_merge_cad_cells") else None
     merged_ids = set()
     k = 0
     for (b, top), items in groups.items():

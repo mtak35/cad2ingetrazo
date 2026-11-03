@@ -443,7 +443,7 @@ class PortionDialog(QDialog):
         self.layer_roles = dict(roles or {})
         self.setWindowTitle(f"CAD2IngeTrazo — select «{level_name}» on the "
                             "drawing")
-        self.resize(1400, 820)
+        self.resize(1360, 820)
         self.whole = False
         v = QVBoxLayout(self)
         self.tip = QLabel()
@@ -455,7 +455,7 @@ class PortionDialog(QDialog):
         split.addWidget(self._layers_box(drawing, detected or {}))
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
-        split.setSizes([920, 460])
+        split.setSizes([1140, 260])
         v.addWidget(split, 1)
         row = QHBoxLayout()
         self.b_box = QPushButton("1  Draw the box again")
@@ -491,6 +491,7 @@ class PortionDialog(QDialog):
         """Every layer of the CAD on / off: shown here, and read at the
         import (off: left out)."""
         box = QWidget()
+        box.setMaximumWidth(300)
         lv = QVBoxLayout(box)
         lv.setContentsMargins(0, 0, 0, 0)
         t = QLabel("<b>Layers</b> — untick a layer to leave it out (not "
