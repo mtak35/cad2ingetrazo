@@ -10,8 +10,20 @@ import math
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTransform
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
+                               QHeaderView, QLabel, QPushButton, QSplitter,
+                               QTableWidget, QVBoxLayout, QWidget)
+
+#: what a CAD layer is read as (Select floor on drawing ▸ Layers)
+LAYER_ROLES = [("auto", "Auto (as detected)"), ("walls", "Walls"),
+               ("doors", "Doors"), ("windows", "Windows"),
+               ("columns", "Columns"), ("beams", "Beams"),
+               ("stairs", "Stairs"), ("steps", "Steps (entrance / level)"),
+               ("rails", "Railings"), ("slab", "Slab edge"),
+               ("holes", "Shafts / voids"), ("lift", "Lift"),
+               ("text", "Room names / text"), ("plot", "Plot boundary"),
+               ("grid", "Grid"), ("lines", "Other lines (no element)"),
+               ("off", "Off — not read")]
 
 SNAP_PX = 12
 COLORS = ["#d9822b", "#2e9e5b", "#9b59b6", "#c0392b", "#16a085", "#7f8c8d"]
@@ -36,19 +48,33 @@ class Canvas(QWidget):
         # and line type (by entity, layer or block)
         self.styles = drawing.get("styles") or []
         sty = drawing.get("seg_style") or []
-        hidden = set(drawing.get("hidden_layers") or ())
-        self.sets = {}
-        if len(sty) == len(self.lines) and self.styles:
-            for ln, k, sg in zip(self.lines, sty, drawing["segs"]):
-                if sg[4] in hidden:
-                    continue
-                self.sets.setdefault(k if 0 <= k < len(self.styles) else -1,
-                                     []).append(ln)
+        self._sty = sty
+        self.off = set()                         # layers switched off
+        self._build_sets()
         self.view = None                        # QTransform drawing → px
         self._drag = None                       # box start (drawing)
         self._pan = None
         self._mouse = None
         self._snap = None
+
+    def _build_sets(self):
+        """The lines to draw, by style — the layers switched off (in the
+        CAD, or here) left out."""
+        hidden = set(self.d.get("hidden_layers") or ()) | set(self.off)
+        self.sets = {}
+        self.shown = [ln for ln, sg in zip(self.lines, self.d["segs"])
+                      if sg[4] not in hidden]
+        if len(self._sty) == len(self.lines) and self.styles:
+            for ln, k, sg in zip(self.lines, self._sty, self.d["segs"]):
+                if sg[4] in hidden:
+                    continue
+                self.sets.setdefault(k if 0 <= k < len(self.styles) else -1,
+                                     []).append(ln)
+
+    def set_off(self, names):
+        self.off = set(names)
+        self._build_sets()
+        self.update()
 
     # ---- the view ----------------------------------------------------------
     def fit(self, rect=None):
@@ -246,12 +272,12 @@ class Canvas(QWidget):
                     pen.setDashPattern(dp)
                 p.setPen(pen)
                 p.drawLines(lines)
-        elif self.lines:
+        elif self.shown:
             pen = QPen(QColor("#c9d1d9"))
             pen.setCosmetic(True)
             pen.setWidthF(1.0)
             p.setPen(pen)
-            p.drawLines(self.lines)
+            p.drawLines(self.shown)
         p.resetTransform()
         p.setRenderHint(QPainter.Antialiasing, True)
         f = QFont()
@@ -412,18 +438,25 @@ class PortionDialog(QDialog):
     ``.base`` (x, y), drawing units; or ``.whole`` True for all of it."""
 
     def __init__(self, parent, drawing, level_name, taken=(), region=None,
-                 base=None):
+                 base=None, roles=None, detected=None):
         super().__init__(parent)
+        self.layer_roles = dict(roles or {})
         self.setWindowTitle(f"CAD2IngeTrazo — select «{level_name}» on the "
                             "drawing")
-        self.resize(1100, 760)
+        self.resize(1400, 820)
         self.whole = False
         v = QVBoxLayout(self)
         self.tip = QLabel()
         self.tip.setWordWrap(True)
         v.addWidget(self.tip)
         self.canvas = Canvas(drawing, list(taken), region, base, self._changed)
-        v.addWidget(self.canvas, 1)
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(self.canvas)
+        split.addWidget(self._layers_box(drawing, detected or {}))
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 1)
+        split.setSizes([920, 460])
+        v.addWidget(split, 1)
         row = QHBoxLayout()
         self.b_box = QPushButton("1  Draw the box again")
         self.b_box.clicked.connect(self._again)
@@ -453,6 +486,105 @@ class PortionDialog(QDialog):
         row.addWidget(cancel)
         v.addLayout(row)
         self._changed()
+
+    def _layers_box(self, drawing, detected):
+        """Every layer of the CAD: on / off (shown here, and read at the
+        import) and what it is read as."""
+        box = QWidget()
+        lv = QVBoxLayout(box)
+        lv.setContentsMargins(0, 0, 0, 0)
+        t = QLabel("<b>Layers</b> — tick to show / read; set what each "
+                   "layer is (walls, doors, windows…). «Auto» keeps the "
+                   "detection.")
+        t.setWordWrap(True)
+        lv.addWidget(t)
+        counts = {}
+        for s_ in drawing["segs"]:
+            counts[s_[4]] = counts.get(s_[4], 0) + 1
+        for key in ("texts", "inserts", "arcs", "circles", "loops", "fills"):
+            for e in drawing.get(key) or ():
+                n = e.get("layer") if isinstance(e, dict) else None
+                if n is not None:
+                    counts[n] = counts.get(n, 0) + 1
+        names = sorted(counts)
+        self.tbl = QTableWidget(len(names), 3)
+        self.tbl.setHorizontalHeaderLabels(["On", "Layer", "Read as"])
+        self.tbl.verticalHeader().setVisible(False)
+        hh = self.tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._rows = []
+        keys = [k for k, _l in LAYER_ROLES]
+        for i, n in enumerate(names):
+            role = self.layer_roles.get(n, "auto")
+            cb = QCheckBox()
+            cb.setChecked(role != "off")
+            self.tbl.setCellWidget(i, 0, cb)
+            from PySide6.QtWidgets import QTableWidgetItem
+            it = QTableWidgetItem(f"{n}  ({counts[n]})")
+            det = detected.get(n)
+            if det:
+                it.setToolTip(f"Detected: {det}")
+            self.tbl.setItem(i, 1, it)
+            co = QComboBox()
+            for k, lab in LAYER_ROLES:
+                co.addItem(lab + (f"  [{det}]" if k == "auto" and det
+                                  else ""), k)
+            co.setCurrentIndex(keys.index(role) if role in keys else 0)
+            self.tbl.setCellWidget(i, 2, co)
+            cb.toggled.connect(lambda on, c=co: self._on_toggle(c, on))
+            co.currentIndexChanged.connect(lambda _i, c=cb, o=co:
+                                           self._on_role(c, o))
+            self._rows.append((n, cb, co))
+        lv.addWidget(self.tbl, 1)
+        row = QHBoxLayout()
+        for lab, fn in (("All on", lambda: self._all(True)),
+                        ("All off", lambda: self._all(False)),
+                        ("Walls only", self._walls_only)):
+            b = QPushButton(lab)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lv.addLayout(row)
+        self._apply_off()
+        return box
+
+    def _on_toggle(self, co, on):
+        if not on:
+            co.blockSignals(True)
+            co.setCurrentIndex(co.findData("off"))
+            co.blockSignals(False)
+        elif co.currentData() == "off":
+            co.blockSignals(True)
+            co.setCurrentIndex(0)
+            co.blockSignals(False)
+        self._apply_off()
+
+    def _on_role(self, cb, co):
+        cb.blockSignals(True)
+        cb.setChecked(co.currentData() != "off")
+        cb.blockSignals(False)
+        self._apply_off()
+
+    def _all(self, on):
+        for _n, cb, _co in self._rows:
+            cb.setChecked(on)
+
+    def _walls_only(self):
+        """Only the layers read as walls shown — to check them."""
+        for _n, cb, co in self._rows:
+            vis = co.currentData() == "walls" or "WALL" in \
+                co.currentText().upper() and co.currentData() == "auto"
+            self.canvas.off.discard(_n)
+            if not vis:
+                self.canvas.off.add(_n)
+        self.canvas.set_off(self.canvas.off)
+
+    def _apply_off(self):
+        off = [n for n, cb, _co in self._rows if not cb.isChecked()]
+        self.canvas.set_off(off)
+        self.layer_roles = {n: co.currentData() for n, _cb, co in self._rows
+                            if co.currentData() != "auto"}
 
     @property
     def region(self):

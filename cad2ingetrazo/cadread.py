@@ -776,6 +776,26 @@ def crop(drawing: dict, region) -> dict:
 _crops: dict = {}
 
 
+def without_layers(drawing: dict, off) -> dict:
+    """The drawing with the layers ``off`` left out (Select floor on
+    drawing ▸ Layers: «Off — not read»)."""
+    off = set(off or ())
+    if not off:
+        return drawing
+    keep = [i for i, s in enumerate(drawing["segs"]) if s[4] not in off]
+    sty = drawing.get("seg_style") or []
+    out = dict(drawing, segs=[drawing["segs"][i] for i in keep],
+               seg_style=[sty[i] for i in keep] if len(sty) == len(
+                   drawing["segs"]) else [])
+    for key in ("loops", "circles", "arcs", "fills", "texts", "inserts",
+                "dashed"):
+        if isinstance(drawing.get(key), list):
+            out[key] = [e for e in drawing[key] if not (
+                isinstance(e, dict) and e.get("layer") in off)]
+    out["layers"] = [n for n in drawing.get("layers") or [] if n not in off]
+    return out
+
+
 def to_model(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
              pts=()) -> list:
     """Drawing points → model metres, the way ``place`` moves them."""

@@ -4606,6 +4606,25 @@ def layer_patterns(drawing, how, st):
         typed = _patterns(how.get(k, st.get(k, "")))
         P[k] = [n.upper() for n in found.get(k) or []] and \
             [_escape(n) for n in found[k]] or typed
+    # the layers set by hand (Select floor on drawing ▸ Layers): a role
+    # set for any layer is exactly those layers; a layer set to a role or
+    # off is taken out of every other role
+    roles = {str(n): r for n, r in (how.get("layer_roles") or {}).items()
+             if r and r != "auto"}
+    if roles:
+        byrole = {}
+        for n, r in roles.items():
+            byrole.setdefault(r, []).append(n)
+        for k in ROLE_KEYS:
+            if k in byrole:
+                P[k] = [_escape(n) for n in byrole[k]]
+            else:
+                P[k] = [pt for pt in P[k] if not any(
+                    _match(n, [pt]) and _escape(n) == pt for n in roles)]
+        found = {k: v for k, v in found.items()}
+        for r, ns in byrole.items():
+            if r in ROLE_KEYS:
+                found[r] = ns
     return P, {k: v for k, v in found.items() if v}
 
 
@@ -4711,6 +4730,8 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     arch = doc["arch"]
     raw = cadread.read(path, how.get("unit"))
     drawing = cadread.crop(raw, how.get("region"))
+    drawing = cadread.without_layers(drawing, [
+        n for n, r in (how.get("layer_roles") or {}).items() if r == "off"])
     base = cadread.base_point(drawing, how.get("base", "origin"),
                               (how.get("bx", 0.0), how.get("by", 0.0)))
     far = cadread.far_from_base(drawing, base)

@@ -1523,7 +1523,9 @@ class Panel(QWidget):
                "rot": self.i_rot.value(), "tmin": self.i_tmin.value(),
                "tmax": self.i_tmax.value(),
                "region": list(self._region) if self._region else None,
-               "auto": self.i_auto.isChecked()}
+               "auto": self.i_auto.isChecked(),
+               "layer_roles": dict(getattr(self, "_layer_roles", None)
+                                   or {})}
         for k, e in self.i_layers.items():
             how[k] = e.text()
         self._save_prefs(how)
@@ -1537,6 +1539,7 @@ class Panel(QWidget):
             self._show_portion()
             return
         self._region = how.get("region")
+        self._layer_roles = dict(how.get("layer_roles") or {})
         self.i_file.setText(how.get("file", ""))
         keys = [k for k, _l, _v in cadread.UNITS]
         if how.get("unit_key") in keys:
@@ -1621,10 +1624,23 @@ class Panel(QWidget):
         base = (self.i_bx.value(), self.i_by.value()) if self._region and \
             cadread.BASE_MODES[self.i_base.currentIndex()][0] == "custom" \
             else None
+        detected = {}
+        try:                     # what each layer is detected as
+            P_, _f = PJ.layer_patterns(d, dict(how, layer_roles={}),
+                                       PJ.DEFAULTS)
+            for n in d.get("layers") or []:
+                rs = [k for k in PJ.ROLE_KEYS if PJ._match(n, P_[k])]
+                if rs:
+                    detected[n] = rs[0]
+        except Exception:  # noqa: BLE001
+            detected = {}
         dlg = PortionDialog(self, d, self._target_name(),
-                            self._taken(self.doc(), path), self._region, base)
+                            self._taken(self.doc(), path), self._region, base,
+                            roles=getattr(self, "_layer_roles", None) or {},
+                            detected=detected)
         if not dlg.exec():
             return
+        self._layer_roles = dict(dlg.layer_roles)
         if dlg.whole:
             self._region = None
         else:
@@ -5000,9 +5016,34 @@ class Panel(QWidget):
                 s_ = (hx - a[0]) * u[0] + (hy - a[1]) * u[1]
                 if -0.2 <= s_ <= L + 0.2 and (best is None or t < best[0]):
                     best = (t, wid)
-            # its top, seen from above
-            if dz < -1e-6:
-                pass
+        if best is None:              # its top (a plan view, from above):
+            from shapely.geometry import LineString   # the first wall band
+            hz = math.hypot(dx, dy)
+            if hz < 1e-6:
+                from shapely.geometry import Point as _Pt
+                ray = _Pt(ox, oy).buffer(0.01)
+            else:
+                ray = LineString([(ox, oy), (ox + dx * 500, oy + dy * 500)])
+            for wid in ids:            # the ray crosses, seen in plan
+                w = PJ.find_record(doc, "wall", wid)
+                if w is None or "a" not in w:
+                    continue
+                try:
+                    band = LineString([w["a"], w["b"]]).buffer(
+                        float(w["t"]) / 2 + 0.02, cap_style=2)
+                    x = ray.intersection(band)
+                except Exception:  # noqa: BLE001
+                    continue
+                if x.is_empty:
+                    continue
+                d_ = min(math.dist((ox, oy), c) for g in
+                         getattr(x, "geoms", [x]) for c in (
+                             g.exterior.coords if hasattr(g, "exterior")
+                             else g.coords))
+                if hz < 1e-6:          # straight down: the band under it
+                    d_ = 0.0
+                if best is None or d_ < best[0]:
+                    best = (d_, wid)
         return best[1] if best else None
 
     def _ray(self, pos=None):
@@ -5714,6 +5755,14 @@ class Panel(QWidget):
                            "Curtains on / off, colour and length — every "
                            "level"))
         v.addLayout(row)
+        self.r_merge = QCheckBox("Walls as one solid, on the CAD's wall "
+                                 "lines (no joints)")
+        self.r_merge.setToolTip("Off: each wall its own solid, as before "
+                                "(a click still picks the wall either way)")
+        self.r_merge.setChecked(bool(self.doc()["settings"].get(
+            "merge_walls", True)))
+        self.r_merge.toggled.connect(self._merge_toggle)
+        v.addWidget(self.r_merge)
         row = QHBoxLayout()
         row.addWidget(QLabel("Wall plaster (each face)"))
         self.r_plaster = _spin(0.0, 0.05, 0.0127, 0.0016, 4)
@@ -5964,6 +6013,14 @@ class Panel(QWidget):
         self.commit(doc, "Wall plaster " + (len_txt(
             doc["settings"]["plaster_t"]) if doc["settings"]["plaster_t"]
             else "off"))
+
+    def _merge_toggle(self, on):
+        doc = self.doc()
+        if bool(doc["settings"].get("merge_walls", True)) == bool(on):
+            return
+        doc["settings"]["merge_walls"] = bool(on)
+        self.commit(doc, "Walls as one solid" if on else
+                    "Walls each their own solid")
 
     def _curtains(self):
         doc = self.doc()
