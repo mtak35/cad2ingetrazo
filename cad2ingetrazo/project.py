@@ -7297,7 +7297,12 @@ def apply_parapet_rail(doc, kind, level=None) -> int:
     The number changed."""
     n = 0
     for w in doc["arch"]["walls"]:
-        if not is_parapet(w) or (level and w["level"] != level):
+        if level and w["level"] != level:
+            continue
+        # every parapet, and every railing however it was made (the RAIL
+        # layer's, round an opening, a terrace's, one set by hand)
+        if not is_parapet(w) and not (w.get("rail") and str(
+                w.get("rail")) != "solid"):
             continue
         if kind in (None, "", "solid"):
             if w.pop("rail", None):

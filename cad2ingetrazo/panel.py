@@ -6846,10 +6846,52 @@ class Panel(QWidget):
             if new.get("curtain") == "curtain_auto":
                 new.pop("curtain", None)
                 rec.pop("curtain", None)
+        changed = {k_: v_ for k_, v_ in new.items()
+                   if rec.get(k_) != v_ and k_ not in (
+                       "a", "b", "id", "name", "pos", "level", "w", "points",
+                       "kind" if sel[0] == "wall" else "_")}
         rec.update(new)
         for k_ in ("mat_floor", "mat_wall", "mat_ceil"):
             if rec.get(k_) == "none":
                 rec.pop(k_, None)
+        n_more = 0
+        if sel[0] in ("wall", "opening") and changed:
+            # the other walls / openings selected with it (Ctrl+click, a
+            # box): what was changed here changed on them too — a railing
+            # type, a thickness, a glass, a door style… in one go
+            for k2, i2 in self._selected_all():
+                if k2 != sel[0] or i2 == sel[1]:
+                    continue
+                r2 = PJ.find_record(doc, k2, i2)
+                if r2 is None:
+                    continue
+                if k2 == "wall":
+                    try:
+                        PJ.freeze_auto_rail(doc, i2)
+                    except Exception:  # noqa: BLE001
+                        log_error("panel freeze_auto_rail (bulk)")
+                    if "rail" in changed and changed["rail"] in (
+                            None, "", "solid"):
+                        r2.pop("rail", None)
+                        n_more += 1
+                        continue
+                    if r2.get("rail") is None and "rail" not in changed \
+                            and rec.get("rail"):
+                        continue          # a wall among railings: kept
+                upd = dict(changed)
+                if k2 == "opening" and "kind" in upd and \
+                        upd["kind"] != r2.get("kind"):
+                    upd = dict(PJ.opening_as(dict(r2, **upd), upd["kind"],
+                                             doc["settings"]),
+                               w=r2["w"], pos=r2["pos"])
+                why2 = PJ.check_record(doc, k2, dict(r2, **upd))
+                if why2:
+                    continue
+                r2.update(upd)
+                n_more += 1
+        if "rail" in changed and sel[0] == "wall" and rec.get("rail") in (
+                None, "", "solid"):
+            rec.pop("rail", None)
         if sel[0] == "room":      # the other rooms selected: same materials
             for k2, i2 in self._selected_all():
                 if k2 != "room" or i2 == sel[1]:
@@ -6866,7 +6908,10 @@ class Panel(QWidget):
             PJ.to_curtain(doc, [rec["id"]])
         if sel[0] == "ramp":
             PJ._ramp_cut(doc, rec["level"])
-        if self.commit(doc, f"{rec.get('name', sel[0])} changed"):
+        msg_ = f"{rec.get('name', sel[0])} changed"
+        if n_more:
+            msg_ += f" (and {n_more} more selected)"
+        if self.commit(doc, msg_):
             self._reselect(sel)
 
     def _flip(self):

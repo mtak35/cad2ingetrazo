@@ -447,6 +447,13 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                 and math.dist(w_["a"], w_["b"]) > 0.05])
         except Exception:  # noqa: BLE001
             wall_u = None
+        taps_ = []                       # small circles: tap holes, drains
+        try:
+            pl0_ = cad_plan(doc, lid) or {}
+            taps_ = [tuple(c_["c"][:2]) for c_ in pl0_.get("circles") or ()
+                     if 0.005 <= float(c_.get("r", 0)) <= 0.035]
+        except Exception:  # noqa: BLE001
+            taps_ = []
         fix_rooms = set()                # rooms holding a sanitary block
         for ins in blocks:
             if re.search(r"FIX|SANIT|PLUMB|TOILET|\bWC\b|\bWB\b|BASIN",
@@ -561,6 +568,39 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                         fit = [ly, lx]
                     else:
                         fit = [lx, ly]
+            if kind == "basin" and taps_:
+                # the basin's back where its tap holes are (the small
+                # circles at the wall side of the bowl), not the block's
+                # long side (a near-square block turns either way)
+                try:
+                    hx = [q for q in taps_ if min(xs) <= q[0] <= max(xs)
+                          and min(ys) <= q[1] <= max(ys)]
+                    if hx:
+                        mx_ = sum(q[0] for q in hx) / len(hx) - cx
+                        my_ = sum(q[1] for q in hx) / len(hx) - cy
+                        if math.hypot(mx_, my_) > 0.05:
+                            want = math.degrees(math.atan2(my_, mx_))
+                            # square with the block: the quarter nearest
+                            k_ = round(((want - 90.0 - rot) % 360.0)
+                                       / 90.0) % 4
+                            turn = (rot + 90.0 * k_) % 360.0
+                            fit = [ly, lx] if k_ % 2 == 1 else [lx, ly]
+                except Exception:  # noqa: BLE001
+                    pass
+            if kind in ("wc", "basin") and fit and d:
+                # the block drawn with its spray / its tap / the wall's
+                # trap beyond the fixture (a deeper box than the WC): the
+                # model at its own depth, its front where the block's
+                # front is (the pan's nose, the basin's edge) — its back
+                # then at the wall, not pushed into it
+                dm_ = float(d[1])
+                if fit[1] > dm_ * 1.05:
+                    a_t = math.radians(turn)
+                    bk = (-math.sin(a_t), math.cos(a_t))   # its back (+Y)
+                    sh_ = (dm_ - fit[1]) / 2.0
+                    cx += bk[0] * sh_
+                    cy += bk[1] * sh_
+                    fit = [fit[0], dm_]
             rec = {"id": __import__("uuid").uuid4().hex[:8], "level": lid,
                    "key": e["key"], "name": e["name"], "x": round(cx, 4),
                    "y": round(cy, 4), "rot": round(turn % 360.0, 3),
