@@ -1240,8 +1240,16 @@ def to_walls(r, walls, reach=1.2, corner=3.5) -> int:
     # when a neighbour's same end was pushed that far too
     far = [[math.dist(out[i][k], secs[i][k]) > reach + 0.05 for k in (0, 1)]
            for i in range(n)]
+    wb_ = walls.buffer(0.05)
+    on_ = [[wb_.contains(Point(out[i][k])) for k in (0, 1)] for i in range(n)]
     for i in range(n):
         for k in (0, 1):
+            # (the one section of a bend reaching its outer corner, its
+            # neighbours on the two walls that meet there: the corner —
+            # left short, the ramp is cut across it)
+            if far[i][k] and 0 < i < n - 1 and on_[i][k] and \
+                    on_[i - 1][k] and on_[i + 1][k]:
+                continue
             if far[i][k] and not any(far[j][k] for j in (i - 1, i + 1)
                                      if 0 <= j < n):
                 out[i][k] = [round(secs[i][k][0], 4), round(secs[i][k][1], 4)]

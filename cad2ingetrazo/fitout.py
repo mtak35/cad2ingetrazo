@@ -39,6 +39,8 @@ CUT_UP = re.compile(r"\bDUCTS?\b|\bSHAFTS?\b|\bO\s?\.?\s?T\s?\.?\s?S\b|"
 GLASS_LAYER = re.compile(r"GLASS|GLAZ|SHOWER|SCREEN|PARTITION.?GL", re.I)
 CLAD_LAYER = re.compile(r"CLAD|\bACP\b|ALUCO|ALU.?COMP|ALUMIN|FACADE.?PAN|"
                         r"A\.C\.P", re.I)
+LOBBY_WORDS = re.compile(r"LOBBY|PASSAGE|CORRIDOR|FOYER|WAITING|RECEPTION|"
+                         r"\bHALL\b|ENTRANCE", re.I)
 LIFT_ROOM = re.compile(r"\bLIFT|ELEVAT|\bELEV\b|\bELV\b", re.I)
 LIGHT_LAYER = re.compile(r"LIGHT|LIGHTING|LAMP|LUMIN", re.I)
 ELEC_LAYER = re.compile(r"^ELE\b|^ELE[\s_\-]|\bELE\b|ELEC|ELECT|E[\-_]L", re.I)
@@ -669,7 +671,14 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
     walls = [w for w in arch["walls"] if w["level"] == lid
              and w.get("kind", "line") == "line" and "a" in w
              and not w.get("rail")]
-    lift_rooms = [r for _m, r in cars if r is not None]
+    # (a car standing in a big hall the walls left open — the shafts not
+    # closed as rooms — is not «in» that hall: its shaft is no room)
+    lift_rooms = [r for _m, r in cars if r is not None and r["area"] <= 12.0]
+    lobby_t = [(float(t_["x"]), float(t_["y"])) for t_ in pl.get("texts") or ()
+               if LOBBY_WORDS.search(str(t_.get("text", "")))]
+    lobby_t += [(r_["poly"].representative_point().x,
+                 r_["poly"].representative_point().y) for r_ in rooms
+                if LOBBY_WORDS.search(str(r_.get("name") or ""))]
     floor = _floor_poly(doc, lid)
     wall_u = _wall_union(doc, lid)
     n = 0
@@ -708,8 +717,15 @@ def _lift(doc, lid, pl, rooms, entries) -> int:
             if pr is not None and (any(pr is q for q in lift_rooms) or
                                    LIFT_ROOM.search(str(pr["name"]))):
                 continue
-            # the lobby: the most open side
+            # the lobby: the side a LOBBY / PASSAGE text is out in front
+            # of (the plan names it), else the most open side
             score = wall_u.distance(probe) if wall_u is not None else 0.0
+            for tp_ in lobby_t:
+                dx_, dy_ = tp_[0] - mid[0], tp_[1] - mid[1]
+                ahead = dx_ * nd[0] + dy_ * nd[1]
+                side_ = abs(-dx_ * nd[1] + dy_ * nd[0])
+                if 0.3 < ahead < 10.0 and side_ < 6.0:
+                    score += 100.0 / (1.0 + ahead + side_)
             if best is None or score > best[0]:
                 best = (score, nd, hit, math.dist(a, b), mid)
         if best is None:              # no lobby found: the long side

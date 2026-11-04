@@ -2056,7 +2056,17 @@ def drop_unsupported_walls(doc, lid, pl, P) -> int:
                             (b[0] + n[0] * off, b[1] + n[1] * off)])
             sup.append(f.intersection(WL).length / L)
         if max(sup[0], sup[1]) < 0.25 and sup[2] < 0.3:
-            drop.add(w["id"])
+            # (a wall made thicker than drawn — a basement's retaining
+            # wall — has the plan's lines inside it, not on its faces)
+            k_ = int(h / 0.04)
+            inner_ = 0.0
+            for j_ in range(-k_, k_ + 1):
+                off = j_ * 0.04
+                f = LineString([(a[0] + n[0] * off, a[1] + n[1] * off),
+                                (b[0] + n[0] * off, b[1] + n[1] * off)])
+                inner_ = max(inner_, f.intersection(WL).length / L)
+            if inner_ < 0.3:
+                drop.add(w["id"])
     if drop:
         arch["walls"] = [w for w in arch["walls"] if w.get("id") not in drop]
     return len(drop)
@@ -4672,6 +4682,19 @@ def _parking_slab(walls, segs, blocks, ratio=0.4):
     from shapely import concave_hull
     from shapely.geometry import MultiPoint, Polygon
     from shapely.ops import unary_union
+    try:          # the parking / ramp lines on (or by) the building only —
+        from shapely.geometry import Point as _Pt   # an arrow, a car or a
+        near_ = unary_union([Polygon(b).buffer(0) for b in blocks  # bay
+                             if len(b) >= 3]).buffer(2.0)    # drawn off it
+        if near_.is_empty:                          # not stretching the
+            near_ = None                            # slab out to it
+    except Exception:  # noqa: BLE001
+        near_ = None
+    if near_ is not None:
+        segs = [s_ for s_ in segs if near_.contains(_Pt(s_[0], s_[1]))
+                and near_.contains(_Pt(s_[2], s_[3]))]
+        walls = [w for w in walls if "a" in w and near_.contains(
+            _Pt(*w["a"][:2])) and near_.contains(_Pt(*w["b"][:2]))]
     pts = [tuple(w["a"]) for w in walls if "a" in w] + \
         [tuple(w["b"]) for w in walls if "b" in w]
     pts += [(s_[0], s_[1]) for s_ in segs] + [(s_[2], s_[3]) for s_ in segs]
@@ -5377,8 +5400,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                     g_ = max((q for q in getattr(g_, "geoms", [g_])
                               if q.geom_type == "Polygon"),
                              key=lambda q: q.area, default=None)
+                    a0_ = Polygon(o_).buffer(0).area
+                    # (a plan whose outer walls are on a layer not read as
+                    # walls closes no outline: its limit is islands round
+                    # the rooms — a floor cut down to them is not what it
+                    # draws; the outline stays)
                     if g_ is not None and g_.area > 0.5 and \
-                            g_.area < Polygon(o_).buffer(0).area - 0.05:
+                            g_.area < a0_ - 0.05 and g_.area > 0.7 * a0_:
                         o_ = [[round(x, 4), round(y, 4)] for x, y in
                               list(g_.simplify(0.005).exterior.coords)[:-1]]
                         rep["slab_limited"] = rep.get("slab_limited", 0) + 1
@@ -5988,7 +6016,16 @@ def _parking_import(doc, lid, pl, P) -> dict:
         pcs = [pc for ps in W.plan([w for w in mine_w
                                     if W.why_not(w) is None]).values()
                for pc in ps]
-        wall_u = _uu([_Pg(pc["outer"], pc["holes"]).buffer(0) for pc in pcs])
+        cols_ = []                # (and the columns along them: a ramp
+        for c_ in doc["arch"]["structure"]:   # runs to a column standing
+            if c_["type"] != "column" or c_["level"] != lid:  # in a wall
+                continue                      # line, not round it)
+            try:
+                cols_.append(_Pg(S.column_outline(c_)).buffer(0))
+            except Exception:  # noqa: BLE001
+                continue
+        wall_u = _uu([_Pg(pc["outer"], pc["holes"]).buffer(0) for pc in pcs]
+                     + cols_)
         for r in made:
             PK.to_walls(r, wall_u)
     except Exception:  # noqa: BLE001
@@ -6176,7 +6213,7 @@ def plan_limit(doc, lid, pl, P):
     lay = pl["layers"]
     pats = []
     for k in ("walls", "doors", "windows", "columns", "lines", "steps",
-              "rails", "slab", "stairs"):
+              "rails", "slab", "stairs", "parking", "ramps"):
         pats += list(P.get(k) or [])
     segs = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
             if pats and _match(lay[s_[4]], pats)
@@ -9077,6 +9114,13 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
                 c_ = q.representative_point()
                 vs = [min(here, key=lambda n_: c_.distance(
                     Point(n_[0], n_[1])))[2]]
+            if len({round(v, 3) for v in vs}) > 1 and len(vs) > 1 and \
+                    q.area > 150.0:
+                # a whole open floor (a parking deck, its drive way) noted
+                # at several levels with no line parting them: one level —
+                # the one noted most — not cut into wedges between notes
+                pieces.append((q, mode(vs)))
+                continue
             if len({round(v, 3) for v in vs}) > 1 and len(vs) > 1:
                 try:                     # each part to its nearest note
                     hq = [(x, y, v) for x, y, v in here
