@@ -147,6 +147,15 @@ def _slab_plaster(s, parts, p):
     if core.is_empty:
         return parts, []
     band = sp.difference(core)
+    try:                 # the band only where the slab is (not round the
+        from shapely.ops import unary_union  # parts cut out of it)
+        U_ = unary_union([Polygon(pc["outer"], pc.get("holes") or []).buffer(0)
+                          for pc in parts])
+        band = band.intersection(U_)
+    except Exception:  # noqa: BLE001
+        pass
+    if not parts:
+        return [], []
     new = []
     for pc in parts:
         try:
@@ -298,19 +307,20 @@ def floor_parts(doc: dict, lid) -> list:
 
 def _minus(s, cuts) -> list:
     """The slab ``s`` without the outlines ``cuts``: plan pieces
-    ({"outer", "holes"}), or [] when shapely cannot."""
+    ({"outer", "holes"}); [] when nothing is left of it, None when
+    shapely cannot."""
     try:
         from shapely.geometry import Polygon
         from shapely.ops import unary_union
     except ImportError:
-        return []
+        return None
     try:
         g = Polygon(s["corners"], [h for h in s.get("holes") or []
                                    if len(h) >= 3]).buffer(0)
         g = g.difference(unary_union([Polygon(c["corners"]).buffer(0)
                                       for c in cuts]))
     except Exception:  # noqa: BLE001
-        return []
+        return None
     out = []
     for p in getattr(g, "geoms", [g]):
         if p.geom_type != "Polygon" or p.area < 0.01:
@@ -2450,6 +2460,17 @@ def build(doc: dict, elevations) -> list[dict]:
                     [u for u in slabs_ if (u.get("user") or (
                         u.get("zone") and not u.get("grade")))
                      and bool(u.get("roof")) == bool(s.get("roof"))]
+                if s.get("zone") and not s.get("user"):
+                    # one level zone inside another (a lobby in the drive
+                    # way's outline): the smaller one keeps its level, the
+                    # bigger one is cut round it — never one floor over
+                    # another
+                    a_s = abs(_area(s.get("corners") or []))
+                    cut = [u for u in slabs_ if u is not s and u.get("zone")
+                           and not u.get("grade") and not u.get("user")
+                           and bool(u.get("roof")) == bool(s.get("roof"))
+                           and (abs(_area(u.get("corners") or [])), str(u.get("id")))
+                           < (a_s, str(s.get("id")))]
             parts_ = [{"outer": _ccw([tuple(p) for p in s["corners"]]),
                        # openings wound the other way round
                        "holes": [list(reversed(_ccw([tuple(p) for p in h])))
@@ -2464,7 +2485,9 @@ def build(doc: dict, elevations) -> list[dict]:
                 if cc_:
                     cut = list(cut) + cc_
             if cut:
-                parts_ = _minus(s, cut) or parts_
+                left_ = _minus(s, cut)
+                if left_ is not None:
+                    parts_ = left_       # all of it covered: nothing left
             band_ = []
             if PLASTER(doc) > 0:
                 try:                     # plaster on all its edges

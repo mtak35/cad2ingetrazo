@@ -674,6 +674,9 @@ class Panel(QWidget):
             f"What's new: {UP.PAGE}")
 
     def doc(self):
+        memo = getattr(self, "_doc_memo", None)
+        if memo is not None:             # while a right-click menu is made:
+            return memo                  # the document read once
         return PJ.get(self.vp.scene)
 
     def level(self):
@@ -7024,6 +7027,20 @@ class Panel(QWidget):
         return out
 
     def context_menu(self, menu) -> None:
+        """The right-click menu of a CAD2IngeTrazo element — made with the
+        document read once (IngeTrazo leaves an extension out of the menu
+        for the session when it takes over a second)."""
+        self._doc_memo = None
+        try:
+            self._doc_memo = PJ.get(self.vp.scene)
+        except Exception:  # noqa: BLE001
+            self._doc_memo = None
+        try:
+            self._context_menu(menu)
+        finally:
+            self._doc_memo = None
+
+    def _context_menu(self, menu) -> None:
         """The right-click menu of a CAD2IngeTrazo element: its fields in a
         dialog, its quick changes, delete."""
         try:            # a rectangle drawn on a slab: open / close a shaft

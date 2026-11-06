@@ -330,6 +330,18 @@ def load(raw) -> dict:
         doc[k_] = [d for d in MN_.load(raw.get(k_), k_) if d["level"] in ids]
     from . import coord as CO_                 # MEP / structure drawings
     CO_.load(doc, raw, ids)
+    # a floor over a basement stands on its slab, not on the ground: its
+    # level zones are concrete (made before 3.55.1 as «on the ground»,
+    # their finish drawn under the slab)
+    try:
+        lv0_ = doc["arch"]["levels"][0]["id"] if doc["arch"]["levels"] \
+            else None
+        for s_ in doc["arch"]["structure"]:
+            if s_.get("type") == "slab" and s_.get("zone") and \
+                    s_.get("grade") and s_.get("level") != lv0_:
+                s_.pop("grade", None)
+    except Exception:  # noqa: BLE001
+        pass
     return doc
 
 
@@ -9138,11 +9150,29 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
                 except Exception:  # noqa: BLE001
                     pass
             pieces.append((q, mode(vs)))
+    # the pieces apart: a room inside a bigger space (a lobby in the drive
+    # way's outline) keeps its level, the bigger space the rest — never one
+    # floor over another
+    try:
+        pieces.sort(key=lambda pv: pv[0].area)
+        taken_ = Polygon()
+        flat_ = []
+        for pg_, v_ in pieces:
+            rest_ = pg_.difference(taken_) if not taken_.is_empty else pg_
+            if rest_.is_empty or rest_.area < 0.5:
+                continue
+            flat_.append((rest_, v_))
+            taken_ = unary_union([taken_, pg_])
+        pieces = flat_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.slab_zones apart")
     new = []
     try:
         on_platform = platform_on(doc) and next(
             (lv_ for lv_ in arch["levels"] if lv_["id"] == lid),
-            {}).get("kind") == "ground"
+            {}).get("kind") == "ground" and \
+            arch["levels"][0]["id"] == lid     # (not over a basement)
     except Exception:  # noqa: BLE001
         on_platform = False
     for part, lv in pieces:
