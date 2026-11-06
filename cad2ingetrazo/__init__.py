@@ -11,7 +11,7 @@ ArchXQ IT Lite (c) Orlando Souza / XQ, GPL-3.0-or-later.
 """
 from __future__ import annotations
 
-__version__ = "3.54.0"
+__version__ = "3.55.0"
 TITLE = "CAD2IngeTrazo"
 
 _panel = None
@@ -102,6 +102,11 @@ def setup(app) -> None:
             labels.draw(viewport, painter)       # plan texts to scale
         except Exception:  # noqa: BLE001
             log_error("labels.draw")
+        try:                                     # MEP / structure drawings
+            from . import coord
+            coord.draw(viewport, painter)
+        except Exception:  # noqa: BLE001
+            log_error("coord.draw")
         try:                                     # a selected wall's handles
             pe = getattr(_panel, "_planedit", None)
             if pe is not None:

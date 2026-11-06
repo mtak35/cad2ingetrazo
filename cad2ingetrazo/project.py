@@ -328,6 +328,8 @@ def load(raw) -> dict:
     from . import minarets as MN_              # minarets, chhatris
     for k_ in ("minarets", "chhatris"):
         doc[k_] = [d for d in MN_.load(raw.get(k_), k_) if d["level"] in ids]
+    from . import coord as CO_                 # MEP / structure drawings
+    CO_.load(doc, raw, ids)
     return doc
 
 
@@ -12165,6 +12167,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.fitout groups")
+    try:                 # the MEP / structural drawings' runs, the clashes
+        from . import coord as CO_
+        new_groups += CO_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.coord groups")
     try:
         new_groups += _edge_groups(doc)
     except Exception:  # noqa: BLE001

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSlider,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPushButton, QScrollArea, QSpinBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QWidget, QListWidget, QListWidgetItem)
 
 from . import cadread, ghost, project as PJ
 from . import site as SITE_
@@ -605,6 +605,7 @@ class Panel(QWidget):
         self._selected_part()
         self._components_part()
         self._sheets_part()
+        self._coord_part()
         self.lay.addStretch(1)
         # narrow docks: nothing insists on its full text width
         for c in self.findChildren(QComboBox):
@@ -1345,6 +1346,10 @@ class Panel(QWidget):
 
     def _level_changed(self, _i):
         if not self._building:
+            try:
+                self._co_fill()
+            except Exception:  # noqa: BLE001
+                log_error("panel._co_fill")
             self._fill_overlap(self.doc())
             self._fill_rooms(self.doc())
             self._fill_import(self.doc())
@@ -9087,6 +9092,437 @@ class Panel(QWidget):
         if n:
             self.commit(doc, f"{n} component name(s) saved")
 
+    # ---- 14. coordination: MEP & structural drawings -----------------------------
+    def _coord_part(self):
+        from . import coord as CO
+        box, body = _fold("14  Coordination — MEP and structural drawings",
+                          "coord")
+        f = _form(body)
+        f.addRow(QLabel("<i>Each consultant's drawing (its own DWG / DXF) "
+                        "laid over this floor: in its colour, at the height "
+                        "its discipline runs at — in the plan view and in "
+                        "3D.</i>"))
+        self.co_list = QListWidget()
+        self.co_list.setMaximumHeight(120)
+        self.co_list.currentRowChanged.connect(lambda _r: self._co_show())
+        self.co_list.itemChanged.connect(self._co_checked)
+        f.addRow(self.co_list)
+        row = QHBoxLayout()
+        self.co_disc = QComboBox()
+        for k_ in CO.ORDER:
+            self.co_disc.addItem(CO.DISC[k_][0], k_)
+        row.addWidget(self.co_disc, 1)
+        row.addWidget(_btn("Add drawing…", self._co_add,
+                           "A DWG / DXF of this discipline for this floor",
+                           primary=True))
+        row.addWidget(_btn("Remove", self._co_remove))
+        f.addRow(row)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Select part on drawing…", self._co_pick,
+                           "Box this floor on the consultant's sheet, and "
+                           "pick the same grid point as on the "
+                           "architectural floor"))
+        row.addWidget(_btn("Auto-align", self._co_align,
+                           "Line the drawing up with the architectural "
+                           "floor: the turn and the move its lines agree on"))
+        f.addRow(row)
+        self.co_dx = _spin(-500, 500, 0.0, 0.05)
+        self.co_dy = _spin(-500, 500, 0.0, 0.05)
+        self.co_rot = _spin(-180, 180, 0.0, 0.1, 2, "°")
+        row = QHBoxLayout()
+        for lab_, w_ in (("Move X", self.co_dx), ("Y", self.co_dy),
+                         ("Turn", self.co_rot)):
+            row.addWidget(QLabel(lab_))
+            row.addWidget(w_, 1)
+        f.addRow(row)
+        self.co_auto_z = QCheckBox("Height: by discipline (under the slab "
+                                   "over the floor)")
+        self.co_auto_z.setChecked(True)
+        self.co_z = _spin(-5, 30, 2.7, 0.05)
+        row = QHBoxLayout()
+        row.addWidget(self.co_auto_z, 1)
+        row.addWidget(QLabel("or top at"))
+        row.addWidget(self.co_z)
+        f.addRow(row)
+        f.addRow(_btn("Apply placement / height", self._co_apply))
+        self.co_lines = QCheckBox("Show the drawings' lines (plan and 3D)")
+        self.co_lines.setChecked(True)
+        self.co_lines.toggled.connect(self._co_lines_toggled)
+        f.addRow(self.co_lines)
+        f.addRow(QLabel("<i>3D, clashes and structure:</i>"))
+        row = QHBoxLayout()
+        row.addWidget(_btn("Build 3D runs", self._co_runs,
+                           "Ducts / trays from pairs of lines (size from "
+                           "the WxH written by them), pipes from single "
+                           "lines (Ø written by them)"))
+        row.addWidget(_btn("All drawings", lambda: self._co_runs(True),
+                           "3D runs from every drawing of every floor"))
+        f.addRow(row)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Check clashes (this floor)", self._co_check,
+                           primary=True))
+        row.addWidget(_btn("All floors", lambda: self._co_check(True)))
+        f.addRow(row)
+        self.co_clash = QListWidget()
+        self.co_clash.setMaximumHeight(150)
+        self.co_clash.itemDoubleClicked.connect(self._co_goto)
+        f.addRow(self.co_clash)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Export clash report (CSV)…", self._co_csv))
+        row.addWidget(_btn("Clear clashes", self._co_clear))
+        f.addRow(row)
+        f.addRow(_btn("Structural drawing → this floor's columns and beams",
+                      self._co_struct,
+                      "The columns and beams read from the selected "
+                      "structural drawing, in place of the architect's"))
+        self.co_info = QLabel("")
+        self.co_info.setWordWrap(True)
+        f.addRow(self.co_info)
+        self.lay.addWidget(box)
+        self._co_fill()
+
+    def _co_sel(self):
+        it = self.co_list.currentItem() if hasattr(self, "co_list") else None
+        if it is None:
+            return None
+        from . import coord as CO
+        return CO.find(self.doc(), it.data(Qt.UserRole))
+
+    def _co_fill(self):
+        if not hasattr(self, "co_list"):
+            return
+        from . import coord as CO
+        doc = self.doc()
+        try:
+            lid = self.level()[0]
+        except Exception:  # noqa: BLE001
+            return
+        cur = self.co_list.currentItem()
+        cur_id = cur.data(Qt.UserRole) if cur is not None else None
+        self.co_list.blockSignals(True)
+        self.co_list.clear()
+        for o in CO.of_level(doc, lid):
+            runs = len((doc.get("mep_runs") or {}).get(o["id"]) or [])
+            it = QListWidgetItem(f"{CO.DISC[o['disc']][0]} — "
+                                 f"{o.get('name', '')}"
+                                 + (f"  ({runs} runs)" if runs else ""))
+            it.setData(Qt.UserRole, o["id"])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if o.get("on", True)
+                             else Qt.Unchecked)
+            self.co_list.addItem(it)
+            if o["id"] == cur_id:
+                self.co_list.setCurrentItem(it)
+        if self.co_list.currentItem() is None and self.co_list.count():
+            self.co_list.setCurrentRow(0)
+        self.co_list.blockSignals(False)
+        self.co_lines.blockSignals(True)
+        self.co_lines.setChecked(doc["settings"].get("coord_lines", True))
+        self.co_lines.blockSignals(False)
+        self._co_show()
+        self._co_fill_clashes()
+
+    def _co_fill_clashes(self):
+        doc = self.doc()
+        try:
+            lid = self.level()[0]
+        except Exception:  # noqa: BLE001
+            return
+        self.co_clash.clear()
+        cs = [c for c in doc.get("clashes") or [] if c["level"] == lid]
+        for c in cs:
+            it = QListWidgetItem(
+                f"{c.get('no', '')}. {'HARD' if c.get('hard') else 'soft'} "
+                f"· {c['a']} × {c['b']} · ({len_txt(c['x'])}, "
+                f"{len_txt(c['y'])}) z {len_txt(c['z'])}")
+            it.setData(Qt.UserRole, (c["x"], c["y"], c["z"]))
+            self.co_clash.addItem(it)
+        hard = sum(1 for c in cs if c.get("hard"))
+        self.co_info.setText(f"{len(cs)} clash(es) on this floor — {hard} "
+                             f"hard, {len(cs) - hard} soft (sleeves)"
+                             if cs else "")
+
+    def _co_show(self):
+        o = self._co_sel()
+        for w_ in (self.co_dx, self.co_dy, self.co_rot, self.co_z):
+            w_.blockSignals(True)
+        if o is not None:
+            self.co_dx.setValue(float(o.get("dx") or 0.0))
+            self.co_dy.setValue(float(o.get("dy") or 0.0))
+            self.co_rot.setValue(float(o.get("drot") or 0.0))
+            self.co_auto_z.setChecked(o.get("z") is None)
+            if o.get("z") is not None:
+                self.co_z.setValue(float(o["z"]))
+            i = self.co_disc.findData(o["disc"])
+            if i >= 0:
+                self.co_disc.setCurrentIndex(i)
+        for w_ in (self.co_dx, self.co_dy, self.co_rot, self.co_z):
+            w_.blockSignals(False)
+
+    def _co_checked(self, it):
+        from . import coord as CO
+        doc = self.doc()
+        o = CO.find(doc, it.data(Qt.UserRole))
+        if o is None:
+            return
+        o["on"] = it.checkState() == Qt.Checked
+        self.commit(doc, f"{o.get('name')} {'shown' if o['on'] else 'hidden'}")
+
+    def _co_lines_toggled(self, on):
+        doc = self.doc()
+        doc["settings"]["coord_lines"] = bool(on)
+        PJ.store_only(self.vp, doc)
+        try:
+            self.vp.update()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _co_add(self):
+        from . import coord as CO
+        start = os.path.dirname(self.i_file.text().strip()) or \
+            os.path.expanduser("~")
+        disc = self.co_disc.currentData()
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"{CO.DISC[disc][0]} drawing", start,
+            "CAD drawings (*.dwg *.dxf);;All files (*)")
+        if not path:
+            return
+        doc = self.doc()
+        lid = self.level()[0]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            o = CO.new(doc, lid, disc, path)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._co_add")
+            self.flash(f"Not read — {e}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if self.commit(doc, f"{CO.DISC[disc][0]} drawing laid over the "
+                            "floor — «Select part on drawing…» to box it, "
+                            "«Auto-align» to line it up"):
+            self._co_fill()
+            for i in range(self.co_list.count()):
+                if self.co_list.item(i).data(Qt.UserRole) == o["id"]:
+                    self.co_list.setCurrentRow(i)
+
+    def _co_remove(self):
+        from . import coord as CO
+        o = self._co_sel()
+        if o is None:
+            return
+        doc = self.doc()
+        CO.remove(doc, o["id"])
+        if self.commit(doc, f"{o.get('name')} removed"):
+            self._co_fill()
+
+    def _co_pick(self):
+        from . import coord as CO
+        doc = self.doc()
+        o = CO.find(doc, (self._co_sel() or {}).get("id"))
+        if o is None:
+            self.flash("Add a drawing first")
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            d = cadread.read(o["file"], o.get("unit"))
+        except Exception as e:  # noqa: BLE001
+            self.flash(f"Not read — {e}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        base = (o["bx"], o["by"]) if o.get("bx") is not None else None
+        dlg = PortionDialog(self, d, f"{self._target_name()} · "
+                            f"{CO.DISC[o['disc']][0]}", (),
+                            o.get("region"), base,
+                            roles={n: "off" for n in o.get("off") or ()},
+                            detected={})
+        if not dlg.exec():
+            return
+        o["off"] = sorted(n for n, r in (dlg.layer_roles or {}).items()
+                          if r == "off")
+        if dlg.whole:
+            o["region"] = None
+        else:
+            o["region"] = [round(v, 4) for v in dlg.region]
+            o["bx"], o["by"] = round(dlg.base[0], 4), round(dlg.base[1], 4)
+            o["dx"] = o["dy"] = o["drot"] = 0.0
+        if self.commit(doc, f"{o.get('name')}: its part of the drawing set"):
+            self._co_fill()
+
+    def _co_align(self):
+        from . import coord as CO
+        doc = self.doc()
+        o = CO.find(doc, (self._co_sel() or {}).get("id"))
+        if o is None:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            dx, dy, dr, score = CO.auto_align(doc, o)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._co_align")
+            self.flash(f"Not aligned — {e}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if score < 0.05:
+            self.flash("No clear match with the architectural floor — "
+                       "pick the same grid point in «Select part on "
+                       "drawing…», or move it by hand", 9000)
+            return
+        if self.commit(doc, f"Aligned: moved {len_txt(dx)}, {len_txt(dy)}, "
+                            f"turned {dr:.2f}° ({score:.0%} of the lines "
+                            "agree)"):
+            self._co_fill()
+
+    def _co_apply(self):
+        from . import coord as CO
+        doc = self.doc()
+        o = CO.find(doc, (self._co_sel() or {}).get("id"))
+        if o is None:
+            return
+        o["dx"] = round(self.co_dx.value(), 4)
+        o["dy"] = round(self.co_dy.value(), 4)
+        o["drot"] = round(self.co_rot.value(), 3)
+        o["z"] = None if self.co_auto_z.isChecked() else \
+            round(self.co_z.value(), 4)
+        disc = self.co_disc.currentData()
+        if disc and disc != o["disc"]:
+            o["disc"] = disc
+        if o["id"] in (doc.get("mep_runs") or {}):
+            try:
+                CO.build_runs(doc, o)
+            except Exception:  # noqa: BLE001
+                log_error("panel._co_apply runs")
+        if self.commit(doc, f"{o.get('name')} placed"):
+            self._co_fill()
+
+    def _co_runs(self, every=False):
+        from . import coord as CO
+        doc = self.doc()
+        if every:
+            todo = [o for o in doc.get("coord") or []]
+        else:
+            o = CO.find(doc, (self._co_sel() or {}).get("id"))
+            todo = [o] if o is not None else []
+        if not todo:
+            self.flash("Add a drawing first")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        n = {}
+        try:
+            for o in todo:
+                rs = CO.build_runs(doc, o)
+                for r in rs:
+                    n[r["kind"]] = n.get(r["kind"], 0) + 1
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._co_runs")
+            self.flash(f"Runs not built — {e}", 9000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if self.commit(doc, "3D runs: " + (", ".join(
+                f"{v} {k}s" for k, v in n.items()) or "none found")):
+            self._co_fill()
+
+    def _co_check(self, every=False):
+        from . import coord as CO
+        doc = self.doc()
+        lids = None if every else [self.level()[0]]
+        if not any((doc.get("mep_runs") or {}).get(o["id"])
+                   for o in doc.get("coord") or []
+                   if lids is None or o["level"] in lids):
+            for o in doc.get("coord") or []:      # runs first
+                if (lids is None or o["level"] in lids) and \
+                        o["disc"] != "structure":
+                    try:
+                        CO.build_runs(doc, o)
+                    except Exception:  # noqa: BLE001
+                        log_error("panel._co_check runs")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            cs = CO.check(doc, lids)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._co_check")
+            self.flash(f"Clashes not checked — {e}", 9000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        hard = sum(1 for c in cs if c.get("hard"))
+        if self.commit(doc, f"{len(cs)} clash(es): {hard} hard, "
+                            f"{len(cs) - hard} soft — marked in red"):
+            self._co_fill()
+
+    def _co_goto(self, it):
+        xyz = it.data(Qt.UserRole)
+        if not xyz:
+            return
+        try:                    # the camera to the clash
+            from PySide6.QtGui import QVector3D
+            cam = self.vp.camera
+            tgt = QVector3D(float(xyz[0]), float(xyz[1]), float(xyz[2]))
+            if hasattr(cam, "target"):
+                off = cam.position - cam.target if hasattr(
+                    cam, "position") else QVector3D(6, -6, 5)
+                if off.length() > 12:
+                    off = off.normalized() * 8.0
+                cam.target = tgt
+                cam.position = tgt + off
+            self.vp.update()
+        except Exception:  # noqa: BLE001
+            log_error("panel._co_goto")
+        self.flash(f"Clash at {len_txt(xyz[0])}, {len_txt(xyz[1])}, "
+                   f"z {len_txt(xyz[2])}", 6000)
+
+    def _co_csv(self):
+        from . import coord as CO
+        doc = self.doc()
+        if not doc.get("clashes"):
+            self.flash("No clashes checked yet")
+            return
+        start = os.path.dirname(self.i_file.text().strip()) or \
+            os.path.expanduser("~")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Clash report", os.path.join(start, "clash_report.csv"),
+            "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            n = CO.write_csv(doc, path)
+        except Exception as e:  # noqa: BLE001
+            self.flash(f"Not written — {e}", 8000)
+            return
+        self.flash(f"{n} clashes written to {os.path.basename(path)}", 7000)
+
+    def _co_clear(self):
+        doc = self.doc()
+        doc["clashes"] = []
+        if self.commit(doc, "Clashes cleared"):
+            self._co_fill()
+
+    def _co_struct(self):
+        from . import coord as CO
+        doc = self.doc()
+        o = CO.find(doc, (self._co_sel() or {}).get("id"))
+        if o is None or o["disc"] != "structure":
+            self.flash("Select a structural drawing in the list first")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            nc, nb = CO.structure_to_model(doc, o)
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._co_struct")
+            self.flash(f"Not read — {e}", 9000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not nc and not nb:
+            self.flash("No columns / beams found on its column / beam "
+                       "layers", 8000)
+            return
+        self.commit(doc, f"From the structural drawing: {nc} columns, "
+                         f"{nb} beams")
+
     # ---- 8. sheets & export -------------------------------------------------------
     def _sheets_part(self):
         box, body = _fold("13  Plans, sheets and export", "sheets")
@@ -9595,6 +10031,10 @@ class Panel(QWidget):
         finally:
             self._building = False
         self._fill_rooms(doc)
+        try:
+            self._co_fill()
+        except Exception:  # noqa: BLE001
+            log_error("panel._co_fill")
         try:
             if self.cp_table.isVisible():
                 self._fill_components(doc)

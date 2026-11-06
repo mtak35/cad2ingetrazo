@@ -2409,6 +2409,16 @@ def build(doc: dict, elevations) -> list[dict]:
                             for pcs in wp_.values() for pc in pcs]
             except Exception:  # noqa: BLE001
                 down_cut = []
+        main_t_ = {}                     # the main floor / roof slab depth
+        for s in slabs_:
+            if s.get("zone") or s.get("user") or s.get("grade") or \
+                    s.get("top"):
+                continue
+            k_ = bool(s.get("roof"))
+            a_ = _area(s.get("corners") or [])
+            if a_ > main_t_.get(("a", k_), -1.0):
+                main_t_[("a", k_)] = a_
+                main_t_[k_] = float(s["t"])
         for s in slabs_:
             if s.get("grade"):
                 continue          # on the ground: its finish only
@@ -2428,9 +2438,17 @@ def build(doc: dict, elevations) -> list[dict]:
                 bot = top - float(s["t"])
                 if s.get("user") and float(s.get("offset", 0.0)) > 0:
                     bot = base_top - float(s["t"])  # raised: filled down
-                # the parts sunk / raised by hand: out of the slab round them
+                if s.get("zone") and not s.get("roof"):
+                    # a level zone (the CAD's LEV notes): the floor slab
+                    # itself there, at the zone's level — as deep as the
+                    # floor's main slab, a raised one filled down to it
+                    mt_ = main_t_.get(bool(s.get("roof")), float(s["t"]))
+                    bot = min(top, base_top) - max(float(s["t"]), mt_)
+                # the parts sunk / raised by hand and the level zones: out
+                # of the slab round them (not left under / over it)
                 cut = [] if s.get("user") or s.get("zone") else \
-                    [u for u in slabs_ if u.get("user")
+                    [u for u in slabs_ if (u.get("user") or (
+                        u.get("zone") and not u.get("grade")))
                      and bool(u.get("roof")) == bool(s.get("roof"))]
             parts_ = [{"outer": _ccw([tuple(p) for p in s["corners"]]),
                        # openings wound the other way round
