@@ -7039,6 +7039,35 @@ class Panel(QWidget):
             self._context_menu(menu)
         finally:
             self._doc_memo = None
+        self._context_flat(menu)
+
+    @staticmethod
+    def _context_flat(menu) -> None:
+        """IngeTrazo hands each extension a submenu of its own («CAD2IngeTrazo
+        · CAD plans to BIM ▸») when it adds several entries: the element's
+        own entries (Edit properties, Convert the wall to a curtain wall…)
+        then sat three menus deep. They go straight in the right-click
+        menu, as before; the host leaves the empty submenu out."""
+        try:
+            from PySide6.QtWidgets import QMenu as _QM
+            top = menu.parent()
+            if not isinstance(top, _QM) or top is menu:
+                return
+            acts = list(menu.actions())
+            if not acts:
+                return
+            # the element's own submenu (Wall 86, Door 3…) first
+            own = [a for a in acts if a.menu() is not None and not any(
+                w in a.text() for w in ("False ceiling", "Floor finish",
+                                        "Wall cladding", "Shaft"))]
+            rest = [a for a in acts if a not in own]
+            top.addSeparator()
+            for a in own + rest:
+                menu.removeAction(a)
+                top.addAction(a)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("context_flat")
 
     def _context_menu(self, menu) -> None:
         """The right-click menu of a CAD2IngeTrazo element: its fields in a
