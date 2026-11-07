@@ -47,7 +47,7 @@ UPPER_WORDS = ["upper cabinet", "wall cabinet", "hanging cabinet",
                "upper kitchen cabinet", "kitchen wall cabinet"]
 HOB_WORDS = ["cooker", "cooktop", "hob", "gas hob", "induction hob",
              "stove", "kitchen stove"]
-SINK_WORDS = ["kitchen sink", "sink cabinet", "sink"]
+SINK_WORDS = ["sink", "kitchen sink", "sink cabinet"]
 
 
 #: kitchen cabinet styles from IngeTrazo's library: {style: (label,
