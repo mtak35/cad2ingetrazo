@@ -34,6 +34,7 @@ import re
 KITCHEN_ROOM = re.compile(r"KITCHEN|KICHEN|COOKING|COCKING|PANTRY|"
                           r"KITCHENETTE|\bK\.?\s?T\.?\s?N\b", re.I)
 ISLAND_WORDS = re.compile(r"ISLAND|COOKING|COCKING|\bHOB\b|COOK", re.I)
+OVEN_WORDS = re.compile(r"\bMV\b|\bOV\b|OVEN|MICRO|M/W|\bMW\b", re.I)
 SERVING_WORDS = re.compile(r"SERVING|\bBAR\b|BREAKFAST|COUNTER", re.I)
 NOT_COUNTER_LAYER = re.compile(r"WALL|COLUMN|\bCOL\b|S-COL|DIM|HATCH|"
                                r"TEXT|GRID|AXIS|TREE|GREEN|LANDSC", re.I)
@@ -244,11 +245,10 @@ def runs_of(poly, segs, walls=None, boxes=()):
             if t1 - t0 < 0.3:
                 continue
             ivs.append((t0, t1))
-            ds.append(d)
+            ds.append((t1 - t0, d))
         if not ivs:
             continue
-        ds.sort()
-        d = ds[len(ds) // 2]
+        d = max(ds)[1]               # the depth of its longest front line
         spans = [(s0, s1) for s0, s1 in _merge(ivs) if s1 - s0 >= 0.6]
         if spans:
             out.append({"a": a, "b": b, "u": u, "n": n, "L": L, "d": d,
@@ -317,8 +317,6 @@ def islands_of(poly, segs, texts, short_segs, walls=None):
         c = pg.centroid
         if not poly.buffer(0.6).contains(c):
             continue
-        if pg.distance(wall) < 0.3:
-            continue                         # against a wall: a counter run
         if any(o[0].buffer(0.05).contains(c) or pg.buffer(0.05).contains(
                 o[0].centroid) for o in out):
             continue                         # a box in a box already taken
@@ -332,6 +330,10 @@ def islands_of(poly, segs, texts, short_segs, walls=None):
                     break
                 if SERVING_WORDS.search(tx):
                     word = "serving"
+        # against a wall: a counter run — unless the plan names it a
+        # serving counter (one through a wall's opening, the living side)
+        if pg.distance(wall) < 0.3 and word != "serving":
+            continue
         burners = [p for p in short_segs if pg.contains(Point(p))]
         hob = None
         if len(burners) >= 16:
@@ -395,6 +397,7 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     upper_corner_e = min(ucs, key=lambda e: abs(_h(e) - UPPER_H * 100)) \
         if ucs else _pick(entries, ["upper corner cabinet"])
     hood_e = _pick(entries, ["range hood", "hood"])
+    oven_e = _pick(entries, ["microwave cabinet", "double oven", "oven"])
     hob_e = _pick(entries, HOB_WORDS)
     # a hob set into the worktop (on a cabinet), not a free-standing cooker
     top_e = _pick(entries, ["cooktop", "gas hob", "ceramic hob",
@@ -430,8 +433,34 @@ def fit(doc, lid, pl, rooms, entries) -> int:
         mine = [s for s in segs if poly.buffer(0.8).intersects(
             LineString([(s[0], s[1]), (s[2], s[3])]))]
         isl = islands_of(poly, mine, texts, short_pts, walls)
+        try:
+            from shapely.ops import polygonize as _pz, unary_union as _uu
+            mine_polys = list(_pz(_uu([LineString([(s_[0], s_[1]),
+                                                    (s_[2], s_[3])])
+                                       for s_ in mine])))
+        except Exception:  # noqa: BLE001
+            mine_polys = []
         blocks = _blocks(pl, poly, texts)
         runs = runs_of(poly, mine, walls, [b[0] for b in isl])
+        # a run the plan names SERVING (COUNTER / BAR): a counter through
+        # the wall's opening — cabinets only, no corner unit, no uppers
+        for rn in runs:
+            st_ = Polygon([rn["a"], rn["b"], _xy(rn, rn["L"], rn["d"]),
+                           _xy(rn, 0.0, rn["d"])]).buffer(0.35)
+            rn["serving"] = any(
+                SERVING_WORDS.search(str(t.get("text", ""))) and
+                st_.contains(Point(float(t["x"]), float(t["y"])))
+                for t in texts)
+        for rn in runs:
+            if not rn["serving"]:
+                continue
+            for end, q in list(rn.get("corners") or []):
+                lo, hi = (0.0, q["d"]) if end == 0 else \
+                    (rn["L"] - q["d"], rn["L"])
+                rn["spans"] = _cut(rn["spans"], lo, hi)
+                q["corners"] = [(e_, p_) for e_, p_ in q.get("corners")
+                                or [] if p_ is not rn]
+            rn["corners"] = []
         # which run owns each corner (the corner cabinets): the longer one
         for rn in runs:
             rn["own"] = {}
@@ -466,6 +495,8 @@ def fit(doc, lid, pl, rooms, entries) -> int:
             cover = sum(min(b, rn["L"]) - max(a, 0.0)
                         for a, b in rn["glass"])
             rn["no_upper"] = "glass" if cover >= 0.6 * rn["L"] else None
+            if rn.get("serving"):
+                rn["no_upper"] = "serving"
         for rn in runs:
             d = rn["d"]
             strip = Polygon([rn["a"], rn["b"], _xy(rn, rn["L"], d),
@@ -510,9 +541,63 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                     (oy - rn["a"][1]) * rn["n"][1]
                 t = (ox - rn["a"][0]) * rn["u"][0] + \
                     (oy - rn["a"][1]) * rn["u"][1]
-                if abs(off) < 0.4 and kind == "door":
-                    spans = _cut(spans, t - ow / 2 - 0.05, t + ow / 2 + 0.05)
+                if abs(off) < 0.4 and kind == "door" and \
+                        not rn.get("serving"):   # (a serving counter stands
+                    spans = _cut(spans, t - ow / 2 - 0.05,  # in its opening)
+                                 t + ow / 2 + 0.05)
             busy, hob_at, fridge_at = [], [], []
+            # an oven / microwave tower the plan writes MV / OV on, in the
+            # outline drawn round the text
+            for t_ in texts:
+                if not OVEN_WORDS.search(str(t_.get("text", ""))) or \
+                        oven_e is None:
+                    continue
+                q_ = Point(float(t_["x"]), float(t_["y"]))
+                if not strip.buffer(0.1).contains(q_):
+                    continue
+                box_ = None
+                for pg_ in mine_polys:
+                    if 0.1 <= pg_.area <= 1.6 and pg_.contains(q_) and (
+                            box_ is None or pg_.area < box_.area):
+                        box_ = pg_
+                tq = (q_.x - rn["a"][0]) * rn["u"][0] + \
+                    (q_.y - rn["a"][1]) * rn["u"][1]
+                if box_ is not None:
+                    ts_ = [(x - rn["a"][0]) * rn["u"][0] +
+                           (y - rn["a"][1]) * rn["u"][1]
+                           for x, y in box_.exterior.coords]
+                    o0, o1 = max(min(ts_), 0.0), min(max(ts_), L)
+                else:
+                    # its sides: the lines across the counter either side
+                    # of the text (the box closes on the wall)
+                    tl, tr = [], []
+                    for x0, y0, x1, y1 in mine:
+                        sl = math.hypot(x1 - x0, y1 - y0)
+                        if sl < 0.25:
+                            continue
+                        if abs(((x1 - x0) * rn["u"][0] + (y1 - y0) *
+                                rn["u"][1]) / sl) > 0.1:
+                            continue           # not across the run
+                        m_ = Point((x0 + x1) / 2, (y0 + y1) / 2)
+                        if not strip.buffer(0.05).contains(m_):
+                            continue
+                        tt = (m_.x - rn["a"][0]) * rn["u"][0] + \
+                            (m_.y - rn["a"][1]) * rn["u"][1]
+                        (tl if tt < tq else tr).append(tt)
+                    tl = [x for x in tl if tq - x <= 1.2]
+                    tr = [x for x in tr if x - tq <= 1.2]
+                    if not tl or not tr:
+                        continue
+                    o0, o1 = max(tl), min(tr)
+                if o1 - o0 < 0.4:
+                    continue
+                spans = _cut(spans, o0, o1)
+                fridge_at.append((o0, o1))
+                px, py = _xy(rn, (o0 + o1) / 2, d / 2)
+                _rec(FO, doc, lid, oven_e, "oven", px, py,
+                     FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                     fit=[o1 - o0, d], fit_free=True)
+                n += 1
             for bpoly, kind in blocks:
                 if bpoly.intersection(strip).area < 0.5 * bpoly.area:
                     continue
@@ -521,7 +606,7 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                     (c.y - rn["a"][1]) * rn["u"][1]
                 cs = list(bpoly.minimum_rotated_rectangle.exterior.coords)
                 w_ = max(math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2]))
-                w_ = min(max(w_, 0.6), 1.2)
+                w_ = min(max(w_, 0.6), 1.5 if kind == "ksink" else 1.2)
                 e_ = {"ksink": sink_e, "stove": top_e or hob_e,
                       "fridge": fridge_e}.get(kind)
                 if e_ is None:
@@ -636,10 +721,27 @@ def fit(doc, lid, pl, rooms, entries) -> int:
             if fx * nv[0] + fy * nv[1] < 0:
                 nv = (-nv[0], -nv[1])         # nv: toward the front
             spans = [(0.0, L)]
-            hob_t = None
+            # the hobs: the burners drawn on it, in groups along it (a hob
+            # at each end, as the plan draws them)
+            hobs = []
             if hob is not None and (top_e or hob_e) is not None:
-                hob_t = (hob[0] - p0[0]) * u[0] + (hob[1] - p0[1]) * u[1]
-                hw = min(0.75 if top_e is not None else 0.9, L)
+                bts = sorted((p[0] - p0[0]) * u[0] + (p[1] - p0[1]) * u[1]
+                             for p in short_pts if pg.contains(Point(p)))
+                grp = []
+                for t_ in bts:
+                    if grp and t_ - grp[-1][-1] > 0.3:
+                        grp.append([t_])
+                    elif grp:
+                        grp[-1].append(t_)
+                    else:
+                        grp.append([t_])
+                grp = [g_ for g_ in grp if len(g_) >= 8] or \
+                    [[(hob[0] - p0[0]) * u[0] + (hob[1] - p0[1]) * u[1]]]
+                for g_ in grp:
+                    hw = min(max(g_[-1] - g_[0] + 0.2, 0.45),
+                             0.75 if top_e is not None else 0.9, L)
+                    hobs.append(((g_[0] + g_[-1]) / 2, hw))
+            for hob_t, hw in hobs:
                 hob_t = min(max(hob_t, hw / 2), L - hw / 2)
                 hx = c.x + u[0] * (hob_t - L / 2)
                 hy = c.y + u[1] * (hob_t - L / 2)
