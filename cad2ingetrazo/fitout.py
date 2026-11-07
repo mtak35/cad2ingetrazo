@@ -135,7 +135,8 @@ def analyze(doc, lid, pl, entries=None) -> dict:
     steps = (("slab cuts", _text_cuts), ("shower glass", _shower_glass),
              ("lift", _lift), ("cladding", _cladding),
              ("lights", _lights), ("AC diffusers", _diffusers),
-             ("wardrobes", _wardrobes))
+             ("wardrobes", _wardrobes), ("kitchen counters", _kitchens),
+             ("shower cabins", _showers))
     for name, fn in steps:
         try:
             n = fn(doc, lid, pl, rooms, entries)
@@ -1034,7 +1035,114 @@ def _diffusers(doc, lid, pl, rooms, entries) -> int:
     return n
 
 
+# ---- shower cabins ----------------------------------------------------------
+SHOWER_TEXT = re.compile(r"^\s*(S\.?\s?C\.?|SHOWER(\s*(CUBICLE|CABIN|AREA|"
+                         r"TRAY|STALL))?|SHWR|SH\.?|DUCHA)\s*$", re.I)
+
+
+def _showers(doc, lid, pl, rooms, entries) -> int:
+    """A shower cabin (the library's) where a bathroom's plan writes S.C /
+    SHOWER: fitted to the outline drawn round the text (the shower area —
+    a rectangle or a corner one with its chamfer), its back to the walls,
+    its door toward the room. Not where the plan draws its shower glass
+    (that is the shower) or a shower block (placed as furniture)."""
+    if not doc["settings"].get("bath_fixtures", True):
+        return 0
+    from shapely.geometry import Point
+    from . import furnish as FU
+    cabs = [e for e in entries if e.get("cat") == "Bathroom" and str(
+        e.get("name", "")).lower() in ("shower cabin", "shower stall",
+                                       "shower cubicle")
+        and str(e.get("name", "")).lower() != "shower cubicle"]
+    if not cabs:
+        return 0
+
+    def dims(e):
+        try:
+            cm = (e.get("entry") or {}).get("cm") or []
+            return float(cm[0]) / 100.0, float(cm[1]) / 100.0
+        except (TypeError, ValueError, IndexError):
+            return 0.9, 0.9
+    glass = [Point((g["a"][0] + g["b"][0]) / 2, (g["a"][1] + g["b"][1]) / 2)
+             for g in doc.get("fitout") or [] if g.get("level") == lid
+             and g.get("kind") == "glass"]
+    have = [f for f in doc.get("furniture") or [] if f.get("level") == lid
+            and f.get("kind") == "shower"]
+    n = 0
+    done = []
+    for t in pl.get("texts") or ():
+        if not SHOWER_TEXT.match(str(t.get("text", ""))):
+            continue
+        x, y = float(t["x"]), float(t["y"])
+        r = _room_at(rooms, x, y)
+        if r is None or not BATH_ROOM.search(str(r["name"])) and \
+                r["area"] > 25.0:
+            continue
+        if any(math.dist((x, y), q) < 0.8 for q in done):
+            continue
+        g = _outline_at(pl, rooms, x, y)
+        if g is None or not (0.5 <= g.area <= 4.0) or \
+                g.area > 0.8 * r["area"]:
+            # no shower area drawn: a 3'-0" square in the room's corner
+            # nearest the text
+            from shapely.geometry import box
+            g = None
+            P = r["poly"]
+            cs = list(P.minimum_rotated_rectangle.exterior.coords)[:-1]
+            cn = min(cs, key=lambda c: math.dist(c, (x, y)))
+            sx = 0.45 if cn[0] < P.centroid.x else -0.45
+            sy = 0.45 if cn[1] < P.centroid.y else -0.45
+            cx, cy = cn[0] + sx, cn[1] + sy
+            g = box(cx - 0.45, cy - 0.45, cx + 0.45, cy + 0.45).intersection(P)
+            if g.is_empty or g.area < 0.4:
+                continue
+        if any(g.buffer(0.05).contains(p_) for p_ in glass):
+            continue                         # its glass is the shower
+        if any(g.buffer(0.1).contains(Point(f["x"], f["y"])) for f in have):
+            continue
+        m = g.minimum_rotated_rectangle
+        cs = list(m.exterior.coords)[:-1]
+        e1 = (cs[1][0] - cs[0][0], cs[1][1] - cs[0][1])
+        e2 = (cs[2][0] - cs[1][0], cs[2][1] - cs[1][1])
+        L1, L2 = math.hypot(*e1), math.hypot(*e2)
+        if L1 < 0.5 or L2 < 0.5:
+            continue
+        c = m.centroid
+        # its back: toward the walls (away from the room's middle)
+        rc = r["poly"].centroid
+        away = (c.x - rc.x, c.y - rc.y)
+        u1 = (e1[0] / L1, e1[1] / L1)
+        u2 = (e2[0] / L2, e2[1] / L2)
+        d1 = away[0] * u1[0] + away[1] * u1[1]
+        d2 = away[0] * u2[0] + away[1] * u2[1]
+        if abs(d2) >= abs(d1):          # its back across e2: e1 along it
+            back = (u2[0] * (1 if d2 >= 0 else -1),
+                    u2[1] * (1 if d2 >= 0 else -1))
+            wide, deep = L1, L2
+        else:
+            back = (u1[0] * (1 if d1 >= 0 else -1),
+                    u1[1] * (1 if d1 >= 0 else -1))
+            wide, deep = L2, L1
+        e = min(cabs, key=lambda e_: abs(dims(e_)[0] / max(dims(e_)[1], .1)
+                                        - wide / deep))
+        _furn_rec(doc, lid, e, "shower", c.x, c.y, FU.back_to(*back), r,
+                  fit=[min(max(wide, 0.7), 1.8), min(max(deep, 0.7), 1.8)],
+                  fit_free=True)
+        done.append((x, y))
+        n += 1
+    return n
+
+
 # ---- wardrobes --------------------------------------------------------------
+def _kitchens(doc, lid, pl, rooms, entries) -> int:
+    """The kitchen counters the plan draws: cabinets, corner cabinet,
+    wall cabinets, the cooking island (kcounter.py)."""
+    if not doc["settings"].get("kitchen_counters", True):
+        return 0
+    from . import kcounter as KC
+    return KC.fit(doc, lid, pl, rooms, entries)
+
+
 def _wardrobes(doc, lid, pl, rooms, entries) -> int:
     from shapely.geometry import LineString, Point, Polygon
     from shapely.ops import polygonize, unary_union

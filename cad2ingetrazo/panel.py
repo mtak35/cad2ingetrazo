@@ -7414,6 +7414,20 @@ class Panel(QWidget):
                                                   or {})):
                 sub.addAction("Back to the model placed first",
                               lambda: self.furn_replace(sel[1], None))
+            from . import kcounter as KC_
+            if kd_ in KC_.KITCHEN_KINDS:
+                km_ = sub.addMenu("Kitchen cabinet style")
+                now_ = doc["settings"].get("kitchen_style") or "standard"
+                for k_, (lab_, _w) in KC_.STYLES.items():
+                    a_ = km_.addAction(lab_, lambda k=k_:
+                                       self.apply_kitchen_style(k))
+                    a_.setCheckable(True)
+                    a_.setChecked(k_ == now_)
+            hp_ = bool(doc["settings"].get("hi_poly", False))
+            sub.addAction("Show fixtures and furniture low poly (fast)"
+                          if hp_ else
+                          "Show fixtures and furniture high poly (render)",
+                          lambda on=not hp_: self.c_hipoly.setChecked(on))
         if sel[0] == "stairrail":
             sub.addAction("Put back the railing's deleted pieces",
                           lambda: self._rail_restore(sel[1]))
@@ -8564,11 +8578,27 @@ class Panel(QWidget):
             "aluminium panels on the wall; a LIFT room the library's "
             "elevator and its door; the LIGHT / ELE layers ceiling lamps "
             "and the AC layers diffusers in the false ceiling; DRESS rooms "
-            "and the DRESS layer library wardrobes. The bathroom's WCs, "
-            "vanities and showers are placed too.")
+            "and the DRESS layer library wardrobes; a KITCHEN's counter "
+            "lines lower, corner and upper cabinets, its island with the "
+            "cooker; S.C / SHOWER in a bathroom a shower cabin. The "
+            "bathroom's WCs, vanities and showers are placed too.")
         self.c_fitout.toggled.connect(self._fitout_toggle)
         row.addWidget(self.c_fitout)
         row.addStretch(1)
+        from . import kcounter as _KC
+        row.addWidget(QLabel("Kitchen"))
+        self.k_style = QComboBox()
+        self.k_style.setToolTip(
+            "The kitchen cabinets' style (IngeTrazo's library): the lower, "
+            "corner and upper cabinets, the island and the sink unit of "
+            "every kitchen the plan draws")
+        for k_, (lab_, _w) in _KC.STYLES.items():
+            self.k_style.addItem(lab_, k_)
+        self.k_style.setCurrentIndex(max(self.k_style.findData(
+            self.doc()["settings"].get("kitchen_style") or "standard"), 0))
+        self.k_style.currentIndexChanged.connect(
+            lambda _i: self.apply_kitchen_style(self.k_style.currentData()))
+        row.addWidget(self.k_style)
         row.addWidget(_btn("Read again", self._fitout_again,
                            "Read the CAD's fit-out again on every imported "
                            "floor (replaces only its own pieces)"))
@@ -8892,6 +8922,43 @@ class Panel(QWidget):
             f["lib"] = o
             self.commit(doc, f"{e['name']} in place of "
                              f"{f.get('name', 'the fixture')}")
+
+    def apply_kitchen_style(self, style):
+        """Every kitchen's cabinets (lower, corner, upper, island, sink
+        unit) drawn in the library's ``style`` — kept when the plan's
+        kitchens are fitted again."""
+        from . import kcounter as KC
+        from . import library as LB
+        doc = self.doc()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            es = LB.list_entries()
+            got = KC.style_entries(es, style)
+            for e in got.values():
+                LB.proto(e["key"], e.get("entry"))   # fetched once, cached
+        finally:
+            QApplication.restoreOverrideCursor()
+        if style != "standard" and not got:
+            self.flash("That style's cabinets are not in the library — "
+                       "check the connection once (it is cached after)",
+                       8000)
+            return
+        libs = doc.setdefault("fixture_lib", {})
+        for kind in KC.KITCHEN_KINDS:
+            libs.pop(kind, None)
+        for kind, e in got.items():
+            libs[kind] = {"key": e["key"], "name": e["name"],
+                          **({"entry": e["entry"]} if e.get("entry")
+                             else {})}
+        for f in doc.get("furniture") or []:
+            if f.get("kind") in KC.KITCHEN_KINDS:
+                f.pop("lib", None)
+        doc["settings"]["kitchen_style"] = style
+        if hasattr(self, "k_style"):
+            self.k_style.blockSignals(True)
+            self.k_style.setCurrentIndex(max(self.k_style.findData(style), 0))
+            self.k_style.blockSignals(False)
+        self.commit(doc, f"Kitchen cabinets: {KC.STYLES[style][0]}")
 
     def add_furniture_dialog(self, room_id):
         """A library model set in a room, at its middle, on its floor —

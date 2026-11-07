@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor", "curtain_type": "curtain",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": False, "_walls_apart_v1": False, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": False, "_walls_apart_v1": False, "kitchen_counters": True, "kitchen_style": "standard", "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -11673,6 +11673,7 @@ def _furniture_groups(doc):
             except Exception:  # noqa: BLE001
                 h_ = float(f["hang"])
             z = z_of[f["level"]] + h_ - (pr["box"][5] - pr["box"][2])
+        z += float(f.get("zoff", 0.0) or 0.0)    # a wall cabinet's height
         base = _furniture_pose(f, pr, z)
         nm = f"{furn_name(doc, f)} · {names[f['level']]}"
         if len(pr["parts"]) == 1:
