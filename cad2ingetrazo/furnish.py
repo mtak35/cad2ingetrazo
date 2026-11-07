@@ -726,6 +726,16 @@ def _foot(f, w=None, d=None):
     return affinity.translate(b, float(f["x"]), float(f["y"]))
 
 
+def _named(entries, cat, words):
+    """The library entry of ``cat`` named ``words`` (first found)."""
+    for w in words:
+        for e in entries:
+            if e.get("cat") == cat and str(e.get("name", "")).strip()\
+                    .lower() == w:
+                return e
+    return None
+
+
 def dress_rooms(doc, lid, rooms, entries, cache) -> dict:
     """3.59: a bedroom's bed with a side table each side of its head (a
     CAD bed block drawn with its tables is split into the bed and the two
@@ -764,8 +774,14 @@ def dress_rooms(doc, lid, rooms, entries, cache) -> dict:
                 r"DRAWING|LOUNGE|LIVING|SITTING|FAMILY", str(r["name"]),
                 re.I):
             sofas = [f for f in here if f.get("kind") == "sofa"]
+            # a matching set: the side tables and the centre table of the
+            # same family (the library's square / long coffee tables)
+            lst_e = _named(entries, "Living room", ["square coffee table",
+                                                    "small table"]) or st_e
+            ctr_e = _named(entries, "Living room", ["coffee table",
+                                                    "couch table"])
             for c in here:
-                if c.get("kind") != "chair" or st_e is None:
+                if c.get("kind") != "chair" or lst_e is None:
                     continue
                 for sf in sofas:
                     L_ = max(sf.get("fit") or [2.0, 0.8])
@@ -776,12 +792,46 @@ def dress_rooms(doc, lid, rooms, entries, cache) -> dict:
                     across = abs(-dx * uy + dy * ux)
                     if L_ / 2 - 0.1 <= along <= L_ / 2 + 0.75 and \
                             across <= 0.6:
-                        c.update(kind="sidetable", key=st_e["key"],
-                                 name=st_e["name"], rot=sf.get("rot", 0),
-                                 fit=[0.5, 0.5])
-                        if st_e.get("entry"):
-                            c["entry"] = st_e["entry"]
+                        c.update(kind="sidetable", key=lst_e["key"],
+                                 name=lst_e["name"], rot=sf.get("rot", 0),
+                                 fit=[0.5, 0.5], fit_free=True,
+                                 fit_h=0.5)
+                        c.pop("entry", None)
+                        if lst_e.get("entry"):
+                            c["entry"] = lst_e["entry"]
                         got["sidetable"] = got.get("sidetable", 0) + 1
+                        break
+            # the centre table in the middle of the sofas (none drawn)
+            if sofas and ctr_e is not None and not any(
+                    f.get("kind") in ("dining", "ctable", "table")
+                    for f in here):
+                big = max(sofas, key=lambda f: max(f.get("fit") or [2, 1]))
+                a_ = math.radians(float(big.get("rot", 0) or 0))
+                fx, fy = math.sin(a_), -math.cos(a_)     # its front
+                if len(sofas) >= 2:
+                    cx = sum(f["x"] for f in sofas) / len(sofas)
+                    cy = sum(f["y"] for f in sofas) / len(sofas)
+                    # an L of two: between them, off the long one's front
+                    if len(sofas) == 2:
+                        cx = (cx + big["x"] + fx * 1.1) / 2
+                        cy = (cy + big["y"] + fy * 1.1) / 2
+                else:
+                    cx, cy = big["x"] + fx * 1.05, big["y"] + fy * 1.05
+                busy = unary_union([_foot(f).buffer(0.35) for f in here
+                                    if f.get("kind") in ("sofa", "armchair",
+                                                         "sidetable")])
+                for tw, td in ((1.2, 0.6), (1.0, 0.55), (0.8, 0.5)):
+                    t = {"x": cx, "y": cy, "rot": big.get("rot", 0),
+                         "fit": [tw, td]}
+                    ft = _foot(t)
+                    if poly.buffer(-0.3).contains(ft) and \
+                            not ft.intersects(busy):
+                        rec = _rec(doc, lid, ctr_e, "ctable", cx, cy,
+                                   float(big.get("rot", 0) or 0), r,
+                                   fit=[tw, td])
+                        rec.update(auto=True, fit_free=True, fit_h=0.42)
+                        here.append(rec)
+                        got["ctable"] = got.get("ctable", 0) + 1
                         break
             continue
         if use != "bed":

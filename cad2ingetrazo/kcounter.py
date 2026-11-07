@@ -60,17 +60,14 @@ STYLES = {
         "cabinet": ["wood lower cabinet"],
         "island": ["wood lower cabinet"],
         "corner_cabinet": ["wood corner cabinet"],
-        "wall_cabinet": ["wood upper cabinet"],
-        "ksink": ["wood cabinet with sink"]}),
+        "wall_cabinet": ["wood upper cabinet"]}),
     "gray": ("Gray", {
         "cabinet": ["gray cabinet"],
         "island": ["gray cabinet"],
-        "wall_cabinet": ["gray upper cabinet"],
-        "ksink": ["gray cabinet with basin"]}),
+        "wall_cabinet": ["gray upper cabinet"]}),
     "red": ("Red", {
         "cabinet": ["red cabinet"],
-        "island": ["red cabinet"],
-        "ksink": ["red cabinet with basin"]}),
+        "island": ["red cabinet"]}),
     "glass": ("Glass-door uppers", {
         "wall_cabinet": ["glass door cabinet", "wood glass door cabinet"]}),
 }
@@ -252,7 +249,7 @@ def runs_of(poly, segs, walls=None, boxes=()):
         spans = [(s0, s1) for s0, s1 in _merge(ivs) if s1 - s0 >= 0.6]
         if spans:
             out.append({"a": a, "b": b, "u": u, "n": n, "L": L, "d": d,
-                        "spans": spans})
+                        "spans": spans, "raw": list(spans)})
     # a run's end at a corner where another run starts: the counter goes
     # into the corner (the line drawn stops at the other run's front)
     for r in out:
@@ -285,6 +282,59 @@ def runs_of(poly, segs, walls=None, boxes=()):
 def _xy(r, s, off):
     return (r["a"][0] + r["u"][0] * s + r["n"][0] * off,
             r["a"][1] + r["u"][1] * s + r["n"][1] * off)
+
+
+def serving_boxes(segs, texts, poly):
+    """A counter the plan names SERVING / BAR / BREAKFAST / DINING COUNTER
+    drawn as two long parallel lines round its text (its ends broken by a
+    wall's opening, so no closed box): [rectangle polygon]."""
+    from shapely.geometry import Point, Polygon
+    out = []
+    for t in texts:
+        tx = str(t.get("text", ""))
+        if not (SERVING_WORDS.search(tx) or re.search(r"DINING\s*COUNTER",
+                                                       tx, re.I)):
+            continue
+        p = (float(t["x"]), float(t["y"]))
+        if not poly.buffer(1.5).contains(Point(p)):
+            continue
+        best = None
+        ls = [s_ for s_ in segs if math.hypot(s_[2] - s_[0], s_[3] - s_[1])
+              >= 0.8]
+        for i, a in enumerate(ls):
+            ua = (a[2] - a[0], a[3] - a[1])
+            La = math.hypot(*ua)
+            ua = (ua[0] / La, ua[1] / La)
+            na = (-ua[1], ua[0])
+            for b in ls[i + 1:]:
+                ub = (b[2] - b[0], b[3] - b[1])
+                Lb = math.hypot(*ub)
+                if abs(ua[0] * ub[1] - ua[1] * ub[0]) / Lb > 0.03:
+                    continue
+                gap = (b[0] - a[0]) * na[0] + (b[1] - a[1]) * na[1]
+                if not 0.45 <= abs(gap) <= 1.6:
+                    continue
+                ta = sorted([0.0, La])
+                tb = sorted([(b[0] - a[0]) * ua[0] + (b[1] - a[1]) * ua[1],
+                             (b[2] - a[0]) * ua[0] + (b[3] - a[1]) * ua[1]])
+                lo, hi = max(ta[0], tb[0]), min(ta[1], tb[1])
+                if hi - lo < 0.8:
+                    continue
+                tp = (p[0] - a[0]) * ua[0] + (p[1] - a[1]) * ua[1]
+                gp = (p[0] - a[0]) * na[0] + (p[1] - a[1]) * na[1]
+                if not (lo - 0.1 <= tp <= hi + 0.1 and
+                        min(0.0, gap) - 0.05 <= gp <= max(0.0, gap) + 0.05):
+                    continue
+                q0 = (a[0] + ua[0] * lo, a[1] + ua[1] * lo)
+                q1 = (a[0] + ua[0] * hi, a[1] + ua[1] * hi)
+                rect = Polygon([q0, q1, (q1[0] + na[0] * gap,
+                                         q1[1] + na[1] * gap),
+                                (q0[0] + na[0] * gap, q0[1] + na[1] * gap)])
+                if best is None or rect.area < best.area:
+                    best = rect
+        if best is not None and not any(best.equals(o) for o in out):
+            out.append(best)
+    return out
 
 
 def islands_of(poly, segs, texts, short_segs, walls=None):
@@ -367,13 +417,24 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     from . import furnish as FU
     lay = pl.get("layers") or []
     segs = []
+    shut = []
+    win_segs = []                # the plan's window glazing lines
     for s in pl.get("segs") or ():
         try:
             ly = lay[int(s[4])] if isinstance(s[4], int) else s[4]
         except (IndexError, TypeError, ValueError):
             ly = ""
+        if re.search(r"WINDOW|GLAZ|GLASS", str(ly or ""), re.I):
+            win_segs.append((float(s[0]), float(s[1]), float(s[2]),
+                             float(s[3])))
         if _counter_layer(ly):
             segs.append((float(s[0]), float(s[1]), float(s[2]),
+                         float(s[3])))
+        elif math.hypot(float(s[2]) - float(s[0]),
+                        float(s[3]) - float(s[1])) < 0.4:
+            # a short piece on a wall layer: it may close a serving
+            # counter that runs through the wall's opening
+            shut.append((float(s[0]), float(s[1]), float(s[2]),
                          float(s[3])))
     short_pts = [((x0 + x1) / 2, (y0 + y1) / 2) for x0, y0, x1, y1 in segs
                  if math.hypot(x1 - x0, y1 - y0) < 0.08]
@@ -397,12 +458,15 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     upper_corner_e = min(ucs, key=lambda e: abs(_h(e) - UPPER_H * 100)) \
         if ucs else _pick(entries, ["upper corner cabinet"])
     hood_e = _pick(entries, ["range hood", "hood"])
+    ihood_e = _pick(entries, ["hood", "range hood"])   # a chimney hood
     oven_e = _pick(entries, ["microwave cabinet", "double oven", "oven"])
     hob_e = _pick(entries, HOB_WORDS)
     # a hob set into the worktop (on a cabinet), not a free-standing cooker
     top_e = _pick(entries, ["cooktop", "gas hob", "ceramic hob",
                             "induction cooker 4 zones"])
     sink_e = _pick(entries, SINK_WORDS)
+    bar_e = _pick(entries, ["bar table", "island extension", "table"])
+    stool_e = _pick(entries, ["bar stool", "bar chair", "stool"])
     fridge_e = FU.pick("fridge", 0.7, 0.7, entries, {})
     openings = _openings(doc, lid)
     try:
@@ -432,7 +496,9 @@ def fit(doc, lid, pl, rooms, entries) -> int:
             poly.buffer(0.3).contains(Point(f["x"], f["y"])))]
         mine = [s for s in segs if poly.buffer(0.8).intersects(
             LineString([(s[0], s[1]), (s[2], s[3])]))]
-        isl = islands_of(poly, mine, texts, short_pts, walls)
+        shut_ = [s for s in shut if poly.buffer(0.8).intersects(
+            LineString([(s[0], s[1]), (s[2], s[3])]))]
+        isl = islands_of(poly, mine + shut_, texts, short_pts, walls)
         try:
             from shapely.ops import polygonize as _pz, unary_union as _uu
             mine_polys = list(_pz(_uu([LineString([(s_[0], s_[1]),
@@ -441,7 +507,10 @@ def fit(doc, lid, pl, rooms, entries) -> int:
         except Exception:  # noqa: BLE001
             mine_polys = []
         blocks = _blocks(pl, poly, texts)
-        runs = runs_of(poly, mine, walls, [b[0] for b in isl])
+        serv = serving_boxes(mine, texts, poly)
+        isl = [b for b in isl if not any(
+            b[0].intersection(sv).area > 0.5 * b[0].area for sv in serv)]
+        runs = runs_of(poly, mine, walls, [b[0] for b in isl] + serv)
         # a run the plan names SERVING (COUNTER / BAR): a counter through
         # the wall's opening — cabinets only, no corner unit, no uppers
         for rn in runs:
@@ -458,6 +527,15 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                 lo, hi = (0.0, q["d"]) if end == 0 else \
                     (rn["L"] - q["d"], rn["L"])
                 rn["spans"] = _cut(rn["spans"], lo, hi)
+                # the other run: back to where the plan's line stops
+                for qe_, p_ in list(q.get("corners") or []):
+                    if p_ is not rn or not q.get("raw"):
+                        continue
+                    if qe_ == 0:
+                        q["spans"][0] = (q["raw"][0][0], q["spans"][0][1])
+                    else:
+                        q["spans"][-1] = (q["spans"][-1][0],
+                                          q["raw"][-1][1])
                 q["corners"] = [(e_, p_) for e_, p_ in q.get("corners")
                                 or [] if p_ is not rn]
             rn["corners"] = []
@@ -490,6 +568,28 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                       (y - rn["a"][1]) * rn["u"][1] for x, y in cs_]
                 lo_, hi_ = max(min(ts), 0.0), min(max(ts), rn["L"])
                 if hi_ - lo_ > 0.1:
+                    gl.append((lo_ - 0.05, hi_ + 0.05))
+            # a window the plan draws in the wall behind the run (its
+            # glazing lines in the wall's thickness), placed or not
+            for x0, y0, x1, y1 in win_segs:
+                sl = math.hypot(x1 - x0, y1 - y0)
+                if sl < 0.3:
+                    continue
+                if abs(rn["u"][0] * (y1 - y0) - rn["u"][1] * (x1 - x0)) \
+                        / sl > 0.05:
+                    continue
+                o0 = (x0 - rn["a"][0]) * rn["n"][0] + \
+                    (y0 - rn["a"][1]) * rn["n"][1]
+                o1 = (x1 - rn["a"][0]) * rn["n"][0] + \
+                    (y1 - rn["a"][1]) * rn["n"][1]
+                if not (-0.4 <= o0 <= 0.03 and -0.4 <= o1 <= 0.03):
+                    continue
+                t0 = (x0 - rn["a"][0]) * rn["u"][0] + \
+                    (y0 - rn["a"][1]) * rn["u"][1]
+                t1 = (x1 - rn["a"][0]) * rn["u"][0] + \
+                    (y1 - rn["a"][1]) * rn["u"][1]
+                lo_, hi_ = max(min(t0, t1), 0.0), min(max(t0, t1), rn["L"])
+                if hi_ - lo_ > 0.3:
                     gl.append((lo_ - 0.05, hi_ + 0.05))
             rn["glass"] = _merge(gl, 0.05)
             cover = sum(min(b, rn["L"]) - max(a, 0.0)
@@ -693,6 +793,38 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                      fit=[t1 - t0, UPPER_D], fit_free=True,
                      fit_h=UPPER_H, zoff=UPPER_Z)
                 n += 1
+        # the serving / dining counter the plan draws (through the wall's
+        # opening): the library's bar counter on it, its chairs bar stools
+        for sv in serv:
+            cs = list(sv.exterior.coords)[:-1]
+            e1, e2 = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+            if e1 >= e2:
+                ax_ = (cs[1][0] - cs[0][0], cs[1][1] - cs[0][1])
+            else:
+                ax_ = (cs[2][0] - cs[1][0], cs[2][1] - cs[1][1])
+            Ls, Ds = max(e1, e2), min(e1, e2)
+            c = sv.centroid
+            rot_ = (math.degrees(math.atan2(ax_[1], ax_[0]))) % 180.0
+            if bar_e is not None:
+                _rec(FO, doc, lid, bar_e, "serving", c.x, c.y, rot_, r,
+                     fit=[Ls, Ds], fit_free=True, fit_h=1.05)
+                n += 1
+            if stool_e is not None:
+                for f in doc.get("furniture") or []:
+                    if f.get("level") != lid or f.get("kind") not in (
+                            "chair", "stool") or f.get("kc"):
+                        continue
+                    if sv.distance(Point(f["x"], f["y"])) > 0.9:
+                        continue
+                    q_ = sv.exterior.interpolate(sv.exterior.project(
+                        Point(f["x"], f["y"])))
+                    f.update(key=stool_e["key"], name=stool_e["name"],
+                             kind="stool", rot=round(FU.back_to(
+                                 f["x"] - q_.x, f["y"] - q_.y), 3))
+                    f.pop("fit", None)
+                    f.pop("lib", None)
+                    if stool_e.get("entry"):
+                        f["entry"] = stool_e["entry"]
         # the island / serving counter
         for pg, word, hob in isl:
             mrr = pg.minimum_rotated_rectangle
@@ -756,6 +888,12 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                          FU.back_to(-nv[0], -nv[1]), r,
                          fit=[hw, D], fit_free=True, island=True)
                 n += 1
+                if ihood_e is not None:   # the island hood over the hob,
+                    _rec(FO, doc, lid, ihood_e, "hood", hx, hy,  # hung
+                         FU.back_to(-nv[0], -nv[1]), r,
+                         fit=[min(max(hw, 0.6), 0.9), 0.55],
+                         fit_free=True, island=True, zoff=1.65)
+                    n += 1
             for s0, s1 in spans:
                 s = s0
                 for w_ in _fill(s1 - s0, 0.6, 0.25):
