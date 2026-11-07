@@ -201,6 +201,36 @@ def _sides(doc, w, seg_mid, n, t, rooms) -> list:
     return [max(score, key=lambda k: score[k])]
 
 
+def sides_now(doc, w) -> list:
+    """The faces of wall ``w`` its cladding is on now: [+1] left, [−1]
+    right, [1, −1] both (the room side worked out as the model does)."""
+    from .engine import spaces
+    from .engine import walls as W
+    want = w.get("clad_side") or "clad_in"
+    if want != "clad_in":
+        return _sides(doc, w, (0, 0), (0, 1), 0.0, [])
+    try:
+        seg = W.centre(w)
+        a, b = seg.p0, seg.p1
+        L = math.dist(a, b)
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        rooms = [r for r in spaces.of_level(doc["arch"], w["level"])
+                 if r["area"] >= 1.0]
+        return _sides(doc, w, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2),
+                      (-u[1], u[0]), float(w["t"]), rooms)
+    except Exception:  # noqa: BLE001
+        return [1]
+
+
+def flipped(doc, w) -> str:
+    """``clad_side`` with the cladding on the wall's other face (both
+    faces stay both)."""
+    now = sides_now(doc, w)
+    if len(now) > 1:
+        return "clad_both"
+    return "clad_r" if now[0] == 1 else "clad_l"
+
+
 def _ceiling_h(doc, lid, rooms, pt) -> float | None:
     """The false ceiling's height over the floor where ``pt`` stands."""
     from shapely.geometry import Point

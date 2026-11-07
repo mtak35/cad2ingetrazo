@@ -205,7 +205,8 @@ def empty() -> dict:
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
-            "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {}}
+            "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
+            "fixture_lib": {}}
 
 
 def load(raw) -> dict:
@@ -288,6 +289,10 @@ def load(raw) -> dict:
     doc["furniture"] = [f for f in raw.get("furniture") or []
                         if isinstance(f, dict) and f.get("level") in ids
                         and f.get("key")]
+    # 3.57: a kind of fixture / furniture (wc, basin, sink…) swapped for
+    # another library model — kept when the CAD's are placed again
+    doc["fixture_lib"] = {k: v for k, v in (raw.get("fixture_lib") or {})
+                          .items() if isinstance(v, dict) and v.get("key")}
     # the fit-out read from the CAD (fitout.py): shower glass, cladding,
     # AC diffusers
     doc["fitout"] = [f for f in raw.get("fitout") or []
@@ -7325,6 +7330,7 @@ def to_curtain(doc, wall_ids) -> tuple:
             if o["wall"] in ids and o["kind"] in ("window", "void")]
     arch["openings"] = [o for o in arch["openings"] if o not in gone]
     fitted = 0
+    placed = {}                       # wall → [(s0, s1)] doors set already
     for o in arch["openings"]:
         if o["wall"] not in ids or o["kind"] != "door":
             continue
@@ -7333,11 +7339,35 @@ def to_curtain(doc, wall_ids) -> tuple:
         width = min(max(float(o["w"]), SINGLE_MAX), DOUBLE_MAX)
         width = min(width, max(L - 0.2, 0.6))
         pos = min(max(float(o["pos"]), width / 2 + 0.05), L - width / 2 - 0.05)
-        # the door keeps its own type and frame (the default door option
-        # or what was picked for it) — only its width and leaves fitted
+        # 3.57: a curtain wall's door — glass in an aluminium frame (a
+        # sliding door stays sliding, in glass), set into the glazing grid:
+        # whole bays, centred on a bay or a mullion nearest where it was
+        style = "sliding" if o.get("style") in ("sliding", "folding") \
+            else ("glass" if o.get("style") == "glass" else "alu_glass")
+        nv = max(1, int(round(L / max(float(w.get("grid", 1.5) or 1.5),
+                                      0.3))))
+        bay = L / nv
+        nb = max(1, int(round(width / bay)))
+        if nb * bay > L - 0.1:
+            nb = max(1, nb - 1)
+        cands = [(k + nb / 2) * bay for k in range(0, nv - nb + 1)]
+        cands.sort(key=lambda c: abs(c - pos))
+        taken = placed.setdefault(o["wall"], [])
+        for c in cands:
+            a_, b_ = c - nb * bay / 2, c + nb * bay / 2
+            if a_ >= -0.001 and b_ <= L + 0.001 and nb * bay >= 0.6 and all(
+                    b_ <= s0 - 0.02 or a_ >= s1 + 0.02 for s0, s1 in taken):
+                try_ = dict(o, w=round(nb * bay, 4), pos=round(c, 4),
+                            style=style, frame="aluminium", head="flat")
+                if check_record(doc, "opening", try_):
+                    continue
+                width, pos = nb * bay, c
+                break
+        taken.append((pos - width / 2, pos + width / 2))
         o.update(w=round(width, 4), pos=round(pos, 4),
-                 leaves=1 if width <= SINGLE_MAX + 0.02 else 2,
-                 head="flat")
+                 leaves=1 if (width <= SINGLE_MAX + 0.02
+                              or style == "sliding") else 2,
+                 head="flat", style=style, frame="aluminium")
         fitted += 1
     return len(gone), fitted
 
@@ -10584,7 +10614,7 @@ def platform_parts(doc) -> dict:
 
     from . import slabedges as SE
     from .host import len_txt
-    out = {"pieces": [], "steps": [], "ramps": []}
+    out = {"pieces": [], "steps": [], "ramps": [], "finish": []}
     if not platform_on(doc):
         return out
     arch = doc["arch"]
@@ -10862,6 +10892,7 @@ def platform_parts(doc) -> dict:
                 for lg in getattr(land, "geoms", [land]):
                     if lg.geom_type == "Polygon" and lg.area > 0.1:
                         out["pieces"].append((lg, zt - fin))
+                        out["finish"].append((lg, zt, None, r_))
             # the top riser running round to the building (a U, an L): the
             # porch it closes against the walls, at the top level too
             cs0 = list(ps[0].coords)
@@ -10873,6 +10904,7 @@ def platform_parts(doc) -> dict:
                 for lg in getattr(porch, "geoms", [porch]):
                     if lg.geom_type == "Polygon" and lg.area > 0.3:
                         out["pieces"].append((lg, zt - fin))
+                        out["finish"].append((lg, zt, None, r_))
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project steps landing")
@@ -10963,6 +10995,19 @@ def platform_parts(doc) -> dict:
             pieces.append((pc, z_top, (dx, dy), r_))
         if not pieces:                # one riser: the platform's edge is it
             continue
+        # the landing before the door — the top step: its tread from the
+        # wall to the platform's edge, and the riser under its edge, in the
+        # steps' finish (3.57: they were bare PCC)
+        try:
+            w0_ = (c[0] + dx * t / 2, c[1] + dy * t / 2)
+            land_ = LineString([w0_, ep]).buffer(wd / 2, cap_style=2)
+            if land_.area > 0.05:
+                edge_ = LineString([(ep[0] - dy * wd / 2, ep[1] + dx * wd / 2),
+                                    (ep[0] + dy * wd / 2,
+                                     ep[1] - dx * wd / 2)])
+                out["finish"].append((land_, surf, (edge_, (dx, dy)), r_))
+        except Exception:  # noqa: BLE001
+            pass
         n_ += 1
         out["steps"].append((f"Entrance steps {n_} ({nr} risers)",
                              [p_ for p_ in pieces if p_[1] - zg > 0.01]))
@@ -11075,12 +11120,50 @@ def _platform_groups(doc):
     fcol = tuple(fcol) if fcol else (0.92, 0.91, 0.88)
     from shapely import affinity as _aff
     from shapely.geometry import LineString as _LS
+    from shapely.ops import unary_union as _uu
+    try:            # the building and the landings (no riser against them)
+        land_u = _uu([q[0].buffer(0.003) for q in parts.get("finish")
+                      or []]) if parts.get("finish") else None
+    except Exception:  # noqa: BLE001
+        land_u = None
     for k, (name, pcs) in enumerate(parts["steps"], 1):
         f_ = []
         for p_ in pcs:
             pc, zt = p_[0], p_[1]
             o = p_[2] if len(p_) > 2 else None
             rr = p_[3] if len(p_) > 3 else 0.15
+            if o is None and ft > 0:
+                # a CAD step strip (no direction): concrete, the tread's
+                # finish, and the riser's finish on its sides not under a
+                # higher step (3.57: they were bare concrete)
+                f_ += _prism(pc, zg, zt - ft)
+                f_ += [dict(fc, color=fcol) for fc in _prism(pc, zt - ft, zt)]
+                if frt > 0:
+                    try:
+                        hi_ = [q[0] for q in pcs if q[1] > zt + 0.01]
+                        ring_ = pc.buffer(frt, join_style=2).difference(
+                            pc.buffer(-0.0005, join_style=2))
+                        if hi_:
+                            ring_ = ring_.difference(
+                                _uu(hi_).buffer(0.003, join_style=2))
+                        if land_u is not None:
+                            ring_ = ring_.difference(land_u)
+                        if any(getattr(g_, "interiors", None) and
+                               len(g_.interiors) for g_ in
+                               getattr(ring_, "geoms", [ring_])):
+                            # a whole ring round the step: cut in two (a
+                            # face with a hole is not drawn here)
+                            c_ = pc.centroid
+                            b_ = pc.bounds
+                            ring_ = ring_.difference(_LS(
+                                [(c_.x, b_[1] - 1), (c_.x, b_[3] + 1)])
+                                .buffer(0.0005))
+                        f_ += [dict(fc, color=fcol) for fc in
+                               _prism(ring_, zg, zt, 0.0005)]
+                    except Exception:  # noqa: BLE001
+                        from .host import log_error
+                        log_error("project step riser finish")
+                continue
             if o is None or ft <= 0:
                 f_ += _prism(pc, zg, zt)
                 continue
@@ -11121,6 +11204,33 @@ def _platform_groups(doc):
                            _prism(rs2, max(zg, zt - rr), zt - ft, 0.002)]
         if f_:
             out.append(grp(name, f_, "steps", k))
+    # the entrance landings / porch at the top of the steps: the steps'
+    # finish on them (tread with its nosing, and the top riser)
+    lf = []
+    if ft > 0:
+        for p_ in parts.get("finish") or []:
+            pg_, zt_, edge_, rr_ = p_
+            try:
+                tf_ = pg_
+                if edge_ is not None and nos + frt > 1e-4:
+                    ln_, (dx_, dy_) = edge_
+                    tf_ = pg_.union(_aff.translate(ln_, dx_ * (nos + frt) / 2,
+                                                   dy_ * (nos + frt) / 2)
+                                    .buffer((nos + frt) / 2, cap_style=2))
+                lf += [dict(fc, color=fcol) for fc in
+                       _prism(tf_.buffer(0), zt_ - ft, zt_ + 0.001)]
+                if edge_ is not None and frt > 0:
+                    ln_, (dx_, dy_) = edge_
+                    rs_ = _aff.translate(ln_, dx_ * frt / 2,
+                                         dy_ * frt / 2).buffer(
+                        frt / 2, cap_style=2)
+                    lf += [dict(fc, color=fcol) for fc in
+                           _prism(rs_, max(zg, zt_ - rr_), zt_ - ft, 0.002)]
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project landing finish")
+    if lf:
+        out.append(grp("Entrance landing finish", lf, "steps", 0))
     for k, (name, f_) in enumerate(parts["ramps"], 1):
         out.append(grp(name, f_, "ramp", k))
     return out
@@ -11504,6 +11614,29 @@ def _furniture_pose(f, pr, z):
     return m
 
 
+def furn_lib(doc, f) -> tuple:
+    """(key, entry) of the library model a furniture / fixture record is
+    drawn as: the one picked for it, else the one picked for its kind
+    (every WC, every basin…), else its own."""
+    o = f.get("lib")
+    if not (isinstance(o, dict) and o.get("key")):
+        o = (doc.get("fixture_lib") or {}).get(f.get("kind") or "") \
+            if f.get("kind") else None
+    if isinstance(o, dict) and o.get("key"):
+        return o["key"], o.get("entry")
+    return f["key"], f.get("entry")
+
+
+def furn_name(doc, f) -> str:
+    o = f.get("lib")
+    if not (isinstance(o, dict) and o.get("key")):
+        o = (doc.get("fixture_lib") or {}).get(f.get("kind") or "") \
+            if f.get("kind") else None
+    if isinstance(o, dict) and o.get("name"):
+        return str(o["name"])
+    return str(f.get("name", "Furniture"))
+
+
 def _furniture_groups(doc):
     """The furniture placed in rooms: IngeTrazo library models, one
     component each (the same model shares its mesh)."""
@@ -11519,7 +11652,7 @@ def _furniture_groups(doc):
     for f in doc.get("furniture") or []:
         if f["level"] not in z_of:
             continue
-        pr = LB.proto(f["key"], f.get("entry"))
+        pr = LB.proto(*furn_lib(doc, f))
         if pr is None:
             continue
         rec = next((r for r in arch["rooms"] if r["id"] == f.get("room")),
@@ -11541,7 +11674,7 @@ def _furniture_groups(doc):
                 h_ = float(f["hang"])
             z = z_of[f["level"]] + h_ - (pr["box"][5] - pr["box"][2])
         base = _furniture_pose(f, pr, z)
-        nm = f"{f.get('name', 'Furniture')} · {names[f['level']]}"
+        nm = f"{furn_name(doc, f)} · {names[f['level']]}"
         if len(pr["parts"]) == 1:
             mesh, xf = pr["parts"][0]
             g = Group(mesh, name=nm)
@@ -11559,7 +11692,7 @@ def _furniture_groups(doc):
             g.xform = base
         g.component = True
         g.layer = level_layer(names[f["level"]])
-        g.ifc = {"class": "IfcFurniture", "name": f.get("name", "")}
+        g.ifc = {"class": "IfcFurniture", "name": furn_name(doc, f)}
         g.ext = {KEY: {"type": "furniture", "id": f["id"],
                        "level": f["level"],
                        "at": [float(f["x"]), float(f["y"]),
@@ -11583,7 +11716,7 @@ def moved_furniture(scene, doc) -> int:
             continue
         m = g.xform
         from . import library as LB0
-        pr0 = LB0.proto(f["key"], f.get("entry"))
+        pr0 = LB0.proto(*furn_lib(doc, f))
         if pr0 is not None and len(pr0["parts"]) == 1 and \
                 pr0["parts"][0][1] is not None:
             inv, ok = pr0["parts"][0][1].inverted()
@@ -11597,7 +11730,7 @@ def moved_furniture(scene, doc) -> int:
         rot = _m.degrees(_m.atan2(ax.y(), ax.x()))
         at = t.get("at") or [f["x"], f["y"], f.get("rot", 0.0)]
         from . import library as LB
-        pr = LB.proto(f["key"], f.get("entry"))
+        pr = LB.proto(*furn_lib(doc, f))
         if pr is None:
             continue
         x0, y0, _z0, x1, y1, _z1 = pr["box"]

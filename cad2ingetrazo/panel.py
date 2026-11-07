@@ -4934,6 +4934,15 @@ class Panel(QWidget):
             a_ = m_.addAction(lab_, lambda k=k_: self.apply_clad(k))
             a_.setCheckable(True)
             a_.setChecked(k_ == now)
+        m_.addSeparator()            # which face of the wall
+        m_.addAction("Flip the cladding to the other face",
+                     lambda: self.apply_clad_side("flip"))
+        side_now = w0.get("clad_side") or "clad_in"
+        for k_, lab_ in _WC.SIDES:
+            a_ = m_.addAction("On: " + lab_,
+                              lambda k=k_: self.apply_clad_side(k))
+            a_.setCheckable(True)
+            a_.setChecked(k_ == side_now)
 
     def _face_pick(self):
         """(wall id, "l" / "r" / None) of the wall face selected (inside the
@@ -5416,6 +5425,26 @@ class Panel(QWidget):
             n += 1
         if n:
             self.commit(doc, f"{_WC.BY.get(kind, kind)}: {n} wall(s)")
+
+    def apply_clad_side(self, side):
+        """The face the selected walls' cladding is on: "flip" (to the
+        other face of each wall) or a key of wallclad.SIDES."""
+        doc = self.doc()
+        n = 0
+        for k, i in self._selected_all():
+            if k != "wall":
+                continue
+            w = PJ.find_record(doc, "wall", i)
+            if w is None:
+                continue
+            w["clad_side"] = _WC.flipped(doc, w) if side == "flip" else side
+            if w.get("clad_side") == "clad_in":
+                w.pop("clad_side", None)
+            n += 1
+        if n:
+            self.commit(doc, ("Cladding flipped" if side == "flip" else
+                              "Cladding on " + dict(_WC.SIDES).get(
+                                  side, side).lower()) + f": {n} wall(s)")
 
     def apply_ceiling(self, kind):
         """A false ceiling of ``kind`` ("none": no ceiling) in the rooms
@@ -7368,6 +7397,23 @@ class Panel(QWidget):
         if sel[0] == "room":
             sub.addAction("Add furniture from the library…",
                           lambda: self.add_furniture_dialog(sel[1]))
+        if sel[0] == "wall" and rec.get("clad") not in (None, "", "none"):
+            sub.addAction("Flip the cladding to the other face",
+                          lambda: self.apply_clad_side("flip"))
+        if sel[0] == "furniture":
+            sub.addAction("Replace with an IngeTrazo library model…",
+                          lambda: self.furn_replace(sel[1], False))
+            kd_ = rec.get("kind")
+            if kd_:
+                n_ = sum(1 for f_ in doc.get("furniture") or []
+                         if f_.get("kind") == kd_)
+                sub.addAction(f"Replace every {self._kind_label(kd_)} "
+                              f"({n_}) with a library model…",
+                              lambda: self.furn_replace(sel[1], True))
+            if rec.get("lib") or (kd_ and kd_ in (doc.get("fixture_lib")
+                                                  or {})):
+                sub.addAction("Back to the model placed first",
+                              lambda: self.furn_replace(sel[1], None))
         if sel[0] == "stairrail":
             sub.addAction("Put back the railing's deleted pieces",
                           lambda: self._rail_restore(sel[1]))
@@ -8764,6 +8810,88 @@ class Panel(QWidget):
         if not ok or lst.currentItem() is None:
             return None
         return lst.currentItem().data(Qt.UserRole)
+
+    @staticmethod
+    def _kind_label(kind) -> str:
+        return {"wc": "WC", "basin": "wash basin", "bathtub": "bathtub",
+                "shower": "shower", "sink": "kitchen sink", "stove":
+                "cooker / hob", "fridge": "fridge"}.get(
+            str(kind), str(kind).replace("_", " "))
+
+    def furn_replace(self, fid, every):
+        """A fixture / furniture piece drawn as another IngeTrazo library
+        model, fitted to its place: this one (``every`` False), every one
+        of its kind — every WC, every basin… kept when the CAD's are placed
+        again — (True), or back to the model placed first (None)."""
+        doc = self.doc()
+        f = PJ.find_record(doc, "furniture", fid)
+        if f is None:
+            return
+        kd = f.get("kind")
+        libs = doc.setdefault("fixture_lib", {})
+        if every is None:
+            f.pop("lib", None)
+            n_ = 1
+            if kd and kd in libs:
+                libs.pop(kd, None)
+                n_ = sum(1 for g in doc["furniture"] if g.get("kind") == kd)
+                for g in doc["furniture"]:
+                    if g.get("kind") == kd:
+                        g.pop("lib", None)
+            self.commit(doc, f"Back to the model placed first ({n_})")
+            return
+        cat = ""
+        try:
+            from . import furnish as FU_
+            cat = FU_.KINDS[kd][1][0][0] if kd in FU_.KINDS else ""
+        except Exception:  # noqa: BLE001
+            cat = ""
+        if not cat:
+            nm = (str(f.get("name", "")) + " " + str(kd or "")).lower()
+            for w_, c_ in (("sink", "Kitchen"), ("stove", "Kitchen"),
+                           ("hob", "Kitchen"), ("fridge", "Kitchen"),
+                           ("cooker", "Kitchen"), ("oven", "Kitchen"),
+                           ("toilet", "Bathroom"), ("wc", "Bathroom"),
+                           ("basin", "Bathroom"), ("shower", "Bathroom"),
+                           ("bath", "Bathroom")):
+                if w_ in nm:
+                    cat = c_
+                    break
+        what = (f"every {self._kind_label(kd)}" if every and kd
+                else f"«{PJ.furn_name(doc, f)}»")
+        e = self.library_picker(
+            f"Replace {what} — CAD2IngeTrazo",
+            f"<b>Replace {what}</b><br><i>The model picked takes its place, "
+            "fitted to the same footprint and turn. "
+            + ("Kept for this kind when the CAD's fixtures are placed "
+               "again." if every and kd else "") + "</i>", cat)
+        if not e:
+            return
+        from . import library as LB
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            pr = LB.proto(e["key"], e.get("entry"))
+        finally:
+            QApplication.restoreOverrideCursor()
+        if pr is None:
+            self.flash(f"Couldn't get «{e['name']}» — check the connection",
+                       8000)
+            return
+        o = {"key": e["key"], "name": e["name"],
+             **({"entry": e["entry"]} if e.get("entry") else {})}
+        if every and kd:
+            libs[kd] = o
+            n_ = 0
+            for g in doc["furniture"]:
+                if g.get("kind") == kd:
+                    g.pop("lib", None)
+                    n_ += 1
+            self.commit(doc, f"Every {self._kind_label(kd)} ({n_}): "
+                             f"{e['name']}")
+        else:
+            f["lib"] = o
+            self.commit(doc, f"{e['name']} in place of "
+                             f"{f.get('name', 'the fixture')}")
 
     def add_furniture_dialog(self, room_id):
         """A library model set in a room, at its middle, on its floor —
