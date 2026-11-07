@@ -5765,10 +5765,13 @@ class Panel(QWidget):
         v.addLayout(row)
         self.r_merge = QCheckBox("Walls as one solid, on the CAD's wall "
                                  "lines (no joints)")
-        self.r_merge.setToolTip("Off: each wall its own solid, as before "
-                                "(a click still picks the wall either way)")
+        self.r_merge.setToolTip("On: the floor's walls one solid with no "
+                                "joints, but a click then picks all the "
+                                "floor's walls together. Off (default): "
+                                "each wall its own element, moved and "
+                                "edited on its own")
         self.r_merge.setChecked(bool(self.doc()["settings"].get(
-            "merge_walls", True)))
+            "merge_walls", False)))
         self.r_merge.toggled.connect(self._merge_toggle)
         v.addWidget(self.r_merge)
         row = QHBoxLayout()
@@ -6024,7 +6027,7 @@ class Panel(QWidget):
 
     def _merge_toggle(self, on):
         doc = self.doc()
-        if bool(doc["settings"].get("merge_walls", True)) == bool(on):
+        if bool(doc["settings"].get("merge_walls", False)) == bool(on):
             return
         doc["settings"]["merge_walls"] = bool(on)
         self.commit(doc, "Walls as one solid" if on else

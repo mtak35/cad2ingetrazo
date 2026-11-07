@@ -102,7 +102,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor", "curtain_type": "curtain",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": True, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": False, "_walls_apart_v1": False, "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -342,6 +342,13 @@ def load(raw) -> dict:
                 s_.pop("grade", None)
     except Exception:  # noqa: BLE001
         pass
+    st_m = doc.setdefault("settings", {})
+    if not st_m.get("_walls_apart_v1"):
+        # 3.56: each wall its own element again (a floor's walls as one
+        # solid made the whole floor one pick — no wall of it could be
+        # moved or edited on its own); «Walls as one solid» turns it on
+        st_m["merge_walls"] = False
+        st_m["_walls_apart_v1"] = True
     return doc
 
 
@@ -8274,7 +8281,7 @@ def _groups(arch, doc=None):
         arch["_fin_t"] = float(st_.get("finish_t", 0.0508) or 0.0) \
             if st_.get("finish_on", True) else 0.0
     if doc is not None and (doc.get("settings") or {}).get("merge_walls",
-                                                            True):
+                                                            False):
         arch["_merge_walls"] = True
         arch["_wall_outline"] = doc.get("wall_outline") or {}
     try:
