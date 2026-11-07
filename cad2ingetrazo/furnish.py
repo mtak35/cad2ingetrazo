@@ -697,6 +697,13 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("furnish.kitchen_runs")
+        try:                 # bedrooms: bed, side tables, a lounge chair;
+            for k_, n_ in dress_rooms(doc, lid, rooms, entries,  # living:
+                                      cache).items():     # sofa side tables
+                got[k_] = got.get(k_, 0) + n_
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("furnish.dress_rooms")
         if doc["settings"].get("room_furniture", True):
             try:             # rooms the plan leaves empty: furnished
                 for k_, n_ in room_sets(doc, lid, rooms, entries,
@@ -707,6 +714,150 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                 log_error("furnish.room_sets")
         out[lid] = got
     return out
+
+
+def _foot(f, w=None, d=None):
+    """A furniture record's footprint (shapely), its fit or ``w`` × ``d``."""
+    from shapely import affinity
+    from shapely.geometry import box
+    fw, fd = (f.get("fit") or [w or 0.5, d or 0.5])[:2]
+    b = box(-fw / 2, -fd / 2, fw / 2, fd / 2)
+    b = affinity.rotate(b, float(f.get("rot", 0.0) or 0.0), origin=(0, 0))
+    return affinity.translate(b, float(f["x"]), float(f["y"]))
+
+
+def dress_rooms(doc, lid, rooms, entries, cache) -> dict:
+    """3.59: a bedroom's bed with a side table each side of its head (a
+    CAD bed block drawn with its tables is split into the bed and the two
+    tables) and a lounge chair where the room has the space; in a living /
+    drawing room the small squares at a sofa's ends are side tables, not
+    chairs."""
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    got = {}
+    st_e = pick("sidetable", 0.45, 0.45, entries, cache)
+    arm_e = pick("armchair", 0.8, 0.8, entries, cache)
+    doors = _doors(doc, lid)
+    # a kitchen the fit-out has fitted (kcounter): the CAD's kitchen
+    # blocks read as furniture make way for its cabinets
+    kk_ = ("cabinet", "corner_cabinet", "wall_cabinet", "island", "ksink",
+           "stove", "fridge")
+    kc_ = [f for f in doc.get("furniture") or [] if f["level"] == lid
+           and f.get("kc")]
+    if kc_:
+        drop_ = set()
+        for r in rooms:
+            if any(r["poly"].contains(Point(f["x"], f["y"])) for f in kc_):
+                drop_ |= {id(f) for f in doc["furniture"] if f["level"] ==
+                          lid and f.get("cad") and not f.get("kc") and
+                          f.get("src") != "fitout" and f.get("kind") in kk_
+                          and r["poly"].buffer(0.3).contains(
+                              Point(f["x"], f["y"]))}
+        doc["furniture"] = [f for f in doc["furniture"]
+                            if id(f) not in drop_]
+    mine = [f for f in doc.get("furniture") or [] if f["level"] == lid]
+    for r in rooms:
+        use = _use(r["name"])
+        poly = r["poly"]
+        here = [f for f in mine if poly.contains(Point(f["x"], f["y"]))]
+        if use in ("living", "dining") or re.search(
+                r"DRAWING|LOUNGE|LIVING|SITTING|FAMILY", str(r["name"]),
+                re.I):
+            sofas = [f for f in here if f.get("kind") == "sofa"]
+            for c in here:
+                if c.get("kind") != "chair" or st_e is None:
+                    continue
+                for sf in sofas:
+                    L_ = max(sf.get("fit") or [2.0, 0.8])
+                    a_ = math.radians(float(sf.get("rot", 0) or 0))
+                    ux, uy = math.cos(a_), math.sin(a_)
+                    dx, dy = c["x"] - sf["x"], c["y"] - sf["y"]
+                    along = abs(dx * ux + dy * uy)
+                    across = abs(-dx * uy + dy * ux)
+                    if L_ / 2 - 0.1 <= along <= L_ / 2 + 0.75 and \
+                            across <= 0.6:
+                        c.update(kind="sidetable", key=st_e["key"],
+                                 name=st_e["name"], rot=sf.get("rot", 0),
+                                 fit=[0.5, 0.5])
+                        if st_e.get("entry"):
+                            c["entry"] = st_e["entry"]
+                        got["sidetable"] = got.get("sidetable", 0) + 1
+                        break
+            continue
+        if use != "bed":
+            continue
+        inner = poly.buffer(-0.05)
+        for b in [f for f in here if f.get("kind") == "bed"]:
+            fb = list(b.get("fit") or [1.8, 2.0])
+            a_ = math.radians(float(b.get("rot", 0) or 0))
+            ux, uy = math.cos(a_), math.sin(a_)        # across the bed
+            hx, hy = -uy, ux                            # toward its head
+            # a block drawn with its side tables: the bed alone
+            if fb[0] > 2.3:
+                fb[0] = round(min(1.95, fb[0] - 0.95), 4)
+                b["fit"] = fb
+            wid, ln_ = fb[0], fb[1]
+            tabs = [f for f in here if f.get("kind") == "sidetable" and
+                    math.dist((f["x"], f["y"]), (b["x"], b["y"])) <
+                    wid / 2 + 1.2]
+            others = [f for f in here if f is not b and f not in tabs]
+            busy = unary_union([_foot(f) for f in others] +
+                               [_foot(b).buffer(0.02)])
+            if len(tabs) < 2 and st_e is not None:
+                hx0 = b["x"] + hx * (ln_ / 2 - 0.25)
+                hy0 = b["y"] + hy * (ln_ / 2 - 0.25)
+                for sg in (1, -1):
+                    cx = hx0 + ux * sg * (wid / 2 + 0.27)
+                    cy = hy0 + uy * sg * (wid / 2 + 0.27)
+                    if any(math.dist((cx, cy), (t["x"], t["y"])) < 0.4
+                           for t in tabs):
+                        continue
+                    t = {"x": cx, "y": cy, "rot": b.get("rot", 0),
+                         "fit": [0.45, 0.42]}
+                    ft = _foot(t)
+                    if not inner.contains(ft) or ft.intersects(busy):
+                        continue
+                    rec = _rec(doc, lid, st_e, "sidetable", cx, cy,
+                               float(b.get("rot", 0) or 0), r,
+                               fit=[0.45, 0.42])
+                    rec["auto"] = True
+                    here.append(rec)
+                    busy = busy.union(ft)
+                    got["sidetable"] = got.get("sidetable", 0) + 1
+            # a lounge chair: by the bed's foot, to a side, facing in
+            if arm_e is None or any(f.get("kind") in ("armchair", "sofa")
+                                    for f in here):
+                continue
+            busy = unary_union([_foot(f) for f in here] +
+                               [Point(p_).buffer(0.9) for p_ in doors])
+            done = False
+            for fwd in (ln_ / 2 + 0.6, ln_ / 2 - 0.2, 0.0):
+                for sg in (1, -1):
+                    for side in (wid / 2 + 1.0, wid / 2 + 1.4):
+                        cx = b["x"] - hx * fwd + ux * sg * side
+                        cy = b["y"] - hy * fwd + uy * sg * side
+                        rc = poly.centroid
+                        # facing the bed / the room's middle
+                        fx, fy = b["x"] - cx, b["y"] - cy
+                        t = {"x": cx, "y": cy,
+                             "rot": back_to(-fx, -fy), "fit": [0.8, 0.8]}
+                        ft = _foot(t)
+                        if not inner.contains(ft.buffer(0.1)) or \
+                                ft.buffer(0.35).intersects(busy):
+                            continue
+                        rec = _rec(doc, lid, arm_e, "armchair", cx, cy,
+                                   t["rot"], r, fit=[0.8, 0.8])
+                        rec["auto"] = True
+                        here.append(rec)
+                        got["armchair"] = got.get("armchair", 0) + 1
+                        done = True
+                        del rc
+                        break
+                    if done:
+                        break
+                if done:
+                    break
+    return got
 
 
 def _rec(doc, lid, e, kind, x, y, rot, room=None, fit=None, auto=False):

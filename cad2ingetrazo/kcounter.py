@@ -144,6 +144,58 @@ def _fill(run, target=0.6, lo=0.3):
     return [run / k] * k
 
 
+def _modules(spans, org, L, w=0.6, lo=0.3):
+    """The cabinets of a counter's free spans, ``w`` wide on a grid from
+    the run's end ``org`` (0 = its start, 1 = its end — the corner), the
+    odd piece left at each span's far side shared out when under ``lo``:
+    [(t0, t1)]."""
+    out = []
+    for s0, s1 in spans:
+        if s1 - s0 < 0.2:
+            continue
+        # whole modules from the span's corner side (its start for org 0,
+        # its end for org 1): the odd one at the far side
+        nk = int((s1 - s0) / w + 1e-6)
+        if org == 2:                 # corners at both ends: from each
+            kl = nk // 2             # corner in, the odd one mid-run
+            kr = nk - kl
+            cuts = [s0 + k * w for k in range(0, kl + 1)] + \
+                [s1 - k * w for k in range(0, kr + 1)]
+        elif org == 0:
+            cuts = [s0 + k * w for k in range(0, nk + 1)] + [s1]
+        else:
+            cuts = [s1 - k * w for k in range(0, nk + 1)] + [s0]
+        cuts = sorted({round(c, 6) for c in cuts})
+        pcs = [(a, b) for a, b in zip(cuts, cuts[1:]) if b - a > 1e-3]
+        # a sliver at an end: joined to its neighbour
+        fixed = []
+        for a, b in pcs:
+            if fixed and (b - a < lo or fixed[-1][1] - fixed[-1][0] < lo):
+                fixed[-1] = (fixed[-1][0], b)
+            else:
+                fixed.append((a, b))
+        # a too-wide joined piece (over 0.9 m): split in two
+        for a, b in fixed:
+            if b - a > 0.9:
+                out += [(a, (a + b) / 2), ((a + b) / 2, b)]
+            elif b - a >= 0.2:
+                out.append((a, b))
+    return out
+
+
+def _curtain_lines(doc, lid):
+    """The curtain walls of level ``lid`` as shapely lines."""
+    from shapely.geometry import LineString
+    out = []
+    for w in doc["arch"]["walls"]:
+        if w["level"] == lid and w.get("type") == "curtain" and "a" in w:
+            try:
+                out.append(LineString([w["a"], w["b"]]))
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
 def runs_of(poly, segs, walls=None, boxes=()):
     """The counter runs along the room's sides: [{"a", "b", "u", "n",
     "L", "d" depth, "spans": [(s0, s1)]}] — n into the room. ``walls``
@@ -328,7 +380,10 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     if base_e is None:
         return 0
     corner_e = _pick(entries, CORNER_WORDS) or base_e
-    upper_e = _pick(entries, UPPER_WORDS, avoid=("corner",))
+    upper_e = _pick(entries, UPPER_WORDS, avoid=("corner", "smaller",
+                                                 "small"))
+    upper_corner_e = _pick(entries, ["upper corner cabinet"])
+    hood_e = _pick(entries, ["range hood", "hood"])
     hob_e = _pick(entries, HOB_WORDS)
     sink_e = _pick(entries, SINK_WORDS)
     fridge_e = FU.pick("fridge", 0.7, 0.7, entries, {})
@@ -363,29 +418,45 @@ def fit(doc, lid, pl, rooms, entries) -> int:
         isl = islands_of(poly, mine, texts, short_pts, walls)
         blocks = _blocks(pl, poly, texts)
         runs = runs_of(poly, mine, walls, [b[0] for b in isl])
-        for k_r, rn in enumerate(runs):
+        # which run owns each corner (the corner cabinets): the longer one
+        for rn in runs:
+            rn["own"] = {}
+            for end, q in rn.get("corners") or []:
+                rn["own"][end] = (rn["L"], id(rn)) > (q["L"], id(q))
+        # a run on a glass wall (curtain wall / mostly windows) or with the
+        # cooker on it takes no upper cabinets (3.59)
+        cw_lines = _curtain_lines(doc, lid)
+        for rn in runs:
+            # the glass along the run: its windows and the curtain walls on
+            # its side — no upper cabinet in front of them
+            gl = []
+            for (ox, oy), ow, kind in openings:
+                off = (ox - rn["a"][0]) * rn["n"][0] + \
+                    (oy - rn["a"][1]) * rn["n"][1]
+                t = (ox - rn["a"][0]) * rn["u"][0] + \
+                    (oy - rn["a"][1]) * rn["u"][1]
+                if abs(off) < 0.4 and kind == "window":
+                    gl.append((t - ow / 2 - 0.05, t + ow / 2 + 0.05))
+            for cl in cw_lines:
+                cs_ = list(cl.coords)
+                offs = [(x - rn["a"][0]) * rn["n"][0] +
+                        (y - rn["a"][1]) * rn["n"][1] for x, y in cs_]
+                if max(abs(o_) for o_ in offs) > 0.4:
+                    continue
+                ts = [(x - rn["a"][0]) * rn["u"][0] +
+                      (y - rn["a"][1]) * rn["u"][1] for x, y in cs_]
+                lo_, hi_ = max(min(ts), 0.0), min(max(ts), rn["L"])
+                if hi_ - lo_ > 0.1:
+                    gl.append((lo_ - 0.05, hi_ + 0.05))
+            rn["glass"] = _merge(gl, 0.05)
+            cover = sum(min(b, rn["L"]) - max(a, 0.0)
+                        for a, b in rn["glass"])
+            rn["no_upper"] = "glass" if cover >= 0.6 * rn["L"] else None
+        for rn in runs:
             d = rn["d"]
             strip = Polygon([rn["a"], rn["b"], _xy(rn, rn["L"], d),
                              _xy(rn, 0.0, d)])
             spans = list(rn["spans"])
-            corner_ends = [e for e, _q in rn.get("corners") or []]
-            # the corner square: one run's (the first of the pair) — a
-            # corner cabinet; the other run stops at its side
-            for end, q in rn.get("corners") or []:
-                mine_corner = id(rn) < id(q)
-                lo, hi = (0.0, q["d"]) if end == 0 else \
-                    (rn["L"] - q["d"], rn["L"])
-                spans = _cut(spans, lo, hi)
-                if mine_corner:
-                    cx, cy = _xy(rn, (lo + hi) / 2, d / 2)
-                    # square with the runs: its back to this run's wall
-                    bx, by = -rn["n"][0], -rn["n"][1]
-                    _rec(FO, doc, lid, corner_e, "corner_cabinet", cx,
-                                 cy, FU.back_to(bx, by), r,
-                                 fit=[q["d"], d], fit_free=True,
-                                 fit_h=BASE_H)
-                    n += 1
-            # the doors in this wall: no cabinet in front of them
             for (ox, oy), ow, kind in openings:
                 off = (ox - rn["a"][0]) * rn["n"][0] + \
                     (oy - rn["a"][1]) * rn["n"][1]
@@ -394,6 +465,39 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                 if abs(off) < 0.4 and kind == "door":
                     spans = _cut(spans, t - ow / 2 - 0.05, t + ow / 2 + 0.05)
             # the sink / hob / fridge the plan sets on the counter
+            for bpoly, kind in blocks:
+                if bpoly.intersection(strip).area < 0.5 * bpoly.area:
+                    continue
+                if kind == "stove":
+                    rn["no_upper"] = rn["no_upper"] or "cooker"
+        # the grid the cabinets keep, from the corner (or from the end
+        # against a wall) out to the free end; uppers on the same grid
+        for rn in runs:
+            d = rn["d"]
+            L = rn["L"]
+            ends = {e: q for e, q in rn.get("corners") or []}
+            org = 2 if (0 in ends and 1 in ends) else \
+                1 if 1 in ends else 0
+            strip = Polygon([rn["a"], rn["b"], _xy(rn, L, d),
+                             _xy(rn, 0.0, d)])
+            spans = list(rn["spans"])
+            # the corner squares
+            for end, q in ends.items():
+                lo, hi = (0.0, q["d"]) if end == 0 else (L - q["d"], L)
+                spans = _cut(spans, lo, hi)
+                if rn["own"].get(end):
+                    cx, cy = _xy(rn, (lo + hi) / 2, d / 2)
+                    _rec(FO, doc, lid, corner_e, "corner_cabinet", cx, cy,
+                         FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                         fit=[q["d"], d], fit_free=True, fit_h=BASE_H)
+                    n += 1
+            for (ox, oy), ow, kind in openings:
+                off = (ox - rn["a"][0]) * rn["n"][0] + \
+                    (oy - rn["a"][1]) * rn["n"][1]
+                t = (ox - rn["a"][0]) * rn["u"][0] + \
+                    (oy - rn["a"][1]) * rn["u"][1]
+                if abs(off) < 0.4 and kind == "door":
+                    spans = _cut(spans, t - ow / 2 - 0.05, t + ow / 2 + 0.05)
             busy, hob_at, fridge_at = [], [], []
             for bpoly, kind in blocks:
                 if bpoly.intersection(strip).area < 0.5 * bpoly.area:
@@ -412,29 +516,32 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                 busy.append((t - w_ / 2, t + w_ / 2))
                 px, py = _xy(rn, t, d / 2)
                 _rec(FO, doc, lid, e_, kind, px, py,
-                             FU.back_to(-rn["n"][0], -rn["n"][1]), r,
-                             fit=[w_, d], fit_free=kind != "fridge")
+                     FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                     fit=[w_, d], fit_free=kind != "fridge")
                 n += 1
                 if kind == "stove":
                     hob_at.append((t - w_ / 2, t + w_ / 2))
+                    if hood_e is not None:       # the hood over the hob
+                        hx, hy = _xy(rn, t, 0.25)
+                        _rec(FO, doc, lid, hood_e, "hood", hx, hy,
+                             FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                             fit=[min(w_, 0.9), 0.5], fit_free=True,
+                             zoff=UPPER_Z + 0.15)
+                        n += 1
                 if kind == "fridge":
                     fridge_at.append((t - w_ / 2, t + w_ / 2))
-            for s0, s1 in spans:
-                ws = _fill(s1 - s0)
-                s = s0
-                for w_ in ws:
-                    px, py = _xy(rn, s + w_ / 2, d / 2)
-                    _rec(FO, doc, lid, base_e, "cabinet", px, py,
-                                 FU.back_to(-rn["n"][0], -rn["n"][1]), r,
-                                 fit=[w_, d], fit_free=True,
-                                 fit_h=BASE_H)
-                    n += 1
-                    s += w_
-            # the upper cabinets: over the run, clear of the windows, the
-            # doors, the hob and the fridge
-            if upper_e is None:
+            for t0, t1 in _modules(spans, org, L):
+                px, py = _xy(rn, (t0 + t1) / 2, d / 2)
+                _rec(FO, doc, lid, base_e, "cabinet", px, py,
+                     FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                     fit=[t1 - t0, d], fit_free=True, fit_h=BASE_H)
+                n += 1
+            # the upper cabinets: on the same grid, from the corner; not on
+            # a glass wall nor on the cooker's, clear of windows, doors and
+            # the fridge
+            if upper_e is None or rn["no_upper"]:
                 continue
-            up = list(_merge(rn["spans"]))
+            up = [(0.0, L)]
             for (ox, oy), ow, kind in openings:
                 off = (ox - rn["a"][0]) * rn["n"][0] + \
                     (oy - rn["a"][1]) * rn["n"][1]
@@ -442,23 +549,41 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                     (oy - rn["a"][1]) * rn["u"][1]
                 if abs(off) < 0.4:
                     up = _cut(up, t - ow / 2 - 0.05, t + ow / 2 + 0.05)
-            for lo, hi in hob_at + fridge_at:
+            for lo, hi in hob_at + fridge_at + list(rn.get("glass") or []):
                 up = _cut(up, lo, hi)
-            for end in corner_ends:          # the corner: the other run's
-                q = next(q_ for e_, q_ in rn["corners"] if e_ == end)
-                if id(rn) > id(q):
-                    up = _cut(up, 0.0, UPPER_D) if end == 0 else \
-                        _cut(up, rn["L"] - UPPER_D, rn["L"])
-            for s0, s1 in up:
-                s = s0
-                for w_ in _fill(s1 - s0, 0.6, 0.3):
-                    px, py = _xy(rn, s + w_ / 2, UPPER_D / 2)
-                    _rec(FO, doc, lid, upper_e, "wall_cabinet", px, py,
-                                 FU.back_to(-rn["n"][0], -rn["n"][1]), r,
-                                 fit=[w_, UPPER_D], fit_free=True,
-                                 fit_h=UPPER_H, zoff=UPPER_Z)
+            # the counter's own extent (no uppers past its ends)
+            lo_ = min(s0 for s0, _s1 in rn["spans"])
+            hi_ = max(s1 for _s0, s1 in rn["spans"])
+            up = [(max(a_, lo_), min(b_, hi_)) for a_, b_ in up
+                  if min(b_, hi_) - max(a_, lo_) > 0.2]
+            for end, q in ends.items():
+                qd = 0.6               # the corner unit: 60 cm each way
+                lo, hi = (0.0, qd) if end == 0 else (L - qd, L)
+                if q.get("no_upper"):
+                    continue                 # the other run has none
+                up = _cut(up, lo, hi)
+                qe = next((e_ for e_, p_ in q.get("corners") or []
+                           if p_ is rn), 0)
+                qlo, qhi = (0.0, qd) if qe == 0 else (q["L"] - qd, q["L"])
+                glass_ = any(a_ < qhi and b_ > qlo for a_, b_ in
+                             list(q.get("glass") or []))
+                if rn["own"].get(end) and upper_corner_e is not None and \
+                        not glass_ and not any(
+                            a_ < hi and b_ > lo for a_, b_ in
+                            list(rn.get("glass") or [])):
+                    cx, cy = _xy(rn, (lo + hi) / 2, qd / 2)
+                    _rec(FO, doc, lid, upper_corner_e, "wall_cabinet", cx,
+                         cy, FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                         fit=[qd, qd], fit_free=True, fit_h=UPPER_H,
+                         zoff=UPPER_Z, corner=True)
                     n += 1
-                    s += w_
+            for t0, t1 in _modules(up, org, L, lo=0.25):
+                px, py = _xy(rn, (t0 + t1) / 2, UPPER_D / 2)
+                _rec(FO, doc, lid, upper_e, "wall_cabinet", px, py,
+                     FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                     fit=[t1 - t0, UPPER_D], fit_free=True,
+                     fit_h=UPPER_H, zoff=UPPER_Z)
+                n += 1
         # the island / serving counter
         for pg, word, hob in isl:
             mrr = pg.minimum_rotated_rectangle
