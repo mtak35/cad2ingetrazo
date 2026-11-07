@@ -382,9 +382,23 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     corner_e = _pick(entries, CORNER_WORDS) or base_e
     upper_e = _pick(entries, UPPER_WORDS, avoid=("corner", "smaller",
                                                  "small"))
-    upper_corner_e = _pick(entries, ["upper corner cabinet"])
+    # the upper corner unit as tall as the upper cabinets (the library
+    # has a 60 and a 72 cm one)
+    ucs = [e for e in entries if e.get("cat") == "Kitchen" and str(
+        e.get("name", "")).strip().lower() == "upper corner cabinet"]
+
+    def _h(e):
+        try:
+            return float(((e.get("entry") or {}).get("cm") or [0, 0, 0])[2])
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+    upper_corner_e = min(ucs, key=lambda e: abs(_h(e) - UPPER_H * 100)) \
+        if ucs else _pick(entries, ["upper corner cabinet"])
     hood_e = _pick(entries, ["range hood", "hood"])
     hob_e = _pick(entries, HOB_WORDS)
+    # a hob set into the worktop (on a cabinet), not a free-standing cooker
+    top_e = _pick(entries, ["cooktop", "gas hob", "ceramic hob",
+                            "induction cooker 4 zones"])
     sink_e = _pick(entries, SINK_WORDS)
     fridge_e = FU.pick("fridge", 0.7, 0.7, entries, {})
     openings = _openings(doc, lid)
@@ -508,17 +522,27 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                 cs = list(bpoly.minimum_rotated_rectangle.exterior.coords)
                 w_ = max(math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2]))
                 w_ = min(max(w_, 0.6), 1.2)
-                e_ = {"ksink": sink_e, "stove": hob_e,
+                e_ = {"ksink": sink_e, "stove": top_e or hob_e,
                       "fridge": fridge_e}.get(kind)
                 if e_ is None:
                     continue
-                spans = _cut(spans, t - w_ / 2, t + w_ / 2)
-                busy.append((t - w_ / 2, t + w_ / 2))
                 px, py = _xy(rn, t, d / 2)
-                _rec(FO, doc, lid, e_, kind, px, py,
-                     FU.back_to(-rn["n"][0], -rn["n"][1]), r,
-                     fit=[w_, d], fit_free=kind != "fridge")
-                n += 1
+                if kind == "stove" and top_e is not None:
+                    # the hob in the worktop, over the cabinets
+                    hw_ = min(w_, 0.75)
+                    _rec(FO, doc, lid, top_e, kind, px, py,
+                         FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                         fit=[hw_, min(d - 0.08, 0.52)], fit_free=True,
+                         zoff=BASE_H)
+                    n += 1
+                    w_ = hw_
+                else:
+                    spans = _cut(spans, t - w_ / 2, t + w_ / 2)
+                    busy.append((t - w_ / 2, t + w_ / 2))
+                    _rec(FO, doc, lid, e_, kind, px, py,
+                         FU.back_to(-rn["n"][0], -rn["n"][1]), r,
+                         fit=[w_, d], fit_free=kind != "fridge")
+                    n += 1
                 if kind == "stove":
                     hob_at.append((t - w_ / 2, t + w_ / 2))
                     if hood_e is not None:       # the hood over the hob
@@ -613,16 +637,22 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                 nv = (-nv[0], -nv[1])         # nv: toward the front
             spans = [(0.0, L)]
             hob_t = None
-            if hob is not None and hob_e is not None:
+            if hob is not None and (top_e or hob_e) is not None:
                 hob_t = (hob[0] - p0[0]) * u[0] + (hob[1] - p0[1]) * u[1]
-                hw = min(0.9, L)
+                hw = min(0.75 if top_e is not None else 0.9, L)
                 hob_t = min(max(hob_t, hw / 2), L - hw / 2)
-                spans = _cut(spans, hob_t - hw / 2, hob_t + hw / 2)
                 hx = c.x + u[0] * (hob_t - L / 2)
                 hy = c.y + u[1] * (hob_t - L / 2)
-                _rec(FO, doc, lid, hob_e, "stove", hx, hy,
-                             FU.back_to(-nv[0], -nv[1]), r,
-                             fit=[hw, D], fit_free=True, island=True)
+                if top_e is not None:     # the hob in the island's top
+                    _rec(FO, doc, lid, top_e, "stove", hx, hy,
+                         FU.back_to(-nv[0], -nv[1]), r,
+                         fit=[hw, min(D - 0.1, 0.52)], fit_free=True,
+                         island=True, zoff=BASE_H)
+                else:
+                    spans = _cut(spans, hob_t - hw / 2, hob_t + hw / 2)
+                    _rec(FO, doc, lid, hob_e, "stove", hx, hy,
+                         FU.back_to(-nv[0], -nv[1]), r,
+                         fit=[hw, D], fit_free=True, island=True)
                 n += 1
             for s0, s1 in spans:
                 s = s0
