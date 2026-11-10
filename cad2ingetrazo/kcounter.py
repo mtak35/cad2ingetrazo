@@ -59,15 +59,17 @@ STYLES = {
     "wood": ("Wood", {
         "cabinet": ["wood lower cabinet"],
         "island": ["wood lower cabinet"],
-        "corner_cabinet": ["wood corner cabinet"],
+        "corner_cabinet": ["wood lower cabinet"],
         "wall_cabinet": ["wood upper cabinet"]}),
     "gray": ("Gray", {
         "cabinet": ["gray cabinet"],
         "island": ["gray cabinet"],
+        "corner_cabinet": ["gray cabinet"],
         "wall_cabinet": ["gray upper cabinet"]}),
     "red": ("Red", {
         "cabinet": ["red cabinet"],
-        "island": ["red cabinet"]}),
+        "island": ["red cabinet"],
+        "corner_cabinet": ["red cabinet"]}),
     "glass": ("Glass-door uppers", {
         "wall_cabinet": ["glass door cabinet", "wood glass door cabinet"]}),
 }
@@ -442,7 +444,10 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     base_e = _pick(entries, BASE_WORDS, avoid=("corner", "sink"))
     if base_e is None:
         return 0
-    corner_e = _pick(entries, CORNER_WORDS) or base_e
+    # 3.62: the corner square takes a plain lower cabinet (a blind corner):
+    # the library's corner units are L / diagonal models whose doors face
+    # one way only — fitted to the square they met the runs crooked
+    corner_e = base_e or _pick(entries, CORNER_WORDS)
     upper_e = _pick(entries, UPPER_WORDS, avoid=("corner", "smaller",
                                                  "small"))
     # the upper corner unit as tall as the upper cabinets (the library
@@ -780,12 +785,25 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                         not glass_ and not any(
                             a_ < hi and b_ > lo for a_, b_ in
                             list(rn.get("glass") or [])):
-                    cx, cy = _xy(rn, (lo + hi) / 2, qd / 2)
-                    _rec(FO, doc, lid, upper_corner_e, "wall_cabinet", cx,
+                    # the upper corner: an L of upper cabinets, each the
+                    # runs' depth — this run's along its wall into the
+                    # corner, the other run's filler up to it (3.62: one
+                    # 60 × 60 box stood out of both runs)
+                    cx, cy = _xy(rn, (lo + hi) / 2, UPPER_D / 2)
+                    _rec(FO, doc, lid, upper_e, "wall_cabinet", cx,
                          cy, FU.back_to(-rn["n"][0], -rn["n"][1]), r,
-                         fit=[qd, qd], fit_free=True, fit_h=UPPER_H,
+                         fit=[qd, UPPER_D], fit_free=True, fit_h=UPPER_H,
                          zoff=UPPER_Z, corner=True)
                     n += 1
+                    if qd - UPPER_D > 0.05:
+                        t_q = (UPPER_D + qd) / 2 if qe == 0 else \
+                            q["L"] - (UPPER_D + qd) / 2
+                        fx, fy = _xy(q, t_q, UPPER_D / 2)
+                        _rec(FO, doc, lid, upper_e, "wall_cabinet", fx,
+                             fy, FU.back_to(-q["n"][0], -q["n"][1]), r,
+                             fit=[qd - UPPER_D, UPPER_D], fit_free=True,
+                             fit_h=UPPER_H, zoff=UPPER_Z, corner=True)
+                        n += 1
             for t0, t1 in _modules(up, org, L, lo=0.25):
                 px, py = _xy(rn, (t0 + t1) / 2, UPPER_D / 2)
                 _rec(FO, doc, lid, upper_e, "wall_cabinet", px, py,

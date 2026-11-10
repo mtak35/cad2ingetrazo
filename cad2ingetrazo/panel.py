@@ -7068,11 +7068,39 @@ class Panel(QWidget):
             self._doc_memo = PJ.get(self.vp.scene)
         except Exception:  # noqa: BLE001
             self._doc_memo = None
+        import time as _t
+        t0_ = _t.monotonic()
         try:
             self._context_menu(menu)
+        except Exception:  # noqa: BLE001
+            # never up to IngeTrazo: an extension's menu that raises is left
+            # out for the rest of the session (3.62 — a selection deleted
+            # by a rebuild made it raise now and then)
+            from .host import log_error
+            log_error("panel.context_menu")
         finally:
             self._doc_memo = None
         self._context_flat(menu)
+        dt_ = _t.monotonic() - t0_
+        if dt_ > 0.6:
+            from .host import log_error
+            log_error(f"panel.context_menu slow: {dt_:.2f} s")
+
+    def _menu_back_on(self) -> None:
+        """CAD2IngeTrazo's right-click entries back on if IngeTrazo switched
+        them off this session (an entry over its 1 s, or one that raised)."""
+        try:
+            off = self.app.window.__dict__.get("_ext_context_off")
+            if not off:
+                return
+            own = self.app.window.__dict__.get("_ext_context_owner") or {}
+            for fn in list(off):
+                who = str(own.get(fn, "")) + " " + str(
+                    getattr(fn, "__module__", ""))
+                if "cad2ingetrazo" in who.lower():
+                    off.discard(fn)
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _context_flat(menu) -> None:
@@ -7315,6 +7343,30 @@ class Panel(QWidget):
             if rec.get("kind", "line") == "line":
                 sub.addAction("Edit part of this wall…",
                               lambda: self.split_wall_dialog(sel[1]))
+                # 3.62: join / split with the walls round it
+                jm_ = sub.addMenu("Join / split")
+                if n > 1:
+                    jm_.addAction(f"Join the {n} walls into one",
+                                  lambda: self.join_walls_cmd(walls))
+                inl_ = PJ.walls_in_line(doc, sel[1])
+                if inl_:
+                    jm_.addAction(
+                        "Join with the wall in line at its end" if
+                        len(inl_) == 1 else
+                        f"Join with the {len(inl_)} walls in line",
+                        lambda: self.join_walls_cmd([sel[1]] + [
+                            q["id"] for q in inl_]))
+                    jm_.addAction("Join the whole straight run",
+                                  lambda: self.join_run_cmd(sel[1]))
+                tees_ = PJ.wall_tees(doc, sel[1])
+                if tees_:
+                    jm_.addAction(
+                        f"Split where the walls meet it ({len(tees_)})",
+                        lambda c=tees_: self.cut_wall_cmd(sel[1], c))
+                jm_.addAction("Split in two at its middle",
+                              lambda: self.cut_wall_cmd(sel[1], None))
+                jm_.addAction("Split at…",
+                              lambda: self.cut_wall_dialog(sel[1]))
             if rec.get("type") == "curtain":
                 sub.addAction(f"Convert {what} to a solid wall",
                               lambda: self.convert_walls(walls, "solid"))
@@ -7702,6 +7754,73 @@ class Panel(QWidget):
             self.flash(f"Not added — {why}")
             return
         self.commit(doc, f"{style.currentText()} added to the curtain wall")
+
+    def join_walls_cmd(self, ids):
+        doc = self.doc()
+        wid, why = PJ.join_walls(doc, list(dict.fromkeys(ids)))
+        if wid is None:
+            self.flash(f"Not joined: {why}", 7000)
+            return
+        self.commit(doc, f"{len(set(ids))} walls joined into one")
+
+    def join_run_cmd(self, wall_id):
+        """The wall and every wall carrying it on in a straight line, end to
+        end (the whole run), made one wall."""
+        doc = self.doc()
+        run, todo = [wall_id], [wall_id]
+        while todo:
+            for q in PJ.walls_in_line(doc, todo.pop()):
+                if q["id"] not in run:
+                    run.append(q["id"])
+                    todo.append(q["id"])
+        self.join_walls_cmd(run)
+
+    def cut_wall_cmd(self, wall_id, cuts):
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wall_id)
+        if w is None:
+            return
+        if cuts is None:
+            import math as _m
+            cuts = [_m.dist(w["a"], w["b"]) / 2]
+        ids, why = PJ.cut_wall(doc, wall_id, cuts)
+        if ids is None:
+            self.flash(f"Not split: {why}", 7000)
+            return
+        self.commit(doc, f"Wall split into {len(ids)}")
+
+    def cut_wall_dialog(self, wall_id):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        doc = self.doc()
+        w = PJ.find_record(doc, "wall", wall_id)
+        if w is None:
+            return
+        import math as _m
+        L = _m.dist(w["a"], w["b"])
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Split the wall — CAD2IngeTrazo")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"<b>{w.get('name', 'Wall')}</b> · {len_txt(L)} long<br><i>"
+            "Cut at these distances from its start (m, comma separated) — "
+            "each piece its own wall.</i>"))
+        from PySide6.QtWidgets import QLineEdit
+        ed = QLineEdit(f"{L / 2:.2f}")
+        lay.addWidget(ed)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        try:
+            cuts = [float(x) for x in ed.text().replace(";", ",").split(",")
+                    if x.strip()]
+        except ValueError:
+            self.flash("Not split: give distances in metres, e.g. 1.5, 3",
+                       7000)
+            return
+        self.cut_wall_cmd(wall_id, cuts)
 
     def split_wall_dialog(self, wall_id):
         """Part of a wall made its own wall (from / to along it), then its
@@ -10190,6 +10309,7 @@ class Panel(QWidget):
 
     def refresh(self):
         """Read the document again (an edit, Ctrl+Z, New, Open)."""
+        self._menu_back_on()
         try:
             self._refresh()
         finally:

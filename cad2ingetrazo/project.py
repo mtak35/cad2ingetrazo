@@ -7292,6 +7292,177 @@ def split_wall(doc, wall_id, s0, s1) -> tuple:
     return ids[want], None
 
 
+def _line_of(w):
+    a, b = tuple(w["a"]), tuple(w["b"])
+    L = math.dist(a, b)
+    if L < 1e-6:
+        return None
+    return a, b, L, ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+
+
+def walls_in_line(doc, wall_id, reach=0.06) -> list:
+    """The walls that carry wall ``wall_id`` on in a straight line from one
+    of its ends (end to end, the same level), nearest first: [wall]."""
+    arch = doc["arch"]
+    w = next((x for x in arch["walls"] if x["id"] == wall_id), None)
+    if w is None or w.get("kind", "line") != "line" or _line_of(w) is None:
+        return []
+    a, b, L, u = _line_of(w)
+    out = []
+    for q in arch["walls"]:
+        if q is w or q.get("level") != w.get("level") or \
+                q.get("kind", "line") != "line" or _line_of(q) is None:
+            continue
+        qa, qb, qL, qu = _line_of(q)
+        if abs(u[0] * qu[1] - u[1] * qu[0]) > 0.02:
+            continue                                  # not in line
+        off = max(abs((p[0] - a[0]) * -u[1] + (p[1] - a[1]) * u[0])
+                  for p in (qa, qb))
+        if off > max(0.03, 0.25 * float(w.get("t", 0.2))):
+            continue
+        d = min(math.dist(e, f) for e in (a, b) for f in (qa, qb))
+        ts = sorted(((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1])
+                    for p in (qa, qb))
+        if d <= reach or (ts[0] < L - 0.01 and ts[1] > 0.01):
+            out.append((d, q))
+    out.sort(key=lambda dq: dq[0])
+    return [q for _d, q in out]
+
+
+def join_walls(doc, ids) -> tuple:
+    """Walls in one straight line, end to end, made one wall: the first's
+    type, height and finishes, its ends the line's far ends; the doors and
+    windows kept where they are along it. (the wall's id, None) or (None,
+    why)."""
+    arch = doc["arch"]
+    ws = [next((x for x in arch["walls"] if x["id"] == i), None) for i in ids]
+    ws = [w for w in ws if w is not None]
+    if len(ws) < 2:
+        return None, "pick two walls (or a wall with one in line at its end)"
+    w0 = ws[0]
+    if any(w.get("kind", "line") != "line" for w in ws):
+        return None, "only straight walls can be joined"
+    if any(w.get("level") != w0.get("level") for w in ws):
+        return None, "the walls are on different floors"
+    a, b, L, u = _line_of(w0)
+    for w in ws[1:]:
+        qa, qb, qL, qu = _line_of(w)
+        if abs(u[0] * qu[1] - u[1] * qu[0]) > 0.02 or max(
+                abs((p[0] - a[0]) * -u[1] + (p[1] - a[1]) * u[0])
+                for p in (qa, qb)) > max(0.05, 0.3 * float(w0.get("t", .2))):
+            return None, "the walls are not in one straight line"
+    spans = sorted(tuple(sorted(((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1])
+                                for p in (tuple(w["a"]), tuple(w["b"]))))
+                   for w in ws)
+    reach = spans[0][1]
+    for t0, t1 in spans[1:]:
+        if t0 > reach + 0.6:
+            return None, "the walls are not end to end (a gap between them)"
+        reach = max(reach, t1)
+    lo, hi = spans[0][0], max(t1 for _t0, t1 in spans)
+    old = {w["id"]: (_line_of(w)) for w in ws}
+    # the openings: where they stand along the new line
+    for o in arch["openings"]:
+        if o.get("wall") in old:
+            qa, qb, qL, qu = old[o["wall"]]
+            cx = qa[0] + qu[0] * float(o["pos"])
+            cy = qa[1] + qu[1] * float(o["pos"])
+            o["wall"] = w0["id"]
+            o["pos"] = round((cx - a[0]) * u[0] + (cy - a[1]) * u[1] - lo, 4)
+    w0["a"] = [round(a[0] + u[0] * lo, 4), round(a[1] + u[1] * lo, 4)]
+    w0["b"] = [round(a[0] + u[0] * hi, 4), round(a[1] + u[1] * hi, 4)]
+    gone = {w["id"] for w in ws[1:]}
+    arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
+    return w0["id"], None
+
+
+def wall_tees(doc, wall_id) -> list:
+    """Where other walls meet wall ``wall_id`` along its length (a T, or a
+    wall crossing it): the distances from its start, clear of its ends."""
+    arch = doc["arch"]
+    w = next((x for x in arch["walls"] if x["id"] == wall_id), None)
+    if w is None or w.get("kind", "line") != "line" or _line_of(w) is None:
+        return []
+    a, b, L, u = _line_of(w)
+    t = float(w.get("t", 0.2))
+    cuts = []
+    for q in arch["walls"]:
+        if q is w or q.get("level") != w.get("level") or \
+                q.get("kind", "line") != "line" or _line_of(q) is None:
+            continue
+        qa, qb, qL, qu = _line_of(q)
+        if abs(u[0] * qu[1] - u[1] * qu[0]) < 0.2:
+            continue                           # along it, not across
+        for p in (qa, qb):
+            off = abs((p[0] - a[0]) * -u[1] + (p[1] - a[1]) * u[0])
+            s_ = (p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1]
+            if off <= t / 2 + float(q.get("t", 0.2)) / 2 + 0.06 and \
+                    0.15 < s_ < L - 0.15:
+                cuts.append(round(s_, 4))
+        # a wall crossing it
+        den = u[0] * qu[1] - u[1] * qu[0]
+        sx = ((qa[0] - a[0]) * qu[1] - (qa[1] - a[1]) * qu[0]) / den
+        sq = ((qa[0] - a[0]) * u[1] - (qa[1] - a[1]) * u[0]) / den
+        if 0.15 < sx < L - 0.15 and 0.15 < sq < qL - 0.15:
+            cuts.append(round(sx, 4))
+    out = []
+    for c in sorted(cuts):
+        if not out or c - out[-1] > 0.1:
+            out.append(c)
+    return out
+
+
+def cut_wall(doc, wall_id, cuts) -> tuple:
+    """A straight wall cut at ``cuts`` (m from its start) into walls of its
+    own, each keeping its type, height, thickness and finishes; doors and
+    windows go with the piece they stand in (a cut through one moves to
+    clear it). ([ids], None) or (None, why)."""
+    arch = doc["arch"]
+    w = next((x for x in arch["walls"] if x["id"] == wall_id), None)
+    if w is None:
+        return None, "no such wall"
+    if w.get("kind", "line") != "line":
+        return None, "only straight walls can be split"
+    a, b, L, u = _line_of(w)
+    ops = [o for o in arch["openings"] if o["wall"] == wall_id]
+    gap = S.END_GAP + 0.01
+    cc = []
+    for c in sorted(float(x) for x in cuts):
+        for _ in range(4):
+            hit = next((o for o in ops if o["pos"] - o["w"] / 2 - gap < c
+                        < o["pos"] + o["w"] / 2 + gap), None)
+            if hit is None:
+                break
+            c = hit["pos"] + hit["w"] / 2 + gap
+        if 0.05 < c < L - 0.05 and (not cc or c - cc[-1] > 0.05):
+            cc.append(c)
+    if not cc:
+        return None, "nowhere to split it (its ends, or through openings)"
+    edges = [0.0] + cc + [L]
+
+    def P(t_):
+        return [round(a[0] + u[0] * t_, 4), round(a[1] + u[1] * t_, 4)]
+    pieces = list(zip(edges, edges[1:]))
+    keep = {k: v for k, v in w.items() if k not in ("id", "name", "a", "b")}
+    recs, ids = [], []
+    for i, (t0, t1) in enumerate(pieces):
+        if i == 0:
+            w["a"], w["b"] = P(t0), P(t1)
+            ids.append(w["id"])
+            continue
+        recs.append(dict(keep, a=P(t0), b=P(t1)))
+    made = M.new_walls(arch["walls"], recs)
+    arch["walls"] += made
+    ids += [m["id"] for m in made]
+    for o in ops:
+        for (t0, t1), wid in zip(pieces, ids):
+            if t0 <= o["pos"] < t1:
+                o["wall"] = wid
+                o["pos"] = round(o["pos"] - t0, 4)
+                break
+    return ids, None
+
+
 LIFT_WORD = re.compile(r"(^|[^A-Z])(LIFTS?|ELEVATORS?|ELEV)([^A-Z]|$)")
 NOT_LIFT = re.compile(r"LOBBY|MACHINE|M/C|FRONT|PASSAGE|CORRIDOR|ROOM")
 
@@ -10754,6 +10925,34 @@ def entrance_zone(doc, lid):
     return unary_union(hit + [s_["zone"] for s_ in sets])
 
 
+def _steps_apart(pcs) -> list:
+    """Step strips that wrap a corner (an L / U of steps round a porch): each
+    tread one piece per level — the strips of a level joined, a lower one
+    cut where a higher one stands (3.62: two flights' strips overlapped at
+    the corner, a tread over a tread)."""
+    try:
+        from shapely.ops import unary_union
+        by = {}
+        for pc, zt, o, rr in pcs:
+            k = round(zt, 4)
+            by.setdefault(k, [[], o, rr])[0].append(pc)
+        out, higher = [], None
+        for k in sorted(by, reverse=True):
+            g, o, rr = by[k]
+            u = unary_union([q.buffer(0.002) for q in g]).buffer(-0.002)
+            if higher is not None:
+                u = u.difference(higher)
+            for q in getattr(u, "geoms", [u]):
+                if q.geom_type == "Polygon" and q.area > 0.01:
+                    out.append((q, k, o, rr))
+            higher = u if higher is None else unary_union([higher, u])
+        return out
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._steps_apart")
+        return pcs
+
+
 def platform_parts(doc) -> dict:
     """The foundation platform under the ground floor (slabs as floors, no
     ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
@@ -10987,8 +11186,9 @@ def platform_parts(doc) -> dict:
             r_ = H / cs_["n"]
             out["steps"].append((
                 f"Entrance steps (CAD) {k_} ({cs_['n']} risers)",
-                [(pc, surf - rank * r_, None, r_) for pc, rank in
-                 cs_["strips"] if surf - rank * r_ - foot_z > 0.01]))
+                _steps_apart([(pc, surf - rank * r_, None, r_)
+                              for pc, rank in cs_["strips"]
+                              if surf - rank * r_ - foot_z > 0.01])))
             continue
         # the steps' own layer: whole riser lines, from the level at one
         # end of the run to the level at the other (a mimber's: up from

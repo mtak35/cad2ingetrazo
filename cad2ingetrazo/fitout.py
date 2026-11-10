@@ -1379,6 +1379,67 @@ def _square_rest(rest, box):
     return affinity.rotate(_bx(x0, y0, x1, y1), ang, origin=o)
 
 
+def _diag_boxes(pl, rooms, P) -> list:
+    """The boxes a dress room's plan draws with a diagonal across each
+    (its wardrobe runs, an L or a U of them, the text in the room beside
+    them): [rectangle], square with the room, overlaps at a shared corner
+    given to the longer box. [] when the room has fewer than one such."""
+    from shapely import affinity
+    from shapely.geometry import box as _bx
+    from shapely.ops import unary_union
+    r = _room_at(rooms, P.x, P.y)
+    if r is None:
+        return []
+    poly = r["poly"]
+    if poly.area > 30.0:
+        return []
+    m = poly.minimum_rotated_rectangle
+    cs = list(m.exterior.coords)
+    ang = math.degrees(math.atan2(cs[1][1] - cs[0][1], cs[1][0] - cs[0][0]))
+    lay = pl["layers"]
+    inner = poly.buffer(0.12)
+    boxes = []
+    for s_ in pl["segs"]:
+        if re.search(r"WALL", str(lay[s_[4]]), re.I):
+            continue
+        a, b = (s_[0], s_[1]), (s_[2], s_[3])
+        dl = math.dist(a, b)
+        if not 0.9 <= dl <= 6.5:
+            continue
+        from shapely.geometry import LineString, Point as _P
+        if not (inner.contains(_P(a)) and inner.contains(_P(b))) or \
+                LineString([a, b]).distance(P) > 2.5:
+            continue
+        da = (math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) - ang) \
+            % 90.0
+        if min(da, 90.0 - da) < 6.0:
+            continue                       # square with the room: a side
+        q = affinity.rotate(LineString([a, b]), -ang, origin=(0, 0))
+        x0, y0, x1, y1 = q.bounds
+        L, Wd = max(x1 - x0, y1 - y0), min(x1 - x0, y1 - y0)
+        if not (0.8 <= L <= 6.5 and 0.35 <= Wd <= 1.1):
+            continue
+        bx = affinity.rotate(_bx(x0, y0, x1, y1), ang, origin=(0, 0))
+        if any(bx.symmetric_difference(o).area < 0.05 for o in boxes):
+            continue
+        boxes.append(bx)
+    if not boxes:
+        return []
+    boxes.sort(key=lambda g: -max(
+        math.dist(*list(g.exterior.coords)[0:2]),
+        math.dist(*list(g.exterior.coords)[1:3])))
+    out, taken = [], None
+    for g in boxes:
+        rest = g if taken is None else g.difference(taken)
+        if rest.area < 0.25:
+            continue
+        if taken is not None and rest.area < g.area - 0.01:
+            rest = _square_rest(rest, g)
+        out.append(rest)
+        taken = g if taken is None else unary_union([taken, g])
+    return out
+
+
 def _box_of_diagonal(pl, P):
     """A cupboard drawn as a diagonal across its box with one side drawn
     from its end (the box not closed): the box, square with that side —
@@ -1461,11 +1522,86 @@ def _dress_boxes(doc, lid, pl, rooms, ward, have, used_t, taken_rooms):
                and math.hypot(s_[2] - s_[0], s_[3] - s_[1]) > 0.05]
     except Exception:  # noqa: BLE001
         WLs = []
+    def _place_box(box):
+        n_ = 0
+        # (the box as the plan draws it — a wall the import closed a
+        # room with across it does not cut it)
+        cs = list(box.exterior.coords)[:-1]
+        a_, b_ = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
+        L, Wd = max(a_, b_), min(a_, b_)
+        if not (0.6 <= L <= 6.0 and 0.3 <= Wd <= 1.2):
+            return None
+        c = box.centroid
+        if any(box.buffer(0.05).contains(Point(f["x"], f["y"]))
+               for f in have):
+            return -1                    # set by hand there
+        e = (cs[0], cs[1]) if a_ >= b_ else (cs[1], cs[2])
+        u = _seg_dir(*e)
+        nrm = (-u[1], u[0])
+        # the back: the long side against a wall (else the one farther
+        # from the room's middle)
+        # (the CAD's own wall: wall-layer lines along that side, just
+        # beyond it — not a wall the import closed a room with)
+        hit = [0.0, 0.0]
+        for ln_ in WLs:
+            (x0, y0), (x1, y1) = ln_
+            dl = math.hypot(x1 - x0, y1 - y0)
+            if abs(((x1 - x0) * nrm[0] + (y1 - y0) * nrm[1]) / dl) > 0.1:
+                continue                         # not along the box
+            mx_, my_ = (x0 + x1) / 2 - c.x, (y0 + y1) / 2 - c.y
+            off_ = mx_ * nrm[0] + my_ * nrm[1]
+            if not (Wd / 2 - 0.03 <= abs(off_) <= Wd / 2 + 0.35):
+                continue
+            t0 = (x0 - c.x) * u[0] + (y0 - c.y) * u[1]
+            t1 = (x1 - c.x) * u[0] + (y1 - c.y) * u[1]
+            ov = min(max(t0, t1), L / 2) - max(min(t0, t1), -L / 2)
+            if ov > 0:
+                hit[0 if off_ > 0 else 1] += ov
+        if max(hit) < 0.2:
+            hit = []
+            for sg in (1, -1):
+                q = Point(c.x + nrm[0] * sg * (Wd / 2 + 0.06),
+                          c.y + nrm[1] * sg * (Wd / 2 + 0.06))
+                side = LineString(
+                    [(q.x - u[0] * L * 0.4, q.y - u[1] * L * 0.4),
+                     (q.x + u[0] * L * 0.4, q.y + u[1] * L * 0.4)])
+                hit.append(side.intersection(WU).length if WU is not None
+                           else 0.0)
+        if abs(hit[0] - hit[1]) > 0.05:
+            sg = 1 if hit[0] > hit[1] else -1
+        else:
+            r_ = _room_at(rooms, c.x, c.y)
+            rc = r_["poly"].centroid if r_ is not None else c
+            sg = -1 if ((rc.x - c.x) * nrm[0] + (rc.y - c.y) * nrm[1]) > 0 \
+                else 1
+        rot = FU.back_to(nrm[0] * sg, nrm[1] * sg)
+        r = _room_at(rooms, c.x, c.y)
+        k = max(int(round(L / 1.0)), 1)
+        for j in range(k):
+            tt = -L / 2 + L / k * (j + 0.5)
+            _furn_rec(doc, lid, ward, "wardrobe", c.x + u[0] * tt,
+                      c.y + u[1] * tt, rot, r, fit=[L / k, Wd],
+                      fit_free=True)
+            n_ += 1
+        return n_
+
     n = 0
     for k_t, t in enumerate(pl.get("texts") or ()):
         if not DRESS_WORDS.search(str(t.get("text", ""))):
             continue
         P = Point(float(t["x"]), float(t["y"]))
+        # 3.62: a dress / wardrobe room drawn with each run's box crossed
+        # by its diagonal (an L, a U of them): every box, the corner they
+        # share given to the longer run
+        dboxes = _diag_boxes(pl, rooms, P)
+        if dboxes:
+            for b_ in dboxes:
+                k_ = _place_box(b_)
+                if k_:
+                    n += max(k_, 0)
+                    taken_rooms.add(("box", b_.buffer(0.05)))
+            used_t.add(k_t)
+            continue
         segs = []
         for s_ in pl["segs"]:
             if math.hypot(s_[2] - s_[0], s_[3] - s_[1]) < 0.01:
@@ -1522,66 +1658,10 @@ def _dress_boxes(doc, lid, pl, rooms, ward, have, used_t, taken_rooms):
             box = _box_of_diagonal(pl, P)
             if box is None:
                 continue
-        # (the box as the plan draws it — a wall the import closed a
-        # room with across it does not cut it)
-        cs = list(box.exterior.coords)[:-1]
-        a_, b_ = math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2])
-        L, Wd = max(a_, b_), min(a_, b_)
-        if not (0.6 <= L <= 6.0 and 0.3 <= Wd <= 1.2):
+        k_ = _place_box(box)
+        if k_ is None:
             continue
-        c = box.centroid
-        if any(box.buffer(0.05).contains(Point(f["x"], f["y"]))
-               for f in have):
-            used_t.add(k_t)
-            continue                    # set by hand there
-        e = (cs[0], cs[1]) if a_ >= b_ else (cs[1], cs[2])
-        u = _seg_dir(*e)
-        nrm = (-u[1], u[0])
-        # the back: the long side against a wall (else the one farther
-        # from the room's middle)
-        # (the CAD's own wall: wall-layer lines along that side, just
-        # beyond it — not a wall the import closed a room with)
-        hit = [0.0, 0.0]
-        for ln_ in WLs:
-            (x0, y0), (x1, y1) = ln_
-            dl = math.hypot(x1 - x0, y1 - y0)
-            if abs(((x1 - x0) * nrm[0] + (y1 - y0) * nrm[1]) / dl) > 0.1:
-                continue                         # not along the box
-            mx_, my_ = (x0 + x1) / 2 - c.x, (y0 + y1) / 2 - c.y
-            off_ = mx_ * nrm[0] + my_ * nrm[1]
-            if not (Wd / 2 - 0.03 <= abs(off_) <= Wd / 2 + 0.35):
-                continue
-            t0 = (x0 - c.x) * u[0] + (y0 - c.y) * u[1]
-            t1 = (x1 - c.x) * u[0] + (y1 - c.y) * u[1]
-            ov = min(max(t0, t1), L / 2) - max(min(t0, t1), -L / 2)
-            if ov > 0:
-                hit[0 if off_ > 0 else 1] += ov
-        if max(hit) < 0.2:
-            hit = []
-            for sg in (1, -1):
-                q = Point(c.x + nrm[0] * sg * (Wd / 2 + 0.06),
-                          c.y + nrm[1] * sg * (Wd / 2 + 0.06))
-                side = LineString(
-                    [(q.x - u[0] * L * 0.4, q.y - u[1] * L * 0.4),
-                     (q.x + u[0] * L * 0.4, q.y + u[1] * L * 0.4)])
-                hit.append(side.intersection(WU).length if WU is not None
-                           else 0.0)
-        if abs(hit[0] - hit[1]) > 0.05:
-            sg = 1 if hit[0] > hit[1] else -1
-        else:
-            r_ = _room_at(rooms, c.x, c.y)
-            rc = r_["poly"].centroid if r_ is not None else c
-            sg = -1 if ((rc.x - c.x) * nrm[0] + (rc.y - c.y) * nrm[1]) > 0 \
-                else 1
-        rot = FU.back_to(nrm[0] * sg, nrm[1] * sg)
-        r = _room_at(rooms, c.x, c.y)
-        k = max(int(round(L / 1.0)), 1)
-        for j in range(k):
-            tt = -L / 2 + L / k * (j + 0.5)
-            _furn_rec(doc, lid, ward, "wardrobe", c.x + u[0] * tt,
-                      c.y + u[1] * tt, rot, r, fit=[L / k, Wd],
-                      fit_free=True)
-            n += 1
+        n += max(k_, 0)
         used_t.add(k_t)
         taken_rooms.add(("box", box.buffer(0.05)))
     return n
