@@ -1488,7 +1488,8 @@ class Panel(QWidget):
                          ("ramps", "Car ramps"),
                          ("rails", "Railings (slab edges)"),
                          ("steps", "Steps (no railing)"),
-                         ("lines", "Lines (low wall / grille / platform)")):
+                         ("lines", "Lines (low wall / grille / platform)"),
+                         ("escalators", "Travelators / escalators")):
             e = QLineEdit()
             lf.addRow(label, e)
             self.i_layers[k] = e

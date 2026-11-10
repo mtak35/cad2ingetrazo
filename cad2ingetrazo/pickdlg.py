@@ -21,6 +21,7 @@ LAYER_ROLES = [("auto", "Auto (as detected)"), ("walls", "Walls"),
                ("stairs", "Stairs"), ("steps", "Steps (entrance / level)"),
                ("rails", "Railings"), ("slab", "Slab edge"),
                ("holes", "Shafts / voids"), ("lift", "Lift"),
+               ("escalators", "Travelators / escalators"),
                ("text", "Room names / text"), ("plot", "Plot boundary"),
                ("grid", "Grid"), ("lines", "Other lines (no element)"),
                ("off", "Off — not read")]
@@ -70,6 +71,44 @@ class Canvas(QWidget):
                     continue
                 self.sets.setdefault(k if 0 <= k < len(self.styles) else -1,
                                      []).append(ln)
+
+    def _texts(self, p):
+        """The plan's texts (room names, notes, levels) at their place and
+        height, once big enough to read — the layers switched off left
+        out."""
+        ts = self.d.get("texts") or ()
+        if not ts:
+            return
+        hidden = set(self.d.get("hidden_layers") or ()) | set(self.off)
+        k = self.scale()
+        W_, H_ = self.width(), self.height()
+        f = QFont()
+        p.setPen(QColor("#f0d37a"))
+        n = 0
+        for t in ts:
+            if t.get("layer") in hidden:
+                continue
+            try:
+                h = float(t.get("h") or 0.0) * k
+                if h < 5.0:
+                    continue
+                q = self.view.map(QPointF(float(t["x"]), float(t["y"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not (-200 <= q.x() <= W_ + 50 and -50 <= q.y() <= H_ + 50):
+                continue
+            f.setPixelSize(max(int(h), 5))
+            p.setFont(f)
+            p.save()
+            p.translate(q)
+            rot = float(t.get("rot") or 0.0)
+            if rot:
+                p.rotate(-rot)
+            p.drawText(QPointF(0, 0), str(t.get("text", ""))[:80])
+            p.restore()
+            n += 1
+            if n > 3000:
+                break
 
     def set_off(self, names):
         self.off = set(names)
@@ -280,6 +319,7 @@ class Canvas(QWidget):
             p.drawLines(self.shown)
         p.resetTransform()
         p.setRenderHint(QPainter.Antialiasing, True)
+        self._texts(p)
         f = QFont()
         f.setPointSize(9)
         f.setBold(True)
@@ -455,7 +495,7 @@ class PortionDialog(QDialog):
         split.addWidget(self._layers_box(drawing, detected or {}))
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
-        split.setSizes([1140, 260])
+        split.setSizes([980, 420])
         v.addWidget(split, 1)
         row = QHBoxLayout()
         self.b_box = QPushButton("1  Draw the box again")
@@ -491,7 +531,7 @@ class PortionDialog(QDialog):
         """Every layer of the CAD on / off: shown here, and read at the
         import (off: left out)."""
         box = QWidget()
-        box.setMaximumWidth(300)
+        box.setMaximumWidth(470)
         lv = QVBoxLayout(box)
         lv.setContentsMargins(0, 0, 0, 0)
         t = QLabel("<b>Layers</b> — untick a layer to leave it out (not "
@@ -507,8 +547,8 @@ class PortionDialog(QDialog):
                 if n is not None:
                     counts[n] = counts.get(n, 0) + 1
         names = sorted(counts)
-        self.tbl = QTableWidget(len(names), 2)
-        self.tbl.setHorizontalHeaderLabels(["On", "Layer"])
+        self.tbl = QTableWidget(len(names), 3)
+        self.tbl.setHorizontalHeaderLabels(["On", "Layer", "Read as"])
         self.tbl.verticalHeader().setVisible(False)
         hh = self.tbl.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -524,7 +564,19 @@ class PortionDialog(QDialog):
                 it.setToolTip(f"Read as: {detected[n]}")
             self.tbl.setItem(i, 1, it)
             cb.toggled.connect(lambda _on: self._apply_off())
-            self._rows.append((n, cb))
+            # what the layer is read as: as detected, or picked here
+            co = QComboBox()
+            for k_, lab_ in LAYER_ROLES:
+                if k_ != "off":
+                    co.addItem(lab_, k_)
+            now_ = self.layer_roles.get(n)
+            if now_ and now_ != "off":
+                co.setCurrentIndex(max(co.findData(now_), 0))
+            if detected.get(n):
+                co.setItemText(0, f"Auto ({detected[n]})")
+            co.currentIndexChanged.connect(lambda _i: self._apply_off())
+            self.tbl.setCellWidget(i, 2, co)
+            self._rows.append((n, cb, co))
         lv.addWidget(self.tbl, 1)
         row = QHBoxLayout()
         for lab, on in (("All on", True), ("All off", False)):
@@ -536,16 +588,21 @@ class PortionDialog(QDialog):
         return box
 
     def _all(self, on):
-        for _n, cb in self._rows:
+        for _n, cb, _co in self._rows:
             cb.blockSignals(True)
             cb.setChecked(on)
             cb.blockSignals(False)
         self._apply_off()
 
     def _apply_off(self):
-        off = [n for n, cb in self._rows if not cb.isChecked()]
+        off = [n for n, cb, _co in self._rows if not cb.isChecked()]
         self.canvas.set_off(off)
-        self.layer_roles = {n: "off" for n in off}
+        roles = {n: "off" for n in off}
+        for n, cb, co in self._rows:
+            r_ = co.currentData()
+            if cb.isChecked() and r_ and r_ != "auto":
+                roles[n] = r_
+        self.layer_roles = roles
 
     @property
     def region(self):

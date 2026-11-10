@@ -53,7 +53,8 @@ DEFAULTS = {
     "text": "*",
     "plot": "*PLOT*, *SITE*, *BOUNDARY*, *PROP*",
     "footings": "*FOOT*, *FOUND*, *FNDN*",
-    "stairs": "*STAIR*, *ESCAL*",
+    "stairs": "*STAIR*, *ESCALERA*",
+    "escalators": "*ESCALAT*, *TRAV*LATOR*, *MOVING*WALK*",
     "grid": "*GRID*, *AXIS*",
     "lift": "*LIFT*, *ELEVATOR*, *CORE*",
     "parking": "*PARK*",
@@ -206,7 +207,7 @@ def empty() -> dict:
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
-            "fixture_lib": {}}
+            "fixture_lib": {}, "escalators": []}
 
 
 def load(raw) -> dict:
@@ -253,6 +254,9 @@ def load(raw) -> dict:
     doc["ramps"] = [r for r in raw.get("ramps") or []
                     if isinstance(r, dict) and r.get("level") in ids
                     and len(r.get("sections") or []) >= 2]
+    doc["escalators"] = [e for e in raw.get("escalators") or []
+                         if isinstance(e, dict) and e.get("level") in ids
+                         and e.get("a") and e.get("b")]
     doc["marks"] = {k: v for k, v in (raw.get("marks") or {}).items()
                     if k in ids and isinstance(v, list)}
     doc["landscape"] = {k: v for k, v in (raw.get("landscape") or {}).items()
@@ -4814,7 +4818,8 @@ def _outer_loops(pieces, gap=1.25, least=20.0, extra=(), names=None):
 
 ROLE_KEYS = ("walls", "doors", "windows", "columns", "beams", "slab", "holes",
              "text", "plot", "footings", "stairs", "grid", "lift", "parking",
-             "cars", "ramps", "bikes", "rails", "steps", "lines")
+             "cars", "ramps", "bikes", "rails", "steps", "lines",
+             "escalators")
 
 
 def layer_patterns(drawing, how, st):
@@ -5001,6 +5006,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         # automatic: every wall the plan holds — 3" partitions to 18"
         # walls — whatever the range typed
         tmin, tmax = min(tmin, 0.07), max(tmax, 0.46)
+    try:            # a wall face drawn twice, a hair apart: one line
+        wall_segs = merge_double_lines(wall_segs)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.merge_double_lines")
     found, ops = walldetect.walls_from(wall_segs, tmin, tmax,
                                        context=pl["segs"])
     recs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
@@ -5624,6 +5634,20 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     else:
         doc["stair_cad"].pop(lid, None)
     rep["stairs"] = len(wells)
+
+    # travelators / escalators on their own layer (a supermarket, a mall)
+    try:
+        from . import escalators as ES_
+        lv_ = next((x for x in arch["levels"] if x["id"] == lid), {})
+        doc["escalators"] = [e for e in doc.get("escalators") or []
+                             if e.get("level") != lid] + ES_.detect(
+            pl, lid, lambda n: _match(n, P.get("escalators") or []),
+            float(lv_.get("height", 3.66) or 3.66))
+        rep["escalators"] = sum(1 for e in doc["escalators"]
+                                if e.get("level") == lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.escalators")
 
     # car parking, car ramps and the level notes, as the CAD draws them
     try:
@@ -7021,6 +7045,80 @@ def add_labelled_shafts(doc, lids=None) -> int:
                 except Exception:  # noqa: BLE001
                     continue
     return n
+
+
+def merge_double_lines(segs, tol=0.035):
+    """A plan's wall faces drawn twice, 1–35 mm apart (a copy pasted over,
+    a polyline and its line): each such bundle of parallel, overlapping
+    lines made one line in their middle — the wall detection then pairs
+    the faces a wall's thickness apart, not the copies a hair apart."""
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+    segs = list(segs)
+    ls = [LineString([(q[0], q[1]), (q[2], q[3])]) for q in segs]
+    idx = [i for i, l in enumerate(ls) if l.length > 0.3]
+    if len(idx) < 2:
+        return segs
+    tree = STRtree([ls[i] for i in idx])
+    # greedy, longest first: a line takes the lines a hair off IT (not a
+    # chain of them — a 4" wall's two doubled faces stay two faces)
+    order = sorted(idx, key=lambda i: -ls[i].length)
+    taken = set()
+    groups = {}
+    for i in order:
+        if i in taken:
+            continue
+        a = ls[i]
+        (x0, y0), (x1, y1) = a.coords
+        La = a.length
+        ux, uy = (x1 - x0) / La, (y1 - y0) / La
+        grp = [i]
+        for kk in tree.query(a.buffer(tol)):
+            j = idx[int(kk)]
+            if j == i or j in taken:
+                continue
+            b = ls[j]
+            (p0, q0), (p1, q1) = b.coords
+            Lb = b.length
+            vx, vy = (p1 - p0) / Lb, (q1 - q0) / Lb
+            if abs(ux * vy - uy * vx) > 0.01:
+                continue
+            off = max(abs((p0 - x0) * -uy + (q0 - y0) * ux),
+                      abs((p1 - x0) * -uy + (q1 - y0) * ux))
+            if off > tol or off < 1e-4:
+                continue
+            t0, t1 = sorted(((p0 - x0) * ux + (q0 - y0) * uy,
+                             (p1 - x0) * ux + (q1 - y0) * uy))
+            ov = min(t1, La) - max(t0, 0.0)
+            if ov < 0.8 * min(La, Lb):
+                continue
+            grp.append(j)
+        if len(grp) > 1:
+            taken.update(grp)
+            groups[i] = grp
+    drop = set()
+    out = []
+    for g in groups.values():
+        if len(g) < 2:
+            continue
+        g.sort(key=lambda i: -ls[i].length)
+        a = ls[g[0]]
+        (x0, y0), (x1, y1) = a.coords
+        La = a.length
+        ux, uy = (x1 - x0) / La, (y1 - y0) / La
+        nx, ny = -uy, ux
+        offs = [((ls[i].coords[0][0] - x0) * nx +
+                 (ls[i].coords[0][1] - y0) * ny) for i in g]
+        m = sum(offs) / len(offs)
+        ts = [((c[0] - x0) * ux + (c[1] - y0) * uy)
+              for i in g for c in ls[i].coords]
+        lo, hi = min(ts), max(ts)
+        q = segs[g[0]]
+        out.append((x0 + ux * lo + nx * m, y0 + uy * lo + ny * m,
+                    x0 + ux * hi + nx * m, y0 + uy * hi + ny * m) +
+                   tuple(q[4:]))
+        drop.update(g)
+    return [q for i, q in enumerate(segs) if i not in drop] + out
 
 
 def lift_cores(segs, tmin=0.14, tmax=0.60, close=0.8):
@@ -9033,6 +9131,60 @@ def note_levels(doc, lid) -> list:
     k_abs = 0.3048 if any((h or {}).get("unit_k") in (0.0254, 0.3048)
                           for h in doc["imports"].values()) else 1.0
     marks = [m for m in marks if not m.get("landing")]
+    # 3.61: the levels noted along a car ramp (LEV+1'-0", +2'-0"… up its
+    # slope) are the ramp's, not the floor's: left out
+    try:
+        from shapely.geometry import Point as _Pt, Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        rq = []
+        for r_ in doc.get("ramps") or []:
+            if r_.get("level") != lid:
+                continue
+            sc = r_.get("sections") or []
+            for s0, s1 in zip(sc, sc[1:]):
+                try:
+                    q = _Pg([s0[0], s0[1], s1[1], s1[0]]).buffer(0)
+                    if q.area > 0.01:
+                        rq.append(q)
+                except Exception:  # noqa: BLE001
+                    pass
+        if rq:
+            ru = _uu(rq).buffer(0.6)
+            marks = [m for m in marks
+                     if not ru.contains(_Pt(m["x"], m["y"]))]
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.note_levels ramps")
+    # … and a row of 4+ notes in a line, each a step up from the last (a
+    # ramp the plan draws but no ramp was made of): the ramp's too
+    try:
+        vm = [m for m in marks if m.get("v") is not None]
+        drop_ = set()
+        for ax_ in (0, 1):
+            key_ = "x" if ax_ == 0 else "y"
+            oth_ = "y" if ax_ == 0 else "x"
+            for m in vm:
+                row = sorted([q for q in vm if abs(q[key_] - m[key_]) < 0.4],
+                             key=lambda q: q[oth_])
+                # the run of the row through m, its notes ≤ 4 m apart
+                k0 = row.index(m)
+                lo_, hi_ = k0, k0
+                while lo_ > 0 and row[lo_][oth_] - row[lo_ - 1][oth_] < 4.0:
+                    lo_ -= 1
+                while hi_ < len(row) - 1 and \
+                        row[hi_ + 1][oth_] - row[hi_][oth_] < 4.0:
+                    hi_ += 1
+                run = row[lo_:hi_ + 1]
+                vs = [q["v"] for q in run]
+                if len(run) >= 4 and len(set(round(v, 3) for v in vs)) >= \
+                        len(run) - 1 and (vs == sorted(vs) or
+                                          vs == sorted(vs, reverse=True)):
+                    drop_.update(id(q) for q in run)
+        if drop_:
+            marks = [m for m in marks if id(m) not in drop_]
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.note_levels rows")
     rel = [(m["x"], m["y"], m["v"]) for m in marks if m.get("v") is not None]
     ab = [(m["x"], m["y"], m["a"]) for m in marks if m.get("a") is not None]
     offs = []
@@ -11076,6 +11228,35 @@ def platform_parts(doc) -> dict:
     return out
 
 
+def _escalator_groups(doc):
+    """The travelators / escalators, each a group on its floor's layer."""
+    from core.group import Group
+    from . import escalators as ES_
+    out = []
+    arch = doc["arch"]
+    for k, e in enumerate(doc.get("escalators") or [], 1):
+        lv = next((x for x in arch["levels"] if x["id"] == e.get("level")),
+                  None)
+        if lv is None:
+            continue
+        try:
+            z0 = float(S.levels_info(arch, M.elevations)[lv["id"]]["z0"])
+        except Exception:  # noqa: BLE001
+            z0 = float(lv.get("elev", 0.0) or 0.0)
+        f_ = ES_.faces(e, z0)
+        if not f_:
+            continue
+        nm = "Travelator" if e.get("kind") != "escalator" else "Escalator"
+        g = Group(_mesh_of(f_), name=f"{nm} {k} · {lv['name']}")
+        g.component = False
+        g.layer = level_layer(lv["name"])
+        g.ifc = {"class": "IfcTransportElement", "name": f"{nm} {k}"}
+        g.ext = {KEY: {"type": "escalator", "id": f"esc-{k}",
+                       "level": lv["id"]}}
+        out.append(g)
+    return out
+
+
 def _platform_groups(doc):
     """The foundation platform, its entrance steps and the porch ramp (on
     the ground floor's layer)."""
@@ -12294,6 +12475,11 @@ def commit(viewport, doc, opts=None) -> None:
         log_error("project._plot_groups")
     try:
         new_groups += _platform_groups(doc)
+        try:
+            new_groups += _escalator_groups(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project._escalator_groups")
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")
@@ -12969,6 +13155,86 @@ def stair_treads_whole(segs) -> list:
     return out
 
 
+def split_wide_treads(segs, others, lo=2.6, hi=5.2):
+    """Tread lines 2.6–5.2 m long (a U-stair's two flights side by side
+    drawn with one line through the divider / rail between them): cut
+    where the divider crosses them — two treads. [(a, b)]."""
+    out = []
+    long_ = [(a, b) for a, b in segs if lo < math.dist(a, b) <= hi]
+    if not long_:
+        return segs
+    for a, b in segs:
+        L = math.dist(a, b)
+        if not lo < L <= hi:
+            out.append((a, b))
+            continue
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        cuts = []
+        for q in others:
+            p0, p1 = (q[0], q[1]), (q[2], q[3])
+            d = math.dist(p0, p1)
+            if d < 0.15:
+                continue
+            vx, vy = (p1[0] - p0[0]) / d, (p1[1] - p0[1]) / d
+            if abs(ux * vx + uy * vy) > 0.3:
+                continue                   # not across the tread
+            den = ux * vy - uy * vx
+            if abs(den) < 1e-9:
+                continue
+            wx, wy = p0[0] - a[0], p0[1] - a[1]
+            t = (wx * vy - wy * vx) / den
+            s_ = (wx * uy - wy * ux) / den
+            if 0.25 * L <= t <= 0.75 * L and -0.02 <= s_ <= d + 0.02:
+                cuts.append(t)
+        if not cuts:
+            out.append((a, b))
+            continue
+        mid = sorted(cuts)
+        # the divider: the crossings nearest the tread's middle (its two
+        # faces a few cm apart)
+        c0 = min(mid, key=lambda t: abs(t - L / 2))
+        grp = [t for t in mid if abs(t - c0) <= 0.35]
+        t0, t1 = min(grp), max(grp)
+        if t0 > 0.5:
+            out.append((a, (a[0] + ux * t0, a[1] + uy * t0)))
+        if L - t1 > 0.5:
+            out.append(((a[0] + ux * t1, a[1] + uy * t1), b))
+    return out
+
+
+def drop_tread_hatch(segs, run_max=12.0):
+    """Lines drawn like treads but in a strip longer than any flight
+    (more than ``run_max`` of them evenly spaced in a row: a ramp's or a
+    trench's hatching): taken out of the stair lines."""
+    from collections import defaultdict
+    rows = defaultdict(list)
+    for i, (a, b) in enumerate(segs):
+        L = math.dist(a, b)
+        if not 0.5 <= L <= 2.6:
+            continue
+        ang = round(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+                    % 180)
+        u = (math.cos(math.radians(ang)), math.sin(math.radians(ang)))
+        n = (-u[1], u[0])
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        along = m[0] * u[0] + m[1] * u[1]
+        rows[(ang, round(along / 0.3), round(L / 0.1))].append(
+            (m[0] * n[0] + m[1] * n[1], i))
+    drop = set()
+    for (_k, items) in rows.items():
+        items.sort()
+        run = [items[0]]
+        for it in items[1:] + [None]:
+            if it is not None and 0.15 <= it[0] - run[-1][0] <= 0.45:
+                run.append(it)
+                continue
+            if len(run) >= 2 and run[-1][0] - run[0][0] > run_max:
+                drop.update(i for _o, i in run)
+            if it is not None:
+                run = [it]
+    return [sg for i, sg in enumerate(segs) if i not in drop]
+
+
 def stair_trace(doc, lid):
     """The stairs drawn on the level's CAD plan (its stair layers' tread
     lines), traced: [[flight…] per stair] — see stairs.trace."""
@@ -13012,6 +13278,16 @@ def stair_trace(doc, lid):
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.stair_treads_whole")
+    try:                         # a U's two flights drawn with one line
+        segs = split_wide_treads(segs, pl["segs"])  # across both: apart
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.split_wide_treads")
+    try:                         # a long strip hatched like treads (a
+        segs = drop_tread_hatch(segs)  # ramp, a trench): no stair
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.drop_tread_hatch")
 
     def _is_cut(a_, b_):
         return any(math.dist(a_, c0) < 0.02 and math.dist(b_, c1) < 0.02

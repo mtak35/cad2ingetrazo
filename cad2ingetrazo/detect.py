@@ -15,7 +15,7 @@ import re
 
 ROLES = ("walls", "doors", "windows", "columns", "beams", "slab", "holes",
          "text", "plot", "footings", "stairs", "grid", "lift", "parking",
-         "cars", "ramps", "bikes", "rails", "steps", "lines")
+         "cars", "ramps", "bikes", "rails", "steps", "lines", "escalators")
 
 _W = r"(^|[^A-Z])"            # a word's start: not inside another word
 KEYS = {
@@ -42,7 +42,7 @@ KEYS = {
              r"PROP.?LINE", r"LIMIT"],
     "grid": [r"GRID", r"GIRD", r"AXIS", r"AXES", r"EJE", r"S-GRID", r"CENT.?LINE",
              r"C-L\b"],
-    "stairs": [r"STAIR", r"ESCAL", r"ESCADA", r"TREPP", r"SCALA",
+    "stairs": [r"STAIR", r"ESCAL(?!AT)", r"ESCADA", r"TREPP", r"(^|[^E])SCALA(?!T)",
                r"A-FLOR-STRS", r"RISER", r"TREAD"],
     # steps: a few risers to another level of the same floor (no railing)
     "steps": [r"STEP", r"PELDA", r"ESCALON", r"DEGRAU", r"MARCHE"],
@@ -53,6 +53,9 @@ KEYS = {
     "parking": [r"PARK", r"PRKG", r"ESTACION", r"STALL", r"\bBAY"],
     "cars": [r"(^|[^A-Z])CARS?($|[^A-Z])", r"VEHIC", r"AUTOMOB"],
     "ramps": [r"RAMP", r"RAMPA"],
+    # travelators / escalators: their own units (not stairs)
+    "escalators": [r"ESCALAT", r"TRAV[AEO]L+ATOR", r"TRAVOLATOR",
+                   r"MOVING.?WALK", r"PEOPLE.?MOVER"],
     "bikes": [r"MOTOR\s?-?\s?(BIKE|CYCLE)", r"M\.?\s?CYCLE", r"BIKE",
               r"SCOOTER", r"2\s?-?\s?WHEEL", r"TWO\s?WHEEL"],
     "rails": [r"RAIL", r"(^|[^A-Z])RALL", r"GRILL", r"BALUSTR",

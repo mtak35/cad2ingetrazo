@@ -567,6 +567,12 @@ def auto(doc, cad=None, flip=False) -> dict:
                     stt0.get("stair_dn_skip", True):
                 dn_only += 1          # the stair from below, going DN
                 continue
+            if len(flights) == 1 and sum(len(f["lines"])
+                                         for f in flights) <= 6 or \
+                    max(len(f["lines"]) for f in flights) <= 4:
+                # a single short flight (a few steps down into a pit, a
+                # trench, a sunken room): steps, not the storey's stair
+                continue
             m = _mid(flights[0]["lines"][0])
             room = next((r["poly"] for r in rooms
                          if r["poly"].buffer(0.3).contains(Point(m))), None)

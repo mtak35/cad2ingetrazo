@@ -41,7 +41,7 @@ CLAD_LAYER = re.compile(r"CLAD|\bACP\b|ALUCO|ALU.?COMP|ALUMIN|FACADE.?PAN|"
                         r"A\.C\.P", re.I)
 LOBBY_WORDS = re.compile(r"LOBBY|PASSAGE|CORRIDOR|FOYER|WAITING|RECEPTION|"
                          r"\bHALL\b|ENTRANCE", re.I)
-LIFT_ROOM = re.compile(r"\bLIFT|ELEVAT|\bELEV\b|\bELV\b", re.I)
+LIFT_ROOM = re.compile(r"\bLIFT|ELEVATOR|\bELEV\b|\bELV\b", re.I)
 LIGHT_LAYER = re.compile(r"LIGHT|LIGHTING|LAMP|LUMIN", re.I)
 ELEC_LAYER = re.compile(r"^ELE\b|^ELE[\s_\-]|\bELE\b|ELEC|ELECT|E[\-_]L", re.I)
 LIGHT_NAME = re.compile(r"LIGHT|LAMP|SPOT|DOWN|\bLED\b|BULB|FIXT|CFL|TUBE|"
@@ -616,8 +616,8 @@ def _cars(pl, rooms):
             continue
         c = g.centroid
         out.append((m, _room_at(rooms, c.x, c.y)))
-    if out:
-        return out
+    # (3.61: with the closed cars, the ones drawn in loose lines too — a
+    # plan mixes them)
     # a car drawn in loose lines on the LIFT layer: the outline round
     # each LIFT text
     try:
@@ -643,6 +643,60 @@ def _cars(pl, rooms):
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("fitout._cars lines")
+    try:          # a LIFT text whose car is drawn on another layer (the
+        # car's box, its fixings): the smallest box of any layer's lines
+        # round the text — the shaft's car
+        from shapely.geometry import LineString, Point, box as _bx
+        from shapely.ops import polygonize, unary_union
+        for t in pl.get("texts") or ():
+            if not (LIFT_ROOM.search(str(t.get("text", ""))) or re.search(
+                    r"^\s*(CARGO|PASSENGER|SERVICE|GOODS|FIRE(MAN)?)\b",
+                    str(t.get("text", "")), re.I)):
+                continue
+            x_, y_ = float(t["x"]), float(t["y"])
+            p_ = Point(x_, y_)
+            if any(o.buffer(0.4).contains(p_) for o, _r in out):
+                continue
+            near = _bx(x_ - 2.6, y_ - 2.6, x_ + 2.6, y_ + 2.6)
+            cand = [s_ for s_ in pl["segs"] if near.intersects(LineString(
+                [(s_[0], s_[1]), (s_[2], s_[3])]))]
+            # the box's sides only: square with the longest line about
+            # (the car's X, the door's swing… left out)
+            if not cand:
+                continue
+            lg = max(cand, key=lambda s_: math.dist(s_[:2], s_[2:4]))
+            a0 = math.atan2(lg[3] - lg[1], lg[2] - lg[0])
+            ll = []
+            for s_ in cand:
+                aa = math.atan2(s_[3] - s_[1], s_[2] - s_[0]) - a0
+                dev = abs((math.degrees(aa) + 45.0) % 90.0 - 45.0)
+                if dev < 6.0:
+                    ll.append(LineString([(s_[0], s_[1]), (s_[2], s_[3])]))
+            if len(ll) < 4:
+                continue
+            fs = []
+            for g in polygonize(unary_union(ll)):
+                if not (0.8 <= g.area <= 8.0) or \
+                        not g.buffer(0.3).contains(p_):
+                    continue
+                m = g.minimum_rotated_rectangle
+                cs_ = list(m.exterior.coords)
+                e1 = math.dist(cs_[0], cs_[1])
+                e2 = math.dist(cs_[1], cs_[2])
+                if min(e1, e2) < 0.8 or max(e1, e2) / min(e1, e2) > 2.2 \
+                        or g.area < 0.7 * m.area:
+                    continue
+                fs.append((g.area, m))
+            if not fs:
+                continue
+            m = min(fs, key=lambda q: q[0])[1]
+            if any(o.buffer(0.1).contains(m.centroid) or
+                   m.buffer(0.1).contains(o.centroid) for o, _r in out):
+                continue
+            out.append((m, _room_at(rooms, m.centroid.x, m.centroid.y)))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("fitout._cars text boxes")
     if out:
         return out
     seen = []
