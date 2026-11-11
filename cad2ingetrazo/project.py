@@ -12096,7 +12096,9 @@ def _furniture_pose(f, pr, z):
                 sz = 1.0
                 if f.get("fit_h"):
                     sz = float(f["fit_h"]) / max(z1 - z0, 1e-6)
-                    sz = min(max(sz, 0.7), 1.4)
+                    # (a size dragged by its grips: as set)
+                    sz = min(max(sz, 0.05), 20.0) if f.get("sized") \
+                        else min(max(sz, 0.7), 1.4)
                 m.scale(sx, sy, sz)
             elif 0.75 <= sx <= 1.33 and 0.75 <= sy <= 1.33:
                 m.scale(sx, sy, 1.0)        # (far off: the model's own size)
@@ -12106,21 +12108,10 @@ def _furniture_pose(f, pr, z):
     return m
 
 
-#: the kitchen pieces that take CAD2IngeTrazo's sized handles (3.63)
-HANDLE_KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "upper_corner",
-                "island", "ksink")
-
-
-def handles_on(doc, f) -> bool:
-    return bool(f.get("kc")) and f.get("kind") in HANDLE_KINDS and \
-        bool(doc["settings"].get("k_handles", True))
-
-
 def furn_proto(doc, f):
     """The library model a furniture record is drawn with: as ``furn_lib``
     names it — a kitchen corner unit in the kitchen style's finish (the
-    style's cabinet's body material over it), a kitchen cabinet without
-    the model's own handles when CAD2IngeTrazo's sized ones go on."""
+    style's cabinet's body material over it)."""
     from . import library as LB
     key, entry = furn_lib(doc, f)
     skey = sentry = None
@@ -12130,10 +12121,8 @@ def furn_proto(doc, f):
             "cabinet" if f["kind"] == "corner_cabinet" else "wall_cabinet")
         if isinstance(sty_, dict) and sty_.get("key"):
             skey, sentry = sty_["key"], sty_.get("entry")
-    strip = handles_on(doc, f)
-    if skey or strip:
-        return LB.restyled(key, entry, skey, sentry, strip) or \
-            LB.proto(key, entry)
+    if skey:
+        return LB.restyled(key, entry, skey, sentry) or LB.proto(key, entry)
     return LB.proto(key, entry)
 
 
@@ -12164,6 +12153,49 @@ def furn_name(doc, f) -> str:
     return str(f.get("name", "Furniture"))
 
 
+#: the pieces that show size grips when selected (3.64.2): cabinet units
+GRIP_KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "upper_corner",
+              "island", "ksink", "oven", "fridge", "wardrobe", "serving",
+              "tallunit")
+
+
+def furn_frame(doc, f):
+    """A furniture piece as built: {"x", "y", "rot", "W", "D", "H", "z"}
+    — its footprint's middle, turn, width (its x), depth (its y), height,
+    and the level it stands on. None when it hangs or has no model."""
+    if f.get("hang"):
+        return None
+    pr = furn_proto(doc, f)
+    if pr is None:
+        return None
+    arch = doc["arch"]
+    elev = elevations(arch)
+    z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
+    if f.get("level") not in z_of:
+        return None
+    rec = next((r for r in arch["rooms"] if r["id"] == f.get("room")), None)
+    z = z_of[f["level"]] + (room_finish(doc, rec) if doc["settings"].get(
+        "finish_on", True) else 0.0) + float(f.get("zoff", 0.0) or 0.0)
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    W, D, H = x1 - x0, y1 - y0, z1 - z0
+    fit = f.get("fit")
+    if fit and len(fit) == 2:
+        sx = float(fit[0]) / max(W, 1e-6)
+        sy = float(fit[1]) / max(D, 1e-6)
+        if f.get("fit_free"):
+            W, D = float(fit[0]), float(fit[1])
+            if f.get("fit_h"):
+                sz = float(f["fit_h"]) / max(H, 1e-6)
+                sz = min(max(sz, 0.05), 20.0) if f.get("sized") else \
+                    min(max(sz, 0.7), 1.4)
+                H *= sz
+        elif 0.75 <= sx <= 1.33 and 0.75 <= sy <= 1.33:
+            W, D = float(fit[0]), float(fit[1])
+    return {"x": float(f["x"]), "y": float(f["y"]),
+            "rot": float(f.get("rot", 0.0) or 0.0), "W": W, "D": D, "H": H,
+            "z": z}
+
+
 def _furniture_groups(doc):
     """The furniture placed in rooms: IngeTrazo library models, one
     component each (the same model shares its mesh)."""
@@ -12176,7 +12208,6 @@ def _furniture_groups(doc):
     names = {lv["id"]: lv["name"] for lv in arch["levels"]}
     out = []
     _rooms_cache = {}
-    hfaces_ = {}
     for f in doc.get("furniture") or []:
         if f["level"] not in z_of:
             continue
@@ -12203,17 +12234,6 @@ def _furniture_groups(doc):
             z = z_of[f["level"]] + h_ - (pr["box"][5] - pr["box"][2])
         z += float(f.get("zoff", 0.0) or 0.0)    # a wall cabinet's height
         base = _furniture_pose(f, pr, z)
-        if handles_on(doc, f):          # 3.63: the sized bar handles
-            try:
-                from . import kcounter as KC_
-                hsz_ = float(f.get("handle") or doc["settings"].get(
-                    "k_handle_len", 0.16) or 0.16)
-                if hsz_ > 0.01:
-                    hfaces_.setdefault(f["level"], []).extend(
-                        KC_.handle_faces(f, pr, z, hsz_))
-            except Exception:  # noqa: BLE001
-                from .host import log_error
-                log_error("project.handles")
         nm = f"{furn_name(doc, f)} · {names[f['level']]}"
         if len(pr["parts"]) == 1:
             mesh, xf = pr["parts"][0]
@@ -12238,24 +12258,6 @@ def _furniture_groups(doc):
                        "at": [float(f["x"]), float(f["y"]),
                               float(f.get("rot", 0.0) or 0.0)]}}
         out.append(g)
-    for lid_, fs_ in hfaces_.items():      # the kitchen's handles: one group
-        if not fs_:
-            continue
-        try:
-            from . import kcounter as KC_
-            g = Group(_mesh_of([{"loop": q, "holes": [],
-                                 "color": KC_.HANDLE_COLOR} for q in fs_]),
-                      name=f"Kitchen handles · {names[lid_]}")
-            g.component = False
-            g.material = {"color": KC_.HANDLE_COLOR, "opacity": 1.0}
-            g.layer = level_layer(names[lid_])
-            g.ifc = {"class": "IfcFurniture", "name": "Kitchen handles"}
-            g.ext = {KEY: {"type": "khandles", "id": f"khandles-{lid_}",
-                           "level": lid_}}
-            out.append(g)
-        except Exception:  # noqa: BLE001
-            from .host import log_error
-            log_error("project.handles group")
     return out
 
 

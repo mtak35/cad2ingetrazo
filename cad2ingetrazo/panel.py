@@ -7543,24 +7543,6 @@ class Panel(QWidget):
                 sub.addAction("Back to the model placed first",
                               lambda: self.furn_replace(sel[1], None))
             from . import kcounter as KC_
-            if kd_ in KC_.KITCHEN_KINDS and rec.get("kc"):
-                hm_ = sub.addMenu("Handle size" + (
-                    "" if nf_ == 1 else f" ({nf_} pieces)"))
-                for v_, lab_ in KC_.HANDLE_SIZES:
-                    a_ = hm_.addAction(lab_, lambda v=v_, ids=set(fids_):
-                                       self.apply_handles(v, ids))
-                    a_.setCheckable(True)
-                    a_.setChecked(abs(float(rec.get("handle") or doc[
-                        "settings"].get("k_handle_len", 0.16) or 0) - v_)
-                        < 1e-4)
-                hm_.addAction("No handle on this one" if nf_ == 1 else
-                              "No handles on these",
-                              lambda ids=set(fids_):
-                              self.apply_handles(0.0, ids))
-                hm_.addSeparator()
-                for v_, lab_ in KC_.HANDLE_SIZES:
-                    hm_.addAction(f"Every kitchen cabinet: {lab_}",
-                                  lambda v=v_: self.apply_handles(v))
             if kd_ in KC_.KITCHEN_KINDS:
                 km_ = sub.addMenu("Kitchen cabinet style")
                 now_ = doc["settings"].get("kitchen_style") or "standard"
@@ -8843,21 +8825,6 @@ class Panel(QWidget):
         self.k_style.currentIndexChanged.connect(
             lambda _i: self.apply_kitchen_style(self.k_style.currentData()))
         row.addWidget(self.k_style)
-        # 3.63: CAD2IngeTrazo's bar handles on every kitchen cabinet, sized
-        self.k_handle = QComboBox()
-        self.k_handle.setToolTip(
-            "Bar handles on every kitchen cabinet (lower, upper, corner, "
-            "island, sink unit): their size — or none (the models' own)")
-        self.k_handle.addItem("Handles: model's own", 0.0)
-        for v_, lab_ in _KC.HANDLE_SIZES:
-            self.k_handle.addItem(f"Handles {lab_}", v_)
-        st_ = self.doc()["settings"]
-        self.k_handle.setCurrentIndex(max(self.k_handle.findData(
-            float(st_.get("k_handle_len", 0.16) or 0.16)
-            if st_.get("k_handles", True) else 0.0), 0))
-        self.k_handle.currentIndexChanged.connect(
-            lambda _i: self.apply_handles(self.k_handle.currentData()))
-        row.addWidget(self.k_handle)
         row.addWidget(_btn("Read again", self._fitout_again,
                            "Read the CAD's fit-out again on every imported "
                            "floor (replaces only its own pieces)"))
@@ -9181,36 +9148,6 @@ class Panel(QWidget):
             f["lib"] = o
             self.commit(doc, f"{e['name']} in place of "
                              f"{f.get('name', 'the fixture')}")
-
-    def apply_handles(self, size, ids=None):
-        """The kitchen cabinets' bar handles sized ``size`` m (0: none —
-        the library models' own handles); ``ids``: only those pieces."""
-        doc = self.doc()
-        size = float(size or 0.0)
-        if ids:
-            n = 0
-            for f in doc.get("furniture") or []:
-                if f.get("id") in ids:
-                    f["handle"] = size if size > 0 else 0.001
-                    n += 1
-            if not doc["settings"].get("k_handles", True) and size > 0:
-                doc["settings"]["k_handles"] = True
-            self.commit(doc, f"Handles of {n} cabinet(s): "
-                        + (f"{size * 1000:.0f} mm" if size else "none"))
-            return
-        st = doc["settings"]
-        st["k_handles"] = size > 0
-        if size > 0:
-            st["k_handle_len"] = size
-        for f in doc.get("furniture") or []:
-            f.pop("handle", None)
-        if hasattr(self, "k_handle"):
-            self.k_handle.blockSignals(True)
-            self.k_handle.setCurrentIndex(max(self.k_handle.findData(
-                size if size > 0 else 0.0), 0))
-            self.k_handle.blockSignals(False)
-        self.commit(doc, "Kitchen handles: " + (
-            f"{size * 1000:.0f} mm bars" if size else "the models' own"))
 
     def apply_kitchen_style(self, style):
         """Every kitchen's cabinets (lower, corner, upper, island, sink

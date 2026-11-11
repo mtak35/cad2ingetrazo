@@ -319,6 +319,8 @@ class PlanEdit:
             return False
         if self._box_press(ev):
             return True
+        if self._furn_press(ev):
+            return True
         if self._slab_press(ev):
             return True
         info = self._wall()
@@ -423,6 +425,205 @@ class PlanEdit:
                 dlg._put(d["cur"])
         except Exception:  # noqa: BLE001
             pass
+
+    # ---- a cabinet unit's size grips (3.64.2) ----------------------------------
+    def _furn(self):
+        """The selected cabinet unit: (record, frame) or None."""
+        try:
+            sel = self.panel._selected()
+        except Exception:  # noqa: BLE001
+            return None
+        if not sel or sel[0] != "furniture":
+            return None
+        raw = self._raw()
+        if not raw:
+            return None
+        from . import project as PJ
+        f = next((q for q in raw.get("furniture") or []
+                  if q.get("id") == sel[1]), None)
+        if f is None or f.get("kind") not in PJ.GRIP_KINDS:
+            return None
+        key = (id(raw), sel[1], f.get("x"), f.get("y"), f.get("rot"),
+               repr(f.get("fit")), f.get("fit_h"), f.get("zoff"),
+               f.get("key"), repr(f.get("lib")),
+               repr((raw.get("fixture_lib") or {}).get(f.get("kind"))))
+        c = getattr(self, "_fcache", None)
+        if c is not None and c[0] == key:
+            return f, c[1]
+        fr = PJ.furn_frame(raw, f)
+        self._fcache = (key, fr)
+        return (f, fr) if fr else None
+
+    @staticmethod
+    def _fpt(fr, lx, ly, lz):
+        r = math.radians(fr["rot"])
+        return (fr["x"] + lx * math.cos(r) - ly * math.sin(r),
+                fr["y"] + lx * math.sin(r) + ly * math.cos(r), fr["z"] + lz)
+
+    def _furn_grips(self, fr):
+        """[(axis "x"/"y"/"z", side ±1, grip point, outward 1 m point)]."""
+        W, D, H = fr["W"], fr["D"], fr["H"]
+        out = []
+        for ax, sd, (lx, ly, lz), (ox, oy, oz) in (
+                ("x", 1, (W / 2, 0, H / 2), (1, 0, 0)),
+                ("x", -1, (-W / 2, 0, H / 2), (-1, 0, 0)),
+                ("y", -1, (0, -D / 2, H / 2), (0, -1, 0)),
+                ("y", 1, (0, D / 2, H / 2), (0, 1, 0)),
+                ("z", 1, (0, -D / 2, H), (0, 0, 1)),
+                ("z", -1, (0, -D / 2, 0.0), (0, 0, -1))):
+            out.append((ax, sd, self._fpt(fr, lx, ly, lz),
+                        self._fpt(fr, lx + ox, ly + oy, lz + oz)))
+        return out
+
+    def _furn_press(self, ev) -> bool:
+        got = self._furn()
+        if got is None:
+            return False
+        f, fr = got
+        pos = ev.position()
+        best = None
+        for ax, sd, c, c1 in self._furn_grips(fr):
+            p = self._px(*c)
+            if p is None:
+                continue
+            dd = math.hypot(p[0] - pos.x(), p[1] - pos.y())
+            if dd <= GRAB_PX + 4 and (best is None or dd < best[0]):
+                best = (dd, ax, sd, c, c1, p)
+        if best is None:
+            return False
+        _dd, ax, sd, c, c1, p = best
+        p1 = self._px(*c1)
+        if p1 is None:
+            return False
+        dvec = (p1[0] - p[0], p1[1] - p[1])
+        if math.hypot(*dvec) < 1e-3:
+            self.panel.flash("Turn the view to see that side of the unit, "
+                             "then drag its grip")
+            return True
+        self.drag = {"furn": True, "id": f["id"], "ax": ax, "sd": sd,
+                     "fr0": dict(fr), "fr": dict(fr), "m": 0.0,
+                     "p0": (pos.x(), pos.y()), "dvec": dvec}
+        return True
+
+    @staticmethod
+    def _furn_resize(fr0, ax, sd, m):
+        """The unit's frame with its ``ax`` / ``sd`` side moved ``m`` m out
+        (the opposite side kept)."""
+        fr = dict(fr0)
+        r = math.radians(fr0["rot"])
+        if ax in ("x", "y"):
+            k = "W" if ax == "x" else "D"
+            new = max(fr0[k] + m, 0.1)
+            dm = new - fr0[k]
+            ux, uy = ((math.cos(r), math.sin(r)) if ax == "x" else
+                      (-math.sin(r), math.cos(r)))
+            fr[k] = new
+            fr["x"] = fr0["x"] + ux * sd * dm / 2
+            fr["y"] = fr0["y"] + uy * sd * dm / 2
+        else:
+            new = max(fr0["H"] + m, 0.1)
+            fr["H"] = new
+            if sd < 0:                       # the bottom moved: down / up
+                fr["z"] = fr0["z"] - (new - fr0["H"])
+        return fr
+
+    def _furn_move(self, ev):
+        d = self.drag
+        pos = ev.position()
+        dx, dy = pos.x() - d["p0"][0], pos.y() - d["p0"][1]
+        v = d["dvec"]
+        m = (dx * v[0] + dy * v[1]) / (v[0] * v[0] + v[1] * v[1])
+        m = round(m / 0.01) * 0.01                    # to the centimetre
+        d["m"] = m
+        d["fr"] = self._furn_resize(d["fr0"], d["ax"], d["sd"], m)
+        self.vp.update()
+
+    def _furn_release(self):
+        d, self.drag = self.drag, None
+        if abs(d["m"]) < 1e-6:
+            self.vp.update()
+            return
+        from . import project as PJ
+        doc = PJ.load(self._raw())
+        f = next((q for q in doc.get("furniture") or []
+                  if q.get("id") == d["id"]), None)
+        if f is None:
+            return
+        fr0, fr = d["fr0"], d["fr"]
+        f["fit"] = [round(fr["W"], 4), round(fr["D"], 4)]
+        f["fit_free"] = True
+        f["sized"] = True                 # its height as set (no clamp)
+        f["fit_h"] = round(fr["H"], 4)
+        f["x"], f["y"] = round(fr["x"], 4), round(fr["y"], 4)
+        if abs(fr["z"] - fr0["z"]) > 1e-6:
+            f["zoff"] = round(float(f.get("zoff", 0.0) or 0.0) +
+                              fr["z"] - fr0["z"], 4)
+        from .host import len_txt
+        what = {"x": "width", "y": "depth", "z": "height"}[d["ax"]]
+        val = {"x": fr["W"], "y": fr["D"], "z": fr["H"]}[d["ax"]]
+        self.panel.commit(doc, f"{f.get('name', 'Unit')}: {what} "
+                          f"{len_txt(val)}")
+        try:
+            self.panel._reselect(("furniture", d["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _draw_furn(self, painter):
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QBrush, QColor, QPen
+        dr = self.drag if (self.drag or {}).get("furn") else None
+        if dr is not None:
+            fr = dr["fr"]
+        else:
+            got = self._furn()
+            if got is None:
+                return
+            fr = got[1]
+        W, D, H = fr["W"], fr["D"], fr["H"]
+        P = {}
+        for i, lx in enumerate((-W / 2, W / 2)):
+            for j, ly in enumerate((-D / 2, D / 2)):
+                for k, lz in enumerate((0.0, H)):
+                    P[(i, j, k)] = self._px(*self._fpt(fr, lx, ly, lz))
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(20, 140, 230), 1.4, Qt.DashLine))
+        for a in P:
+            for axn in range(3):
+                if a[axn] == 0:
+                    b = list(a)
+                    b[axn] = 1
+                    pa, pb = P[a], P[tuple(b)]
+                    if pa and pb:
+                        painter.drawLine(QPointF(pa[0], pa[1]),
+                                         QPointF(pb[0], pb[1]))
+        for ax, sd, c, c1 in self._furn_grips(fr):
+            p = self._px(*c)
+            p1 = self._px(*c1)
+            if p is None:
+                continue
+            on = dr is not None and dr["ax"] == ax and dr["sd"] == sd
+            col = QColor(20, 110, 230) if on else QColor(230, 120, 20)
+            painter.setPen(QPen(col, 2.0))
+            if p1 is not None:
+                L = math.hypot(p1[0] - p[0], p1[1] - p[1])
+                if L > 1e-3:
+                    e = (p[0] + (p1[0] - p[0]) / L * 22,
+                         p[1] + (p1[1] - p[1]) / L * 22)
+                    _arrow(painter, p, e)
+            painter.setBrush(QBrush(col))
+            painter.drawEllipse(QPointF(p[0], p[1]), 5.5, 5.5)
+        if dr is not None:                   # the size being set
+            from .host import len_txt
+            for ax, sd, c, _c1 in self._furn_grips(fr):
+                if ax == dr["ax"] and sd == dr["sd"]:
+                    p = self._px(*c)
+                    if p is not None:
+                        painter.setPen(QPen(QColor(20, 110, 230), 1.0))
+                        painter.drawText(QPointF(p[0] + 12, p[1] - 10),
+                                         f"W {len_txt(W)} × D {len_txt(D)}"
+                                         f" × H {len_txt(H)}")
+        painter.restore()
 
     # ---- slab handles ---------------------------------------------------------
     def _slab_press(self, ev) -> bool:
@@ -898,6 +1099,9 @@ class PlanEdit:
         if d.get("box"):
             self._box_move(ev)
             return
+        if d.get("furn"):
+            self._furn_move(ev)
+            return
         if d.get("slab"):
             self._slab_move(ev)
             return
@@ -962,6 +1166,9 @@ class PlanEdit:
     def _release(self, ev):
         if self.drag is not None and self.drag.get("box"):
             self._box_release()
+            return
+        if self.drag is not None and self.drag.get("furn"):
+            self._furn_release()
             return
         if self.drag is not None and self.drag.get("slab"):
             self._slab_release()
@@ -1138,6 +1345,10 @@ class PlanEdit:
                 from . import secbox
                 secbox.draw(self.vp, painter, box)
                 self._draw_box_handles(painter, box)
+        except Exception:  # noqa: BLE001
+            pass
+        try:                                 # a cabinet unit's size grips
+            self._draw_furn(painter)
         except Exception:  # noqa: BLE001
             pass
         rc = getattr(self, "rect", None)
