@@ -2132,6 +2132,19 @@ class Panel(QWidget):
         lrow_.addWidget(self.pl_lawn, 1)
         lrow_.addWidget(_btn("Apply", self._apply_lawn))
         f.addRow("Landscape level (over ground)", lrow_)
+        wrow_ = QHBoxLayout()
+        self.pl_walk = _spin(0, 1.0, 0.1524, 0.0254)
+        self.pl_walk.setToolTip(
+            "The walkways (paved, round the building) and the verandahs: "
+            "their top over the landscape level — 6\" by default")
+        try:
+            self.pl_walk.setValue(float(self.doc()["settings"].get(
+                "walk_up", 0.1524)))
+        except Exception:  # noqa: BLE001
+            pass
+        wrow_.addWidget(self.pl_walk, 1)
+        wrow_.addWidget(_btn("Apply", self._apply_lawn))
+        f.addRow("Walkways / verandahs (over landscape)", wrow_)
         row = QHBoxLayout()
         row.addWidget(_btn("Apply setbacks", self._plot_setbacks,
                            primary=True))
@@ -2459,6 +2472,8 @@ class Panel(QWidget):
     def _apply_lawn(self):
         doc = self.doc()
         doc["settings"]["landscape_h"] = round(self.pl_lawn.value(), 4)
+        if hasattr(self, "pl_walk"):
+            doc["settings"]["walk_up"] = round(self.pl_walk.value(), 4)
         from .host import len_txt
         self.commit(doc, "Landscape level: " + len_txt(
             doc["settings"]["landscape_h"]) + " over the ground")
@@ -7565,6 +7580,21 @@ class Panel(QWidget):
                 sub.addAction("Back to the model placed first",
                               lambda: self.furn_replace(sel[1], None))
             from . import kcounter as KC_
+            if kd_ in KC_.KITCHEN_KINDS and rec.get("kc"):
+                # 3.64.6: the kitchen's finish — every cabinet together
+                st_k = doc["settings"]
+                cm_ = sub.addMenu("Kitchen cabinet colour (all cabinets)")
+                for v_, lab_ in KC_.body_choices():
+                    a_ = cm_.addAction(lab_, lambda v=v_:
+                                       self.apply_kitchen_finish(body=v))
+                    a_.setCheckable(True)
+                    a_.setChecked((st_k.get("k_body") or "") == v_)
+                tm_ = sub.addMenu("Kitchen worktop (marble / granite)")
+                for v_, lab_ in KC_.top_choices():
+                    a_ = tm_.addAction(lab_, lambda v=v_:
+                                       self.apply_kitchen_finish(top=v))
+                    a_.setCheckable(True)
+                    a_.setChecked((st_k.get("k_top") or "") == v_)
             if kd_ in KC_.KITCHEN_KINDS:
                 km_ = sub.addMenu("Kitchen cabinet style")
                 now_ = doc["settings"].get("kitchen_style") or "standard"
@@ -9170,6 +9200,30 @@ class Panel(QWidget):
             f["lib"] = o
             self.commit(doc, f"{e['name']} in place of "
                              f"{f.get('name', 'the fixture')}")
+
+    def apply_kitchen_finish(self, body=None, top=None):
+        """Every kitchen cabinet's colour (``body``) or worktop (``top``)
+        — "" back to the style's / the model's own."""
+        doc = self.doc()
+        st = doc["settings"]
+        what = []
+        if body is not None:
+            if body:
+                st["k_body"] = body
+            else:
+                st.pop("k_body", None)
+            what.append("cabinet colour")
+        if top is not None:
+            if top:
+                st["k_top"] = top
+            else:
+                st.pop("k_top", None)
+            what.append("worktop")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.commit(doc, "Kitchen " + " and ".join(what) + " changed")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def apply_kitchen_style(self, style):
         """Every kitchen's cabinets (lower, corner, upper, island, sink

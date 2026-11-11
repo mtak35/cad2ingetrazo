@@ -85,6 +85,8 @@ DEFAULTS = {
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
     "plinth": 0.15,                # m, ground floor above the plot's ground
     "landscape_h": 0.1524,         # m, the lawns over the natural ground
+    "walk_up": 0.1524,             # m, walkways / verandahs over the lawns
+    "walkways": True,
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "rail_needs_text": True,       # railings only where the CAD writes them
     "stair_max_flight": 14,        # risers in one flight at most
@@ -11114,7 +11116,8 @@ def platform_parts(doc) -> dict:
 
     from . import slabedges as SE
     from .host import len_txt
-    out = {"pieces": [], "steps": [], "ramps": [], "finish": []}
+    out = {"pieces": [], "steps": [], "ramps": [], "finish": [],
+           "walks": [], "drives": []}
     if not platform_on(doc):
         return out
     arch = doc["arch"]
@@ -11310,6 +11313,11 @@ def platform_parts(doc) -> dict:
             foot_z = max(zg, surf - cs_["n"] * rmax_)
             if surf - foot_z < 0.05:
                 foot_z = zg
+            try:            # 3.64.6: landing on the walkway, not under it
+                if st.get("walkways", True):
+                    foot_z = max(foot_z, min(walk_top(doc), surf - 0.1))
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 feet_ = []
                 for lns_, dv_, tr_ in cs_.get("fams") or []:
@@ -11578,10 +11586,85 @@ def platform_parts(doc) -> dict:
                                  f"{len_txt(run)})",
                                  _wedge(p_, q_, (nx * run, ny * run),
                                         top, zg)))
+            # the drive: the ramp's lane on out to the plot's edge
+            out["drives"].append(Polygon([
+                p_, q_, (q_[0] + nx * 80.0, q_[1] + ny * 80.0),
+                (p_[0] + nx * 80.0, p_[1] + ny * 80.0)]))
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.platform_parts porch")
+    # 3.64.6: the walkways — the plot's hard ground round the building
+    # (not the lawns, not the drive) paved above the landscape level
+    try:
+        _walkways(doc, out, lid, zg, fin, G, WP, R)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.platform_parts walkways")
     return out
+
+
+def walk_top(doc) -> float:
+    """The walkways' / verandahs' finished top: the landscape level (6")
+    and the walkways' rise over it (6") above the natural ground."""
+    st = doc["settings"]
+    return plot_top(doc) + float(st.get("landscape_h", 0.1524) or 0.0) + \
+        float(st.get("walk_up", 0.1524) or 0.0)
+
+
+def _walkways(doc, out, lid, zg, fin, G, WP, R):
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    st = doc["settings"]
+    if not st.get("walkways", True):
+        return
+    wt = walk_top(doc)
+    # the verandahs (the platform's parts outside the rooms): never under
+    # the walkways
+    for k, (pg, top) in enumerate(out["pieces"]):
+        c = pg.representative_point()
+        if not R.buffer(0.01).contains(c) and top + fin < wt - 0.005:
+            out["pieces"][k] = (pg, wt - fin)
+    lawns = [Polygon(a).buffer(0) for a in
+             (doc.get("landscape") or {}).get(lid) or []]
+    plot = doc["arch"].get("plot")
+    if plot:
+        from .engine import plotgeo
+        P = Polygon(plotgeo.clean(plot["corners"])).buffer(0)
+        if (doc.get("site") or {}).get("wall"):  # inside the boundary wall
+            P = P.buffer(-float(doc["site"].get("t", 0.23) or 0.23),
+                         join_style=2)
+    elif lawns:
+        # no plot drawn: the ground the lawns and the building take up
+        P = unary_union(lawns + [G, WP]).minimum_rotated_rectangle
+    else:
+        return
+    if P.is_empty:
+        return
+    busy = [G, WP, R] + [pg for pg, _t in out["pieces"]]
+    for _n, pcs in out["steps"]:
+        busy += [q[0] for q in pcs]
+    busy += lawns
+    busy += [d.buffer(0.05) for d in out["drives"]]
+    for s_ in doc["arch"]["structure"]:          # columns, gates' pillars
+        if s_.get("level") == lid and s_.get("corners") and \
+                s_["type"] in ("column", "core"):
+            try:
+                busy.append(Polygon(s_["corners"]).buffer(0))
+            except Exception:  # noqa: BLE001
+                pass
+    free = P.difference(unary_union([b.buffer(0.002) for b in busy
+                                     if not b.is_empty]))
+    for g in getattr(free, "geoms", [free]):
+        if g.geom_type == "Polygon" and g.area >= 0.3 and \
+                g.minimum_rotated_rectangle.area > 0 and \
+                min(_mrr_sides(g)) >= 0.3:
+            out["walks"].append((g, wt))
+
+
+def _mrr_sides(g):
+    import math as _mm
+    cs = list(g.minimum_rotated_rectangle.exterior.coords)
+    return [_mm.dist(cs[0], cs[1]), _mm.dist(cs[1], cs[2])]
 
 
 def _escalator_groups(doc):
@@ -11795,6 +11878,25 @@ def _platform_groups(doc):
         out.append(grp("Entrance landing finish", lf, "steps", 0))
     for k, (name, f_) in enumerate(parts["ramps"], 1):
         out.append(grp(name, f_, "ramp", k))
+    # 3.64.6: the walkways round the building, paved
+    wf_ = []
+    for pg_, wt_ in parts.get("walks") or []:
+        wf_ += [dict(fc, color=(0.72, 0.69, 0.64)) for fc in
+                _prism(pg_, zg, wt_)]
+    if wf_:
+        g_ = grp("Walkways (paving)", wf_, "platform", 9)
+        try:
+            from . import matlib as ML_
+            pa_ = ML_.attrs_of("finish/sandstone_cladding.jpg") or \
+                ML_.attrs_of("finish/slate_tiles.jpg")
+            if pa_:
+                for fc_ in g_.mesh.faces:
+                    n_ = fc_.normal()
+                    if n_.z() > 0.9 * max(n_.length(), 1e-9):
+                        fc_.attrs.update(pa_)
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(g_)
     return out
 
 
@@ -12180,21 +12282,50 @@ def _furniture_pose(f, pr, z):
     return m
 
 
+#: the kitchen pieces a kitchen finish (cabinet colour, worktop) covers
+K_BODY_KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "upper_corner",
+                "island", "ksink")
+K_TOP_KINDS = ("cabinet", "corner_cabinet", "island", "ksink")
+
+
+def finish_attrs(v):
+    """A finish setting → face attrs: «rgb:r,g,b» a colour, else a
+    material key of IngeTrazo's library («finish/walnut_planks.jpg»)."""
+    if not v:
+        return None
+    v = str(v)
+    if v.startswith("rgb:"):
+        try:
+            return {"color": tuple(float(c) for c in v[4:].split(","))[:3]}
+        except ValueError:
+            return None
+    from . import matlib as ML
+    return ML.attrs_of(v)
+
+
 def furn_proto(doc, f):
     """The library model a furniture record is drawn with: as ``furn_lib``
-    names it — a kitchen corner unit in the kitchen style's finish (the
-    style's cabinet's body material over it)."""
+    names it — a kitchen's pieces in one finish (3.64.6): the cabinet
+    colour and the worktop chosen for the kitchen over every cabinet, and
+    the units the style has no model of (the corner units, the sink unit)
+    in the style's cabinet's body."""
     from . import library as LB
     key, entry = furn_lib(doc, f)
-    skey = sentry = None
-    if f.get("kind") in ("corner_cabinet", "upper_corner") and \
+    kind = f.get("kind")
+    if not f.get("kc") or kind not in K_BODY_KINDS:
+        return LB.proto(key, entry)
+    st = doc["settings"]
+    body = finish_attrs(st.get("k_body"))
+    if body is None and kind in ("corner_cabinet", "upper_corner",
+                                 "ksink") and \
             not (isinstance(f.get("lib"), dict) and f["lib"].get("key")):
         sty_ = (doc.get("fixture_lib") or {}).get(
-            "cabinet" if f["kind"] == "corner_cabinet" else "wall_cabinet")
+            "wall_cabinet" if kind == "upper_corner" else "cabinet")
         if isinstance(sty_, dict) and sty_.get("key"):
-            skey, sentry = sty_["key"], sty_.get("entry")
-    if skey:
-        return LB.restyled(key, entry, skey, sentry) or LB.proto(key, entry)
+            body = LB.body_attrs(sty_["key"], sty_.get("entry"))
+    top = finish_attrs(st.get("k_top")) if kind in K_TOP_KINDS else None
+    if body or top:
+        return LB.refinished(key, entry, body, top) or LB.proto(key, entry)
     return LB.proto(key, entry)
 
 

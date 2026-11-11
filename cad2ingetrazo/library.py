@@ -661,3 +661,104 @@ def restyled(key, entry, skey, sentry, strip=False):
         out = pr
     _RESTYLED[ck] = out
     return out
+
+
+def _top_mat(pr):
+    """The model's worktop material: the one with the most up-facing area
+    in its top 12 % — when it is not its body's. Else None."""
+    k_body, _a = _body_mat(pr)
+    top = {}
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    zt = z1 - 0.12 * (z1 - z0)
+    for m, xf in pr["parts"]:
+        if m is None:
+            continue
+        for f in m.faces:
+            try:
+                n = f.normal()
+                if xf is not None:
+                    n = xf.mapVector(n)
+                if n.z() <= 0.5 * max(n.length(), 1e-9):
+                    continue
+                pts = [(xf.map(p_) if xf is not None else p_)
+                       for p_ in f.vertices]
+                if min(q.z() for q in pts) < zt:
+                    continue
+                k = _mat_key(f.attrs)
+                top[k] = top.get(k, 0.0) + f.area()
+            except Exception:  # noqa: BLE001
+                continue
+    if not top:
+        return None
+    k = max(top, key=top.get)
+    return k if k != k_body else None
+
+
+def body_attrs(key, entry):
+    """The body material's attrs of a model (a style's cabinet), or None."""
+    pr = proto(key, entry)
+    if pr is None:
+        return None
+    _k, a = _body_mat(pr)
+    if not a:
+        return None
+    return {kk: a[kk] for kk in ("color", "texture", "mat") if kk in a}
+
+
+def _put(at, new, tile=0.6):
+    for kk in ("color", "texture", "mat"):
+        at.pop(kk, None)
+    at.update({kk: (dict(v) if isinstance(v, dict) else
+                    (tuple(v) if isinstance(v, list) else v))
+               for kk, v in new.items()})
+    tx_ = at.get("texture")
+    if isinstance(tx_, dict):          # the plain projection on this face
+        tx_.pop("uvw", None)
+        tx_["sw"] = tx_["sh"] = tile
+
+
+def refinished(key, entry, body=None, top=None):
+    """Model ``key`` with its carcass / door materials made ``body`` and
+    its worktop made ``top`` (attrs dicts: a colour, a texture; None: as
+    the model has it) — a kitchen's cabinets in one finish (3.64.6)."""
+    if not body and not top:
+        return proto(key, entry)
+    ck = ("fin", key, bool(LOWPOLY[0]), repr(body), repr(top))
+    if ck in _RESTYLED:
+        return _RESTYLED[ck]
+    pr = proto(key, entry)
+    if pr is None:
+        return pr
+    out = pr
+    try:
+        from core.mesh import Mesh
+        k0, _a0 = _body_mat(pr)
+        kb = (_body_mats(pr) | ({k0} if k0 is not None else set())) \
+            if body else set()
+        kt = _top_mat(pr) if top else None
+        kb.discard(kt)
+        parts = []
+        for m, xf in pr["parts"]:
+            nm = Mesh()
+            for f in m.faces:
+                try:
+                    hs = f.holes
+                    nf = nm.add_face(f.vertices, hs) if hs else \
+                        nm.add_face(f.vertices)
+                except Exception:  # noqa: BLE001
+                    continue
+                at = dict(f.attrs)
+                k = _mat_key(at)
+                if top and kt is not None and k == kt:
+                    _put(at, top, 0.6)
+                elif body and k in kb:
+                    _put(at, body, 0.6)
+                nf.attrs = at
+            parts.append((nm, xf))
+        out = {"parts": parts, "box": pr["box"]}
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("library.refinished")
+        out = pr
+    _RESTYLED[ck] = out
+    return out

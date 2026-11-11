@@ -82,7 +82,7 @@ UPPER_CORNER_KEYS = ("online:blendswap-cc-0-173",)
 #: the L units' arms, as fractions of their box: (the arm across the
 #: model's X — its depth along the +X wall —, the arm across Y). Scaled
 #: so each arm is as deep as the run it meets (no step at the joint)
-LOWER_ARMS = (60.4 / 81.0, 48.3 / 82.3)
+LOWER_ARMS = (60.4 / 81.0, 60.0 / 82.3)    # 3.64.6: measured on the OBJ
 UPPER_ARMS = (35.0 / 81.0, 36.0 / 81.0)
 
 
@@ -1067,3 +1067,36 @@ def _blocks(pl, poly, texts):
         big = max(sinks, key=lambda o: o[0].area)
         out = [o for o in out if o[1] != "ksink" or o is big]
     return out
+
+
+#: the kitchen's cabinet colours (3.64.6): "" the style's own
+BODY_COLOURS = [("", "As the style"),
+                ("rgb:0.95,0.95,0.93", "White"),
+                ("rgb:0.93,0.89,0.80", "Ivory"),
+                ("rgb:0.78,0.78,0.76", "Light grey"),
+                ("rgb:0.50,0.51,0.52", "Grey"),
+                ("rgb:0.24,0.25,0.27", "Charcoal"),
+                ("rgb:0.17,0.24,0.36", "Navy"),
+                ("rgb:0.55,0.62,0.50", "Sage green"),
+                ("rgb:0.10,0.10,0.10", "Black")]
+BODY_WOODS = ["finish/oak_planks.jpg", "finish/walnut_planks.jpg",
+              "finish/teak_panel.jpg", "finish/ash_white.jpg"]
+TOP_KEYS = ["finish/statuario_marble.jpg", "finish/carrara_marble.jpg",
+            "finish/botticino_marble.jpg", "finish/emperador_marble.jpg",
+            "finish/marquina_marble.jpg", "finish/black_galaxy_granite.jpg",
+            "misc/white_marble.jpg", "misc/gray_marble.jpg",
+            "misc/beige_granite.jpg", "misc/dark_granite.jpg",
+            "misc/granite.jpg"]
+
+
+def body_choices() -> list:
+    from . import matlib as ML
+    it = ML.items()
+    return BODY_COLOURS + [(k, it[k]["name"]) for k in BODY_WOODS if k in it]
+
+
+def top_choices() -> list:
+    from . import matlib as ML
+    it = ML.items()
+    return [("", "As the cabinet model")] + [
+        (k, it[k]["name"]) for k in TOP_KEYS if k in it]
