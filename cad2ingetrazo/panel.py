@@ -3647,6 +3647,26 @@ class Panel(QWidget):
         self.flash(f"{c} Kitchen Maker cabinets in {n} kitchen(s) — select "
                    "one to edit it with Kitchen Maker · Ctrl+Z undoes", 9000)
 
+    def _set_parapet_style(self, k):
+        if hasattr(self, "pa_style"):
+            i_ = self.pa_style.findData(k)
+            if i_ >= 0 and i_ != self.pa_style.currentIndex():
+                self.pa_style.setCurrentIndex(i_)     # (commits)
+                return
+        doc = self.doc()
+        doc["settings"]["parapet_style"] = k
+        self.commit(doc, "Parapet design changed")
+
+    def _roof_parapet_kind(self, _i=None):
+        doc = self.doc()
+        v = self.pa_roof.currentData()
+        if doc["settings"].get("roof_parapet_kind", "solid") == v:
+            return
+        doc["settings"]["roof_parapet_kind"] = v
+        doc["settings"]["roof_parapet"] = True
+        self.commit(doc, "Roof edge: " + ("solid parapet wall"
+                                          if v == "solid" else "railing"))
+
     def _parapet_style(self, _i=None):
         if getattr(self, "_building", False):
             return
@@ -3983,6 +4003,23 @@ class Panel(QWidget):
             "coping with a short MS grille over it")
         self.pa_style.currentIndexChanged.connect(self._parapet_style)
         f.addRow("Solid parapet design", self.pa_style)
+        # 3.64.8: the roof's edge — a solid parapet wall (the default) or
+        # a railing on an upstand
+        self.pa_roof = QComboBox()
+        self.pa_roof.addItem("Solid parapet wall (4½\", 3'-0\")", "solid")
+        self.pa_roof.addItem("Railing on an upstand (the parapet type)",
+                             "railing")
+        self.pa_roof.setToolTip(
+            "What stands on the roof slab's edge: a solid brick parapet "
+            "(its design: the solid parapet design above) or a railing")
+        try:
+            self.pa_roof.setCurrentIndex(max(self.pa_roof.findData(
+                self.doc()["settings"].get("roof_parapet_kind", "solid")),
+                0))
+        except Exception:  # noqa: BLE001
+            pass
+        self.pa_roof.currentIndexChanged.connect(self._roof_parapet_kind)
+        f.addRow("Roof edge", self.pa_roof)
         row = QHBoxLayout()
         self.t_mat = QComboBox()
         _lab = _ML.labels()
@@ -7544,6 +7581,17 @@ class Panel(QWidget):
         if sel[0] == "room":
             sub.addAction("Add furniture from the library…",
                           lambda: self.add_furniture_dialog(sel[1]))
+        if sel[0] == "wall" and not rec.get("rail") and str(
+                rec.get("name", "")).startswith(PJ.PARAPET_NAMES +
+                                                PJ.AUTO_RAIL):
+            # 3.64.8: the solid parapets' design, from the parapet itself
+            dm_ = sub.addMenu("Parapet design (every solid parapet)")
+            now_ = doc["settings"].get("parapet_style", "coping")
+            for k_, lab_ in PJ.PARAPET_STYLES:
+                a_ = dm_.addAction(lab_, lambda k=k_: self._set_parapet_style(
+                    k))
+                a_.setCheckable(True)
+                a_.setChecked(k_ == now_)
         if sel[0] == "wall" and rec.get("clad") not in (None, "", "none"):
             sub.addAction("Flip the cladding to the other face",
                           lambda: self.apply_clad_side("flip"))

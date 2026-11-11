@@ -106,7 +106,7 @@ DEFAULTS = {
     "thresholds": True, "finish_to_edge": True,
     "curtains": True, "curtain_color": "cream", "curtain_len": "floor", "curtain_type": "curtain",
     "terrace_rails": True, "plaster_t": 0.0127, "terrace_mat": "",
-    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": False, "_walls_apart_v1": False, "kitchen_counters": True, "kitchen_style": "standard", "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
+    "terrace_rail_kind": "railing", "terrace_curb_h": 0.3048, "roof_auto": False, "roof_parapet": True, "roof_parapet_kind": "solid", "auto_rail_sig": "", "ext_finish_drop": 0.3048, "gate_lib": True, "platform": True, "entry_steps": True, "hi_poly": False, "parapet_style": "coping", "riser_max": 0.1524, "tread_ext": 0.3048, "auto_openings": True, "cad_furniture": False, "fitout_on": True, "bath_fixtures": True, "top_stair": False, "col_rebar": False, "balcony_sliding": True, "bath_win_w": 0.6096, "show_lights": True, "show_diffusers": True, "bath_sill": 1.524, "slab_inner_face": True, "merge_walls": False, "_walls_apart_v1": False, "kitchen_counters": True, "kitchen_style": "standard", "rcc_columns_cast": True, "balcony_ceiling": True, "balcony_ceiling_type": "", "sheet_units": "drawing",
     "sheet_pen_cut": 0.5, "sheet_pen_profile": 0.35,
     "sheet_pen_edge": 0.18, "sheet_pen_dim": 0.18,
     "section_box": None,
@@ -1390,6 +1390,8 @@ def restyle_terrace_railings(doc) -> int:
 
 #: the terrace parapet as a wall (by default): 3" thick, plastered
 PARAPET_T = 0.0762
+ROOF_PARAPET_T = 0.1143        # 3.64.8: a 4½" brick parapet on the roof
+ROOF_PARAPET_H = 0.9144        # 3'-0" over the roof slab
 
 
 def terrace_as_wall(st) -> bool:
@@ -6441,7 +6443,7 @@ def ensure_roof(doc) -> str | None:
     return top if made else None
 
 
-AUTO_RAIL = ("Roof edge railing", "Opening railing")
+AUTO_RAIL = ("Roof edge railing", "Opening railing", "Roof edge parapet")
 
 
 def _hole_key(lid, poly):
@@ -6461,14 +6463,17 @@ def freeze_auto_rail(doc, wid) -> bool:
     if w is None or not str(w.get("name", "")).startswith(AUTO_RAIL):
         return False
     lid = w["level"]
-    if str(w["name"]).startswith("Roof edge railing"):
+    if str(w["name"]).startswith(("Roof edge railing",
+                                  "Roof edge parapet")):
+        solid_ = str(w["name"]).startswith("Roof edge parapet")
         st["roof_parapet"] = False
         k = 0
         for x in arch["walls"]:
             if x["level"] == lid and str(x.get("name", "")).startswith(
-                    "Roof edge railing"):
+                    ("Roof edge railing", "Roof edge parapet")):
                 k += 1
-                x["name"] = f"Roof railing {k}"
+                x["name"] = f"Roof parapet {k}" if solid_ else \
+                    f"Roof railing {k}"
         return True
     ln = LineString([w["a"], w["b"]])     # an opening's: the hole it rings
     for e in arch["structure"]:
@@ -6522,7 +6527,8 @@ def opening_parapets(doc) -> int:
                doc.get("man_shafts") or []),
         [st.get(k) for k in ("parapet_rail", "rail_h", "terrace_curb_h",
                              "terrace_rail_kind", "roof_parapet",
-                             "roof_parapet_h", "slab_pos")]))
+                             "roof_parapet_h", "slab_pos",
+                             "roof_parapet_kind")]))
     sig = hashlib.md5(sig_src.encode()).hexdigest()
     have = [w for w in arch["walls"]
             if str(w.get("name", "")).startswith(AUTO_RAIL)]
@@ -6541,12 +6547,13 @@ def opening_parapets(doc) -> int:
     o_ = CURB_T / 2
     recs = []
 
-    def ring(pts, lid, base, cd, inward, name, h_=None):
+    def ring(pts, lid, base, cd, inward, name, h_=None, solid=False):
         rh_ = rh if h_ is None else float(h_)
         p = Polygon(pts).buffer(0)
         if p.is_empty or p.area < 0.04:
             return
-        q = p.buffer(-o_ if inward else o_, join_style=2)
+        oo_ = ROOF_PARAPET_T / 2 if solid else o_
+        q = p.buffer(-oo_ if inward else oo_, join_style=2)
         if q.is_empty:
             return
         q = max(getattr(q, "geoms", [q]), key=lambda g: g.area)
@@ -6558,7 +6565,10 @@ def opening_parapets(doc) -> int:
                  "b": [round(b[0], 4), round(b[1], 4)], "align": "centre",
                  "side": 1, "base": round(base, 4), "level": lid,
                  "name": name}
-            if as_wall:
+            if solid:              # 3.64.8: the roof's parapet wall
+                r.update(t=ROOF_PARAPET_T, height=round(base + rh_, 4),
+                         type="solid")
+            elif as_wall:
                 r.update(t=PARAPET_T, height=round(base + rh_, 4),
                          type="solid")
             else:
@@ -6585,8 +6595,15 @@ def opening_parapets(doc) -> int:
             e.get("offset", 0.0) or 0.0)
         cd = float(e.get("t", 0.1016) or 0.1016)
         if roof and st.get("roof_parapet", True):
-            ring(e["corners"], e["level"], base, cd, True,
-                 "Roof edge railing", st.get("roof_parapet_h") or None)
+            if st.get("roof_parapet_kind", "solid") == "solid":
+                # 3.64.8: by default a solid parapet wall on the roof's
+                # edge (its design: the solid parapet design setting)
+                ring(e["corners"], e["level"], base, cd, True,
+                     "Roof edge parapet", st.get("roof_parapet_h") or
+                     ROOF_PARAPET_H, solid=True)
+            else:
+                ring(e["corners"], e["level"], base, cd, True,
+                     "Roof edge railing", st.get("roof_parapet_h") or None)
         for h in e.get("holes") or []:       # the openings drawn by hand
             try:
                 hp = Polygon(h).buffer(0)
@@ -9074,7 +9091,9 @@ def _annotations(doc, opts):
 PARAPET_STYLES = [("plain", "Plain (plastered)"),
                   ("coping", "With coping (cap on top)"),
                   ("band", "Coping + a band under it"),
-                  ("grille", "Coping + MS grille over it (1'-0\")")]
+                  ("grille", "Coping + MS grille over it (1'-0\")"),
+                  ("bands2", "Coping + two bands (classic)"),
+                  ("dentil", "Coping + dentil course under it")]
 
 
 def _parapet_groups(doc, groups):
@@ -9120,6 +9139,31 @@ def _parapet_groups(doc, groups):
         if style == "band":
             faces += _prism(foot.buffer(0.02, join_style=2), top - 0.20,
                             top - 0.14)
+        if style == "bands2":
+            for z0_, z1_ in ((top - 0.20, top - 0.14), (top - 0.38, top - 0.34)):
+                faces += _prism(foot.buffer(0.02, join_style=2), z0_, z1_)
+        if style == "dentil":
+            # small blocks along the wall's faces under the coping
+            c_ = W.centre(w)
+            L_ = math.dist(c_.p0, c_.p1)
+            if L_ > 0.2:
+                ux_ = ((c_.p1[0] - c_.p0[0]) / L_, (c_.p1[1] - c_.p0[1]) / L_)
+                nx_ = (-ux_[1], ux_[0])
+                t2_ = float(w.get("t", 0.11)) / 2
+                k_ = 0.1
+                from shapely.geometry import Polygon as _PgD
+                while k_ < L_ - 0.1:
+                    for sg_ in (1, -1):
+                        cx_ = c_.p0[0] + ux_[0] * k_ + nx_[0] * sg_ * (t2_ +
+                                                                     0.02)
+                        cy_ = c_.p0[1] + ux_[1] * k_ + nx_[1] * sg_ * (t2_ +
+                                                                     0.02)
+                        q_ = [(cx_ + ux_[0] * a_ + nx_[0] * b_,
+                               cy_ + ux_[1] * a_ + nx_[1] * b_)
+                              for a_, b_ in ((-0.04, -0.02), (0.04, -0.02),
+                                             (0.04, 0.02), (-0.04, 0.02))]
+                        faces += _prism(_PgD(q_), top - 0.09, top, 1e-4)
+                    k_ += 0.2
         if style == "grille":
             from .engine import railings as RL
             c_ = W.centre(w)
