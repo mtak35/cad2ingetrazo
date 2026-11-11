@@ -504,29 +504,55 @@ def _body_mat(pr):
 
 
 def _front_parts(pr, k_body):
-    """The ids of the faces standing wholly in front of the model's doors
-    (its handles / knobs): past the front plane of its body faces — the
-    model's front its −Y side."""
-    yb = None
-    for m, xf in pr["parts"]:
-        for f in m.faces:
-            if _mat_key(f.attrs) != k_body:
-                continue
-            for p_ in f.vertices:
-                q = xf.map(p_) if xf is not None else p_
-                yb = q.y() if yb is None else min(yb, q.y())
-    if yb is None:
-        return set()
+    """The ids of the model's handle / knob faces: the materials whose
+    faces all stand in front of its door plane (the body's front faces,
+    the most area of them) and under its top — the model's front its −Y
+    side."""
     x0, y0, z0, x1, y1, z1 = pr["box"]
-    if yb - y0 < 0.004 or yb - y0 > 0.09:
-        return set()                     # nothing stands out (or a plinth)
-    out = set()
+    ys = {}
+    faces = []
     for m, xf in pr["parts"]:
         for f in m.faces:
-            ys = [(xf.map(p_) if xf is not None else p_).y()
-                  for p_ in f.vertices]
-            if ys and max(ys) < yb - 0.001:
-                out.add(id(f))
+            try:
+                pts = [(xf.map(p_) if xf is not None else p_)
+                       for p_ in f.vertices]
+            except Exception:  # noqa: BLE001
+                continue
+            if not pts:
+                continue
+            k = _mat_key(f.attrs)
+            faces.append((f, k, pts))
+            if k != k_body:
+                continue
+            try:
+                n = f.normal()
+                if xf is not None:
+                    n = xf.mapVector(n)
+                ln = max(n.length(), 1e-9)
+                if n.y() / ln > -0.8:
+                    continue
+                a = f.area()
+            except Exception:  # noqa: BLE001
+                continue
+            yk = round(sum(q.y() for q in pts) / len(pts), 3)
+            ys[yk] = ys.get(yk, 0.0) + a
+    if not ys:
+        return set()
+    yd = max(ys, key=ys.get)                 # the doors' plane
+    top = z1 - 0.05 * (z1 - z0)
+    ok, bad = {}, set()
+    for f, k, pts in faces:
+        if k == k_body:
+            continue
+        if max(q.y() for q in pts) < yd - 0.001 and \
+                max(q.z() for q in pts) < top:
+            ok.setdefault(k, []).append(id(f))
+        else:
+            bad.add(k)
+    out = set()
+    for k, ids in ok.items():
+        if k not in bad:
+            out.update(ids)
     return out
 
 
@@ -572,6 +598,12 @@ def restyled(key, entry, skey, sentry, strip=False):
                             at.pop(kk, None)
                         at.update({kk: (dict(v) if isinstance(v, dict)
                                         else v) for kk, v in new.items()})
+                        tx_ = at.get("texture")
+                        if isinstance(tx_, dict):
+                            # the style face's own UV fit means nothing
+                            # here: the plain projection, a board's grain
+                            tx_.pop("uvw", None)
+                            tx_["sw"] = tx_["sh"] = 0.6
                     nf.attrs = at
                 parts.append((nm, xf))
             box = list(pr["box"])
