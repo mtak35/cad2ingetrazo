@@ -12296,10 +12296,14 @@ def moved_furniture(scene, doc) -> int:
             continue
         x0, y0, _z0, x1, y1, _z1 = pr["box"]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        r = _m.radians(rot)
-        # the footprint's middle, back from the origin's place
-        nx = c.x() + mx_ * cx * _m.cos(r) - cy * _m.sin(r)
-        ny = c.y() + mx_ * cx * _m.sin(r) + cy * _m.cos(r)
+        del mx_, c
+        # the footprint's middle: the model box's middle where the group's
+        # placement takes it (its fit's scale in it — 3.64.3: the scale
+        # was left out, and every rebuild walked a fitted piece off its
+        # CAD place)
+        q_ = m.map(__import__("PySide6.QtGui", fromlist=["QVector3D"])
+                   .QVector3D(cx, cy, _z0))
+        nx, ny = q_.x(), q_.y()
         if abs(nx - at[0]) > 1e-3 or abs(ny - at[1]) > 1e-3 or \
                 abs(((rot - at[2] + 180) % 360) - 180) > 0.05:
             f["x"], f["y"], f["rot"] = round(nx, 4), round(ny, 4), \

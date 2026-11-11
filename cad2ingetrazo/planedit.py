@@ -502,8 +502,58 @@ class PlanEdit:
             return True
         self.drag = {"furn": True, "id": f["id"], "ax": ax, "sd": sd,
                      "fr0": dict(fr), "fr": dict(fr), "m": 0.0,
-                     "p0": (pos.x(), pos.y()), "dvec": dvec}
+                     "p0": (pos.x(), pos.y()), "dvec": dvec,
+                     "obst": [o for o in self._furn_obstacles(f, fr)
+                              if not self._furn_hits(fr, [o])]}
         return True
+
+    def _furn_obstacles(self, f, fr):
+        """What a unit grown by its grips stops at: the other pieces of
+        its floor standing at its height ([(footprint, z0, z1)]) and the
+        walls (3.64.3)."""
+        out = []
+        try:
+            from shapely.geometry import Polygon
+            from . import project as PJ
+            raw = self._raw()
+            for q in raw.get("furniture") or []:
+                if q is f or q.get("id") == f.get("id") or \
+                        q.get("level") != f.get("level"):
+                    continue
+                if math.dist((q["x"], q["y"]), (fr["x"], fr["y"])) > 8.0:
+                    continue
+                qf = PJ.furn_frame(raw, q)
+                if qf is None:
+                    continue
+                out.append((Polygon(self._foot(qf)), qf["z"],
+                            qf["z"] + qf["H"]))
+            from . import slabedges as SE
+            ws = [w for w in raw["arch"]["walls"]
+                  if w.get("level") == f.get("level") and not w.get("rail")]
+            for g in SE.wall_polys(ws):
+                if g.distance(Polygon(self._foot(fr))) < 6.0:
+                    out.append((g, -1e9, 1e9))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("planedit.furn_obstacles")
+        return out
+
+    def _foot(self, fr):
+        W, D = fr["W"], fr["D"]
+        return [self._fpt(fr, lx, ly, 0.0)[:2] for lx, ly in
+                ((-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2),
+                 (-W / 2, D / 2))]
+
+    def _furn_hits(self, fr, obst) -> bool:
+        from shapely.geometry import Polygon
+        pg = Polygon(self._foot(fr)).buffer(-0.002, join_style=2)
+        z0, z1 = fr["z"] + 0.005, fr["z"] + fr["H"] - 0.005
+        for g, a, b in obst:
+            if b <= z0 or a >= z1:
+                continue                     # above / under it
+            if pg.intersection(g).area > 1e-5:
+                return True
+        return False
 
     @staticmethod
     def _furn_resize(fr0, ax, sd, m):
@@ -534,8 +584,30 @@ class PlanEdit:
         v = d["dvec"]
         m = (dx * v[0] + dy * v[1]) / (v[0] * v[0] + v[1] * v[1])
         m = round(m / 0.01) * 0.01                    # to the centimetre
+        fr = self._furn_resize(d["fr0"], d["ax"], d["sd"], m)
+        obst = d.get("obst") or []
+        if m > 0 and obst and self._furn_hits(fr, obst):
+            # grown into a neighbour / a wall: back to where it touches
+            # (the unit's side on the other's, to the centimetre)
+            lo_, hi_ = 0.0, m
+            for _i in range(14):
+                if hi_ - lo_ <= 0.005:
+                    break
+                mid = (lo_ + hi_) / 2
+                if self._furn_hits(self._furn_resize(
+                        d["fr0"], d["ax"], d["sd"], mid), obst):
+                    hi_ = mid
+                else:
+                    lo_ = mid
+            m = math.floor(lo_ / 0.01 + 1e-6) * 0.01
+            if lo_ - m > 0.004:                 # (flush, not 1 cm short)
+                m = lo_
+            fr = self._furn_resize(d["fr0"], d["ax"], d["sd"], m)
+            d["stop"] = True
+        else:
+            d["stop"] = False
         d["m"] = m
-        d["fr"] = self._furn_resize(d["fr0"], d["ax"], d["sd"], m)
+        d["fr"] = fr
         self.vp.update()
 
     def _furn_release(self):
@@ -622,7 +694,9 @@ class PlanEdit:
                         painter.setPen(QPen(QColor(20, 110, 230), 1.0))
                         painter.drawText(QPointF(p[0] + 12, p[1] - 10),
                                          f"W {len_txt(W)} × D {len_txt(D)}"
-                                         f" × H {len_txt(H)}")
+                                         f" × H {len_txt(H)}" + (
+                                             "  — touches its neighbour"
+                                             if dr.get("stop") else ""))
         painter.restore()
 
     # ---- slab handles ---------------------------------------------------------
