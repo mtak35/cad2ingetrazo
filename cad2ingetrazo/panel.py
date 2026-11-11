@@ -2829,10 +2829,27 @@ class Panel(QWidget):
         _place_on_screen(dlg, QCursor.pos())
         dlg.exec()
 
-    def _convert_opening(self, sel, kind):
+    def _convert_opening(self, sel, kind, only=False):
+        ids = [sel[1]] if only else (
+            [i for k, i in self._selected_all() if k == "opening"]
+            or [sel[1]])
+        self._convert_ids(ids, kind)
+
+    def _gap_opening(self, wall_id, kind):
+        """The gap between a wall and the one in line with it (a doorway
+        the CAD leaves open) closed by one wall with a door / window /
+        plain opening in it."""
         doc = self.doc()
-        ids = [i for k, i in self._selected_all() if k == "opening"] \
-            or [sel[1]]
+        oid, why = PJ.gap_opening(doc, wall_id, kind)
+        if why:
+            self.flash(f"Not changed — {why}")
+            return
+        lab = {"door": "a door", "window": "a window",
+               "void": "a plain opening"}[kind]
+        self.commit(doc, f"The gap made {lab}")
+
+    def _convert_ids(self, ids, kind):
+        doc = self.doc()
         n = 0
         for oid in ids:
             rec = PJ.find_record(doc, "opening", oid)
@@ -7266,7 +7283,11 @@ class Panel(QWidget):
             log_error("panel.context_menu types")
         if sel[0] == "opening":
             from .engine import structure as S_
-            mc = sub.addMenu("Make it a…")
+            nop_ = len([i for k, i in self._selected_all()
+                        if k == "opening"]) or 1
+            mc = sub.addMenu("Convert to door / window…" if nop_ == 1 else
+                             f"Convert the {nop_} openings to door / "
+                             "window…")
             for k_, lab_ in (("door", "Door"), ("window", "Window"),
                              ("void", "Plain opening (no door / window)")):
                 a_ = mc.addAction(lab_, lambda k_=k_: self._convert_opening(
@@ -7340,6 +7361,42 @@ class Panel(QWidget):
                 or [sel[1]]
             n = len(walls)
             what = f"{n} walls" if n > 1 else "the wall"
+            try:            # 3.63: its doors / windows converted from here
+                ops_ = [o for o in doc["arch"]["openings"]
+                        if o.get("wall") == sel[1]]
+                if ops_:
+                    om_ = sub.addMenu("Convert its openings to door / window")
+                    for o_ in sorted(ops_, key=lambda q: float(q["pos"])):
+                        lab0_ = f"{o_.get('name') or o_['kind']} " \
+                            f"({o_['kind']}, {float(o_['w']):.2f} m)"
+                        m1_ = om_.addMenu(lab0_)
+                        for k_, lab_ in (("door", "Door"),
+                                         ("window", "Window"),
+                                         ("void", "Plain opening")):
+                            a_ = m1_.addAction(
+                                lab_, lambda k_=k_, i_=o_["id"]:
+                                self._convert_opening(("opening", i_), k_,
+                                                      only=True))
+                            a_.setCheckable(True)
+                            a_.setChecked(o_.get("kind") == k_)
+                    if len(ops_) > 1:
+                        for k_, lab_ in (("door", "All doors"),
+                                         ("window", "All windows")):
+                            om_.addAction(lab_, lambda k_=k_, ids=[
+                                q["id"] for q in ops_]:
+                                self._convert_ids(ids, k_))
+                gap_ = PJ.wall_gap(doc, sel[1])
+                if gap_ is not None:
+                    gm_ = sub.addMenu(
+                        f"Door / window in the {gap_[2]:.2f} m gap at its "
+                        "end")
+                    for k_, lab_ in (("door", "Door"), ("window", "Window"),
+                                     ("void", "Plain opening (wall over "
+                                      "it)")):
+                        gm_.addAction(lab_, lambda k_=k_:
+                                      self._gap_opening(sel[1], k_))
+            except Exception:  # noqa: BLE001
+                log_error("panel.context_menu wall openings")
             if rec.get("kind", "line") == "line":
                 sub.addAction("Edit part of this wall…",
                               lambda: self.split_wall_dialog(sel[1]))
@@ -7454,6 +7511,24 @@ class Panel(QWidget):
             sub.addAction("Flip the cladding to the other face",
                           lambda: self.apply_clad_side("flip"))
         if sel[0] == "furniture":
+            # 3.63: flip / turn the piece(s) where they stand
+            fids_ = [i for k, i in self._selected_all() if k == "furniture"] \
+                or [sel[1]]
+            nf_ = len(fids_)
+            fm_ = sub.addMenu("Flip / turn in place" if nf_ == 1 else
+                              f"Flip / turn the {nf_} pieces in place")
+            fm_.addAction("Flip left ↔ right (mirror)",
+                          lambda ids=fids_: self.furn_flip(ids, "mirror"))
+            fm_.addAction("Flip front ↔ back (turn round 180°)",
+                          lambda ids=fids_: self.furn_flip(ids, 180))
+            fm_.addAction("Rotate 90° anticlockwise",
+                          lambda ids=fids_: self.furn_flip(ids, 90))
+            fm_.addAction("Rotate 90° clockwise",
+                          lambda ids=fids_: self.furn_flip(ids, -90))
+            if any((PJ.find_record(doc, "furniture", i) or {}).get("mirror")
+                   for i in fids_):
+                fm_.addAction("Mirror off (as placed)",
+                              lambda ids=fids_: self.furn_flip(ids, "unmirror"))
             sub.addAction("Replace with an IngeTrazo library model…",
                           lambda: self.furn_replace(sel[1], False))
             kd_ = rec.get("kind")
@@ -7491,6 +7566,37 @@ class Panel(QWidget):
         sub.addAction("Delete this railing piece" if sel[0] == "stairrail"
                       and getattr(self, "_sel_seg", None) is not None
                       else "Delete", self._delete_selected)
+
+    def furn_flip(self, ids, how):
+        """Furniture / fixtures flipped or turned where they stand (about
+        their own middle): ``how`` "mirror" (left ↔ right), "unmirror",
+        or an angle in degrees."""
+        doc = self.doc()
+        ids = set(ids)
+        n = 0
+        for f in doc.get("furniture") or []:
+            if f.get("id") not in ids:
+                continue
+            if how == "mirror":
+                if f.get("mirror"):
+                    f.pop("mirror", None)
+                else:
+                    f["mirror"] = True
+            elif how == "unmirror":
+                f.pop("mirror", None)
+            else:
+                f["rot"] = round((float(f.get("rot", 0.0) or 0.0) +
+                                  float(how)) % 360.0, 3)
+            n += 1
+        if not n:
+            return
+        what = {"mirror": "flipped left ↔ right",
+                "unmirror": "mirror off"}.get(how, f"turned {how}°")
+        if self.commit(doc, f"{n} piece(s) {what}") and n == 1:
+            try:
+                self._reselect(("furniture", next(iter(ids))))
+            except Exception:  # noqa: BLE001
+                pass
 
     def close_openings(self, ids):
         """Windows (or openings) taken out: the wall runs through solid."""

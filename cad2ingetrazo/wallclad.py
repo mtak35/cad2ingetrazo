@@ -255,6 +255,7 @@ def groups(doc) -> list:
 
     from core.group import Group
 
+    from . import finishes as FN
     from . import project as PJ
     from .engine import spaces
     from .engine import walls as W
@@ -276,6 +277,7 @@ def groups(doc) -> list:
     for o in arch["openings"]:
         ops_of.setdefault(o.get("wall"), []).append(o)
     rooms_of = {}
+    plans_of = {}
     out = []
     for w in clad:
         lid = w["level"]
@@ -303,12 +305,19 @@ def groups(doc) -> list:
                     float(w["height"])
             ln = float(w.get("clad_len") or 0.0)
             off = float(w.get("clad_off") or 0.0)
-            s_a, s_b = (0.0, L) if ln <= 0 else (
-                max(L / 2 + off - ln / 2, 0.0), min(L / 2 + off + ln / 2, L))
-            if s_b - s_a < 0.1:
-                continue
+            if lid not in plans_of:
+                plans_of[lid] = W.plan([x for x in arch["walls"]
+                                        if x["level"] == lid
+                                        and not x.get("rail")])
             seed = zlib.crc32(str(w["id"]).encode())
             for sg in _sides(doc, w, mid, n, t, rooms):
+                # the face's own ends (mitred at the corners: no gap)
+                f_a, f_b = FN._face_span(w, sg, L, plans_of[lid])
+                s_a, s_b = (f_a, f_b) if ln <= 0 else (
+                    max(L / 2 + off - ln / 2, f_a),
+                    min(L / 2 + off + ln / 2, f_b))
+                if s_b - s_a < 0.1:
+                    continue
                 side_pt = (mid[0] + n[0] * sg * (t / 2 + 0.3),
                            mid[1] + n[1] * sg * (t / 2 + 0.3))
                 hh = float(w.get("clad_h") or 0.0)
@@ -326,10 +335,11 @@ def groups(doc) -> list:
                     p_ = float(o.get("pos", 0.0))
                     ww = float(o.get("w", 0.9))
                     zs = z_of[lid] + float(o.get("sill", 0.0) or 0.0)
-                    R = R.difference(box(p_ - ww / 2 - 0.03, zs - 0.03 if
+                    mg = max(0.03, FN.op_margin(o))   # clear of the trim
+                    R = R.difference(box(p_ - ww / 2 - mg, zs - mg if
                                          zs > zf + 0.05 else zf - 1,
-                                         p_ + ww / 2 + 0.03,
-                                         zs + float(o.get("h", 2.1)) + 0.03))
+                                         p_ + ww / 2 + mg,
+                                         zs + float(o.get("h", 2.1)) + mg))
                 if R.is_empty:
                     continue
                 f0 = sg * t / 2

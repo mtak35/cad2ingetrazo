@@ -198,24 +198,43 @@ def side_of_point(w, p) -> str | None:
     return "l" if cr > 0 else "r"
 
 
-def _face_span(w, sg, L) -> tuple:
-    """(s0, s1) of the face on side ``sg`` along the wall: its outline's
-    points on that face (a mitred corner makes it longer or shorter
-    than the centre line)."""
+def op_margin(o) -> float:
+    """How far past the opening's sides its door joinery stands on the
+    wall's faces (the architrave): a skirting / finish stops there, not
+    over the frame."""
+    if o.get("kind") != "door":
+        return 0.0
+    from .engine import structure as S_
+    if o.get("style") in S_.NO_TRIM:
+        return 0.005
     try:
-        from . import slabedges as SE
-        a, b = w["a"], w["b"]
+        A = float(o["arch_w"]) if o.get("arch_w") is not None else S_.ARCH_W
+    except (TypeError, ValueError):
+        A = S_.ARCH_W
+    return max(A, 0.0) + 0.003
+
+
+def _face_span(w, sg, L, plans=None) -> tuple:
+    """(s0, s1) of the face on side ``sg`` along the wall's centre line:
+    its outline's points on that face, the wall joined with the others of
+    its level (``plans``: ``W.plan`` of them) — a mitred corner makes the
+    outer face longer and the inner one shorter than the centre line."""
+    try:
+        from .engine import walls as W
+        if plans is None:
+            plans = W.plan([w])
+        seg = W.centre(w)
+        a, b = seg.p0, seg.p1
         u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
         n = (-u[1], u[0])
         t2 = float(w["t"]) / 2
         ss = []
-        for g in SE.wall_polys([w]):
-            for g2 in getattr(g, "geoms", [g]):
-                for x, y in list(g2.exterior.coords):
-                    d = (x - a[0], y - a[1])
-                    c = d[0] * n[0] + d[1] * n[1]
-                    if abs(c - sg * t2) < 0.02:
-                        ss.append(d[0] * u[0] + d[1] * u[1])
+        for pc in plans.get(w["id"]) or []:
+            for x, y in pc["outer"]:
+                d = (x - a[0], y - a[1])
+                c = d[0] * n[0] + d[1] * n[1]
+                if abs(c - sg * t2) < 0.02:
+                    ss.append(d[0] * u[0] + d[1] * u[1])
         if len(ss) >= 2 and max(ss) - min(ss) > 0.05:
             return min(ss), max(ss)
     except Exception:  # noqa: BLE001
@@ -263,6 +282,7 @@ def groups(doc) -> list:
     from . import project as PJ
     from . import wallclad as WC
     from .engine import spaces
+    from .engine import walls as W
     from .host import KEY, level_layer
     arch = doc["arch"]
     ws = [w for w in arch["walls"] if w.get("fin")
@@ -282,6 +302,7 @@ def groups(doc) -> list:
     for o in arch["openings"]:
         ops_of.setdefault(o.get("wall"), []).append(o)
     rooms_of = {}
+    plans_of = {}
     out = []
     for w in ws:
         lid = w["level"]
@@ -292,10 +313,15 @@ def groups(doc) -> list:
                 rooms_of[lid] = [r for r in spaces.of_level(arch, lid)
                                  if r["area"] >= 1.0]
             rooms = rooms_of[lid]
-            a, b = w["a"], w["b"]
+            seg = W.centre(w)              # the faces are t/2 off the centre
+            a, b = seg.p0, seg.p1
             L = math.dist(a, b)
             if L < 0.15:
                 continue
+            if lid not in plans_of:
+                plans_of[lid] = W.plan([x for x in arch["walls"]
+                                        if x["level"] == lid
+                                        and not x.get("rail")])
             u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
             n = (-u[1], u[0])
             t = float(w["t"])
@@ -309,7 +335,7 @@ def groups(doc) -> list:
                     float(w["height"])
             for f_ in w["fin"]:
                 sg = 1 if f_.get("side") == "l" else -1
-                s0, s1 = _face_span(w, sg, L)
+                s0, s1 = _face_span(w, sg, L, plans_of[lid])
                 side_pt = (mid[0] + n[0] * sg * (t / 2 + 0.3),
                            mid[1] + n[1] * sg * (t / 2 + 0.3))
                 za = zf + float(f_.get("z0") or 0.0)
@@ -326,12 +352,14 @@ def groups(doc) -> list:
                     p_ = float(o.get("pos", 0.0))
                     ww = float(o.get("w", 0.9))
                     zs = z_of[lid] + float(o.get("sill", 0.0) or 0.0)
-                    R = R.difference(box(p_ - ww / 2, zs if zs > zf + 0.05
-                                         else zf - 1, p_ + ww / 2,
-                                         zs + float(o.get("h", 2.1))))
+                    mg = op_margin(o)        # clear of the architrave
+                    R = R.difference(box(p_ - ww / 2 - mg, zs if zs > zf +
+                                         0.05 else zf - 1, p_ + ww / 2 + mg,
+                                         zs + float(o.get("h", 2.1)) + mg))
                 if R.is_empty:
                     continue
-                f0 = sg * (t / 2 + plaster)
+                # on the face: the plaster is in the wall's thickness
+                f0 = sg * t / 2
                 th = THICK.get(f_.get("band"), 0.012)
 
                 def P(s, z, c, a=a, u=u, n=n, f0=f0, sg=sg):

@@ -59,22 +59,48 @@ STYLES = {
     "wood": ("Wood", {
         "cabinet": ["wood lower cabinet"],
         "island": ["wood lower cabinet"],
-        "corner_cabinet": ["wood lower cabinet"],
         "wall_cabinet": ["wood upper cabinet"]}),
     "gray": ("Gray", {
         "cabinet": ["gray cabinet"],
         "island": ["gray cabinet"],
-        "corner_cabinet": ["gray cabinet"],
         "wall_cabinet": ["gray upper cabinet"]}),
     "red": ("Red", {
         "cabinet": ["red cabinet"],
         "island": ["red cabinet"],
-        "corner_cabinet": ["red cabinet"]}),
+        }),
     "glass": ("Glass-door uppers", {
         "wall_cabinet": ["glass door cabinet", "wood glass door cabinet"]}),
 }
 KITCHEN_KINDS = ("cabinet", "island", "corner_cabinet", "wall_cabinet",
-                 "ksink")
+                 "ksink", "upper_corner")
+#: the library's L corner units (3.63): their back corner is the model's
+#: (+X, +Y) one, the diagonal door at (−X, −Y) — set with that corner in
+#: the room's corner. The lower one a 5-sided box, the upper one an L of
+#: 36 cm deep arms.
+LOWER_CORNER_KEYS = ("online:blendswap-cc-0-154",)
+UPPER_CORNER_KEYS = ("online:blendswap-cc-0-173",)
+#: the L units' arms, as fractions of their box: (the arm across the
+#: model's X — its depth along the +X wall —, the arm across Y). Scaled
+#: so each arm is as deep as the run it meets (no step at the joint)
+LOWER_ARMS = (60.4 / 81.0, 48.3 / 82.3)
+UPPER_ARMS = (35.0 / 81.0, 36.0 / 81.0)
+
+
+def corner_fit(arms, own, other, d_own=None, d_other=None) -> dict:
+    """An L corner unit in the corner of runs ``own`` (it places it) and
+    ``other``: its turn, fit [X, Y] and how much of each run it takes.
+    The unit's X side lies along the wall at its back (+Y), Y along the
+    +X wall; the run along the back wall meets its −X face (the Y arm's
+    depth), the other its −Y face (the X arm's)."""
+    d_own = own["d"] if d_own is None else d_own
+    d_other = other["d"] if d_other is None else d_other
+    rot, swapped = corner_rot(own, other)
+    d_y, d_x = (d_other, d_own) if swapped else (d_own, d_other)
+    X = min(max(d_x / arms[0], 0.6), 1.3)
+    Y = min(max(d_y / arms[1], 0.6), 1.3)
+    return {"rot": rot, "fit": [X, Y],
+            "own": Y if swapped else X, "other": X if swapped else Y,
+            "off": X / 2 if swapped else Y / 2}
 
 
 def style_entries(entries, style) -> dict:
@@ -281,6 +307,21 @@ def runs_of(poly, segs, walls=None, boxes=()):
     return out
 
 
+def corner_rot(rn, q) -> tuple:
+    """(turn, swapped) of an L corner unit (its back corner the model's
+    (+X, +Y)) in the corner of runs ``rn`` and ``q``: +Y to ``rn``'s wall
+    and +X to ``q``'s — or, the other hand round, +Y to ``q``'s
+    (swapped)."""
+    import math as _m
+    for k_, (a_, b_) in enumerate(((rn, q), (q, rn))):
+        dx, dy = -a_["n"][0], -a_["n"][1]          # +Y: to a_'s wall
+        xx, xy = dy, -dx                           # where +X goes then
+        if xx * -b_["n"][0] + xy * -b_["n"][1] > 0.5:
+            return (_m.degrees(_m.atan2(dy, dx)) - 90.0) % 360.0, bool(k_)
+    return (_m.degrees(_m.atan2(-rn["n"][1], -rn["n"][0])) - 90.0) % 360.0, \
+        False
+
+
 def _xy(r, s, off):
     return (r["a"][0] + r["u"][0] * s + r["n"][0] * off,
             r["a"][1] + r["u"][1] * s + r["n"][1] * off)
@@ -398,7 +439,8 @@ def islands_of(poly, segs, texts, short_segs, walls=None):
     return out
 
 
-KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "island")
+KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "island",
+         "upper_corner")
 
 
 def clear(doc, lid) -> int:
@@ -444,24 +486,16 @@ def fit(doc, lid, pl, rooms, entries) -> int:
     base_e = _pick(entries, BASE_WORDS, avoid=("corner", "sink"))
     if base_e is None:
         return 0
-    # 3.62: the corner square takes a plain lower cabinet (a blind corner):
-    # the library's corner units are L / diagonal models whose doors face
-    # one way only — fitted to the square they met the runs crooked
-    corner_e = base_e or _pick(entries, CORNER_WORDS)
+    # 3.63: the corner takes the library's L corner unit (its diagonal
+    # door to the room), CORNER_S each way — set by its known back corner
+    # (3.62's plain cabinet in the square had its door behind the other
+    # run); a plain cabinet only when the library has none
+    corner_e = next((e for k_ in LOWER_CORNER_KEYS for e in entries
+                     if e.get("key") == k_), None)
     upper_e = _pick(entries, UPPER_WORDS, avoid=("corner", "smaller",
                                                  "small"))
-    # the upper corner unit as tall as the upper cabinets (the library
-    # has a 60 and a 72 cm one)
-    ucs = [e for e in entries if e.get("cat") == "Kitchen" and str(
-        e.get("name", "")).strip().lower() == "upper corner cabinet"]
-
-    def _h(e):
-        try:
-            return float(((e.get("entry") or {}).get("cm") or [0, 0, 0])[2])
-        except (TypeError, ValueError, IndexError):
-            return 0.0
-    upper_corner_e = min(ucs, key=lambda e: abs(_h(e) - UPPER_H * 100)) \
-        if ucs else _pick(entries, ["upper corner cabinet"])
+    upper_corner_e = next((e for k_ in UPPER_CORNER_KEYS for e in entries
+                           if e.get("key") == k_), None)
     hood_e = _pick(entries, ["range hood", "hood"])
     ihood_e = _pick(entries, ["hood", "range hood"])   # a chimney hood
     oven_e = _pick(entries, ["microwave cabinet", "double oven", "oven"])
@@ -633,11 +667,25 @@ def fit(doc, lid, pl, rooms, entries) -> int:
             spans = list(rn["spans"])
             # the corner squares
             for end, q in ends.items():
+                if corner_e is not None:     # the L unit, its arms the
+                    own_ = bool(rn["own"].get(end))      # runs' depth
+                    cf_ = corner_fit(LOWER_ARMS, rn, q) if own_ else \
+                        corner_fit(LOWER_ARMS, q, rn)
+                    S = cf_["own"] if own_ else cf_["other"]
+                    lo, hi = (0.0, S) if end == 0 else (L - S, L)
+                    spans = _cut(spans, lo, hi)
+                    if own_:
+                        cx, cy = _xy(rn, (lo + hi) / 2, cf_["off"])
+                        _rec(FO, doc, lid, corner_e, "corner_cabinet", cx,
+                             cy, cf_["rot"], r, fit=cf_["fit"],
+                             fit_free=True, fit_h=BASE_H)
+                        n += 1
+                    continue
                 lo, hi = (0.0, q["d"]) if end == 0 else (L - q["d"], L)
                 spans = _cut(spans, lo, hi)
                 if rn["own"].get(end):
                     cx, cy = _xy(rn, (lo + hi) / 2, d / 2)
-                    _rec(FO, doc, lid, corner_e, "corner_cabinet", cx, cy,
+                    _rec(FO, doc, lid, base_e, "corner_cabinet", cx, cy,
                          FU.back_to(-rn["n"][0], -rn["n"][1]), r,
                          fit=[q["d"], d], fit_free=True, fit_h=BASE_H)
                     n += 1
@@ -771,7 +819,13 @@ def fit(doc, lid, pl, rooms, entries) -> int:
             up = [(max(a_, lo_), min(b_, hi_)) for a_, b_ in up
                   if min(b_, hi_) - max(a_, lo_) > 0.2]
             for end, q in ends.items():
-                qd = 0.6               # the corner unit: 60 cm each way
+                # the corner unit: the L one CORNER_S each way (the lower's
+                # grid), else 60 cm
+                ucf_ = corner_fit(UPPER_ARMS, rn, q, UPPER_D, UPPER_D) \
+                    if rn["own"].get(end) else \
+                    corner_fit(UPPER_ARMS, q, rn, UPPER_D, UPPER_D)
+                qd = (ucf_["own"] if rn["own"].get(end) else ucf_["other"]) \
+                    if upper_corner_e is not None else 0.6
                 lo, hi = (0.0, qd) if end == 0 else (L - qd, L)
                 if q.get("no_upper"):
                     continue                 # the other run has none
@@ -789,6 +843,16 @@ def fit(doc, lid, pl, rooms, entries) -> int:
                     # runs' depth — this run's along its wall into the
                     # corner, the other run's filler up to it (3.62: one
                     # 60 × 60 box stood out of both runs)
+                    if upper_corner_e is not None:
+                        # 3.63: the library's L upper corner unit, its
+                        # diagonal door to the room
+                        cx, cy = _xy(rn, (lo + hi) / 2, ucf_["off"])
+                        _rec(FO, doc, lid, upper_corner_e, "upper_corner",
+                             cx, cy, ucf_["rot"], r, fit=ucf_["fit"],
+                             fit_free=True, fit_h=UPPER_H, zoff=UPPER_Z,
+                             corner=True)
+                        n += 1
+                        continue
                     cx, cy = _xy(rn, (lo + hi) / 2, UPPER_D / 2)
                     _rec(FO, doc, lid, upper_e, "wall_cabinet", cx,
                          cy, FU.back_to(-rn["n"][0], -rn["n"][1]), r,

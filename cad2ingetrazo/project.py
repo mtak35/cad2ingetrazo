@@ -7329,7 +7329,7 @@ def walls_in_line(doc, wall_id, reach=0.06) -> list:
     return [q for _d, q in out]
 
 
-def join_walls(doc, ids) -> tuple:
+def join_walls(doc, ids, max_gap=0.6) -> tuple:
     """Walls in one straight line, end to end, made one wall: the first's
     type, height and finishes, its ends the line's far ends; the doors and
     windows kept where they are along it. (the wall's id, None) or (None,
@@ -7356,7 +7356,7 @@ def join_walls(doc, ids) -> tuple:
                    for w in ws)
     reach = spans[0][1]
     for t0, t1 in spans[1:]:
-        if t0 > reach + 0.6:
+        if t0 > reach + max_gap:
             return None, "the walls are not end to end (a gap between them)"
         reach = max(reach, t1)
     lo, hi = spans[0][0], max(t1 for _t0, t1 in spans)
@@ -7374,6 +7374,75 @@ def join_walls(doc, ids) -> tuple:
     gone = {w["id"] for w in ws[1:]}
     arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
     return w0["id"], None
+
+
+def wall_gap(doc, wall_id, lo=0.3, hi=4.5):
+    """The open gap at an end of wall ``wall_id`` up to the next wall in
+    the same straight line (a doorway the CAD leaves open): (that wall,
+    the gap's middle (x, y), its length) or None."""
+    arch = doc["arch"]
+    w = next((x for x in arch["walls"] if x["id"] == wall_id), None)
+    if w is None or w.get("kind", "line") != "line" or \
+            w.get("type") == "curtain" or _line_of(w) is None:
+        return None
+    a, b, L, u = _line_of(w)
+    t = float(w.get("t", 0.2))
+    best = None
+    for q in arch["walls"]:
+        if q is w or q.get("level") != w.get("level") or \
+                q.get("kind", "line") != "line" or q.get("rail") or \
+                q.get("type") == "curtain" or _line_of(q) is None:
+            continue
+        qa, qb, qL, qu = _line_of(q)
+        if abs(u[0] * qu[1] - u[1] * qu[0]) > 0.02:
+            continue
+        if max(abs((p[0] - a[0]) * -u[1] + (p[1] - a[1]) * u[0])
+               for p in (qa, qb)) > max(0.04, 0.3 * t):
+            continue
+        ts = sorted((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1]
+                    for p in (qa, qb))
+        if ts[0] >= L:                      # past the end b
+            g0, g1 = L, ts[0]
+        elif ts[1] <= 0:                    # before the start a
+            g0, g1 = ts[1], 0.0
+        else:
+            continue
+        g = g1 - g0
+        if not (lo <= g <= hi):
+            continue
+        # nothing across the gap (a wall standing in it)
+        m = (g0 + g1) / 2
+        mid = (a[0] + u[0] * m, a[1] + u[1] * m)
+        if best is None or g < best[2]:
+            best = (q, mid, g)
+    return best
+
+
+def gap_opening(doc, wall_id, kind) -> tuple:
+    """Wall ``wall_id`` joined with the wall in line across the gap at
+    its end, a door / window / plain opening filling the gap. (opening
+    id, None) or (None, why)."""
+    gp = wall_gap(doc, wall_id)
+    if gp is None:
+        return None, "no wall in line across a gap at its ends"
+    q, mid, g = gp
+    wid, why = join_walls(doc, [wall_id, q["id"]], max_gap=g + 0.05)
+    if why:
+        return None, why
+    arch = doc["arch"]
+    w = next(x for x in arch["walls"] if x["id"] == wid)
+    a, b, L, u = _line_of(w)
+    pos = (mid[0] - a[0]) * u[0] + (mid[1] - a[1]) * u[1]
+    rec = opening_as({"wall": wid, "pos": round(pos, 4), "w": round(g, 4),
+                      "swing": "left", "face": 1}, kind, doc["settings"])
+    rec["w"] = round(g, 4)
+    rec["pos"] = round(pos, 4)
+    why = check_record(doc, "opening", rec)
+    if why:
+        return None, why
+    from .engine import model as M
+    arch["openings"] += M.new_openings(arch["openings"], [rec])
+    return arch["openings"][-1]["id"], None
 
 
 def wall_tees(doc, wall_id) -> list:
@@ -11976,6 +12045,8 @@ def _furniture_pose(f, pr, z):
     m.translate(float(f["x"]), float(f["y"]), z)
     if abs(float(f.get("rot", 0.0) or 0.0)) > 1e-9:
         m.rotate(float(f["rot"]), 0.0, 0.0, 1.0)
+    if f.get("mirror"):                  # flipped left ↔ right in place
+        m.scale(-1.0, 1.0, 1.0)
     fit = f.get("fit")
     if fit and len(fit) == 2:            # fitted to the CAD block's sides
         try:
@@ -12110,6 +12181,9 @@ def moved_furniture(scene, doc) -> int:
         ax = m.mapVector(__import__("PySide6.QtGui", fromlist=["QVector3D"])
                          .QVector3D(1, 0, 0))
         rot = _m.degrees(_m.atan2(ax.y(), ax.x()))
+        mx_ = -1.0 if f.get("mirror") else 1.0
+        if f.get("mirror"):              # its x axis runs backwards
+            rot = (rot + 180.0 + 180.0) % 360.0 - 180.0
         at = t.get("at") or [f["x"], f["y"], f.get("rot", 0.0)]
         from . import library as LB
         pr = LB.proto(*furn_lib(doc, f))
@@ -12119,8 +12193,8 @@ def moved_furniture(scene, doc) -> int:
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         r = _m.radians(rot)
         # the footprint's middle, back from the origin's place
-        nx = c.x() + cx * _m.cos(r) - cy * _m.sin(r)
-        ny = c.y() + cx * _m.sin(r) + cy * _m.cos(r)
+        nx = c.x() + mx_ * cx * _m.cos(r) - cy * _m.sin(r)
+        ny = c.y() + mx_ * cx * _m.sin(r) + cy * _m.cos(r)
         if abs(nx - at[0]) > 1e-3 or abs(ny - at[1]) > 1e-3 or \
                 abs(((rot - at[2] + 180) % 360) - 180) > 0.05:
             f["x"], f["y"], f["rot"] = round(nx, 4), round(ny, 4), \
