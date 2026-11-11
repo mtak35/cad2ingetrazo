@@ -13,6 +13,11 @@ LAYER_RX = re.compile(r"LANDSC|L-PLNT|PLANT|LAWN|GRASS|TURF|GREEN|GARDEN|"
 TEXT_RX = re.compile(r"LANDSCAP|LAWN|GARDEN|GREEN\s*AREA|GRASS|PLANTER|"
                      r"JARDIN|SOFT\s*SCAPE", re.I)
 GREEN = (0.42, 0.66, 0.30, 1.0)
+#: 3.64.4: a hatch the plan fills a lawn with (AutoCAD's GRASS…)
+PATTERN_RX = re.compile(r"GRASS|TURF|LAWN|GRAVEL|EARTH|SWAMP", re.I)
+#: the lawn's grass, IngeTrazo's library (the first there)
+GRASS_KEYS = ("ground/grass_lawn.png", "floor/grass.jpg", "ground/grass.png",
+              "floor/grass_2.jpg")
 
 
 def areas(pl, reach=(7.0, 25.0), least=0.8, most=4000.0) -> list:
@@ -27,6 +32,23 @@ def areas(pl, reach=(7.0, 25.0), least=0.8, most=4000.0) -> list:
             g = Polygon(lp["pts"])
             if g.is_valid and least <= g.area <= most:
                 out.append(g)
+    # the plan's lawn hatches (a GRASS pattern, or any hatch on a
+    # landscape layer): each hatch's outline
+    for fl in pl.get("fills") or ():
+        pat = str(fl.get("pattern") or "")
+        if fl.get("solid") or not (PATTERN_RX.search(pat) or (
+                LAYER_RX.search(str(fl.get("layer") or "")) and
+                not re.search(r"ANSI|SOLID", pat, re.I))):
+            continue
+        pts = fl.get("pts") or []
+        if len(pts) < 3:
+            continue
+        try:
+            g = Polygon(pts).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if not g.is_empty and g.area >= 0.05:
+            out.append(g)
     words = [t for t in pl["texts"] if TEXT_RX.search(t["text"] or "")]
     if words:
         import numpy as np
@@ -43,13 +65,49 @@ def areas(pl, reach=(7.0, 25.0), least=0.8, most=4000.0) -> list:
                     break
     if not out:
         return []
-    u = unary_union([g.buffer(0) for g in out])
+    # (hatch pieces drawn edge to edge: joined, the hairline gaps closed)
+    u = unary_union([g.buffer(0.01, join_style=2) for g in out]).buffer(
+        -0.01, join_style=2)
     res = []
+    gs_ = []
     for g in getattr(u, "geoms", [u]):
-        if g.geom_type == "Polygon" and g.area >= least:
+        gs_ += _no_holes(g) if g.geom_type == "Polygon" else []
+    for g in gs_:
+        if g.geom_type == "Polygon" and g.area >= min(least, 0.3):
             res.append([(round(a, 4), round(b, 4))
                         for a, b in list(g.simplify(0.01).exterior.coords)[:-1]])
     return res
+
+
+def _no_holes(g) -> list:
+    """A polygon with holes (a lawn round a building, round its stones)
+    cut into pieces without any: across each hole's middle, line by line
+    (the outlines keep no holes)."""
+    from shapely.geometry import LineString
+    from shapely.ops import split
+    todo, out = [g], []
+    guard = 0
+    while todo and guard < 400:
+        guard += 1
+        q = todo.pop()
+        if q.geom_type != "Polygon" or q.is_empty:
+            continue
+        if not q.interiors:
+            out.append(q)
+            continue
+        c = q.interiors[0].centroid
+        b = q.bounds
+        try:
+            parts = split(q, LineString([(c.x, b[1] - 1), (c.x, b[3] + 1)]))
+            ps = [p for p in getattr(parts, "geoms", [parts])
+                  if p.geom_type == "Polygon"]
+        except Exception:  # noqa: BLE001
+            ps = []
+        if len(ps) < 2:
+            out.append(q)          # (could not cut: as it is)
+            continue
+        todo += ps
+    return out
 
 
 def _around(pl, S, lay, p, reach, least, most):
@@ -90,3 +148,31 @@ def faces(outline, z) -> list:
         pts = pts[::-1]
     return [{"loop": [(p[0], p[1], z) for p in pts], "holes": [],
              "color": GREEN}]
+
+
+PAVER_LAYER_RX = re.compile(r"HATCH|PAV|STONE|STEP|TILE|PATH|WALKWAY", re.I)
+
+
+def pavers(pl, lawns) -> list:
+    """The stepping stones / pavers the plan draws in its lawns: closed
+    outlines (0.05–3 m², on a hatch / paving layer) inside them."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    if not lawns:
+        return []
+    L = unary_union([Polygon(a).buffer(0) for a in lawns]).buffer(0.05)
+    out = []
+    for lp in pl.get("loops") or ():
+        if not PAVER_LAYER_RX.search(str(lp.get("layer") or "")) or \
+                LAYER_RX.search(str(lp.get("layer") or "")) or \
+                len(lp.get("pts") or ()) < 3:
+            continue
+        try:
+            g = Polygon(lp["pts"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if g.is_empty or not (0.05 <= g.area <= 3.0) or not L.contains(g):
+            continue
+        out.append([(round(a, 4), round(b, 4))
+                    for a, b in list(g.exterior.coords)[:-1]])
+    return out

@@ -556,13 +556,51 @@ def _front_parts(pr, k_body):
     return out
 
 
+def _body_mats(pr) -> set:
+    """The model's carcass and door materials: each covering 5 % or more
+    of its upright area — less the worktop's (the most up-facing area at
+    its top), and less the small ones (handles, hinges, glass strips)."""
+    up, top = {}, {}
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    zt = z1 - 0.12 * (z1 - z0)
+    for m, xf in pr["parts"]:
+        if m is None:
+            continue
+        for f in m.faces:
+            try:
+                n = f.normal()
+                a = f.area()
+                if xf is not None:
+                    n = xf.mapVector(n)
+                pts = [(xf.map(p_) if xf is not None else p_)
+                       for p_ in f.vertices]
+            except Exception:  # noqa: BLE001
+                continue
+            k = _mat_key(f.attrs)
+            ln = max(n.length(), 1e-9)
+            if abs(n.z()) <= 0.5 * ln:
+                up[k] = up.get(k, 0.0) + a
+            elif n.z() > 0 and min(q.z() for q in pts) >= zt:
+                top[k] = top.get(k, 0.0) + a
+    if not up:
+        return set()
+    tot = sum(up.values())
+    body = max(up, key=up.get)
+    out = {k for k, a in up.items() if a >= 0.05 * tot}
+    if top:
+        wt = max(top, key=top.get)
+        if wt != body:
+            out.discard(wt)                  # the worktop keeps its stone
+    return out
+
+
 def restyled(key, entry, skey, sentry, strip=False):
     """Model ``key`` with its body material made the body material of model
     ``skey`` (a style's cabinet: a kitchen corner unit in that style's
     finish), and with ``strip`` its own handles left out (CAD2IngeTrazo's
     sized handles go on instead). The model as it is when nothing
     changes."""
-    ck = (key, skey, bool(LOWPOLY[0]), bool(strip))
+    ck = (key, skey, bool(LOWPOLY[0]), bool(strip), 2)
     if ck in _RESTYLED:
         return _RESTYLED[ck]
     pr = proto(key, entry)
@@ -579,6 +617,9 @@ def restyled(key, entry, skey, sentry, strip=False):
             new = {kk: a1[kk] for kk in ("color", "texture", "mat")
                    if kk in a1}
         drop = _front_parts(pr, k0) if strip and k0 is not None else set()
+        # every carcass / door material of the corner unit, not only the
+        # largest (3.64.4: its doors kept their own grey)
+        ks0 = (_body_mats(pr) | {k0}) - {k1} if new else set()
         if new or drop:
             parts = []
             for m, xf in pr["parts"]:
@@ -593,7 +634,7 @@ def restyled(key, entry, skey, sentry, strip=False):
                     except Exception:  # noqa: BLE001
                         continue
                     at = dict(f.attrs)
-                    if new and _mat_key(at) == k0:
+                    if new and _mat_key(at) in ks0:
                         for kk in ("color", "texture", "mat"):
                             at.pop(kk, None)
                         at.update({kk: (dict(v) if isinstance(v, dict)

@@ -84,6 +84,7 @@ DEFAULTS = {
     "auto_layers": True,
     "found_level": -1.50,          # m, the footings' bottom (±0.00 = floor)
     "plinth": 0.15,                # m, ground floor above the plot's ground
+    "landscape_h": 0.1524,         # m, the lawns over the natural ground
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
     "rail_needs_text": True,       # railings only where the CAD writes them
     "stair_max_flight": 14,        # risers in one flight at most
@@ -201,7 +202,7 @@ def empty() -> dict:
             "imports": {}, "texts": [], "settings": dict(DEFAULTS),
             "site": SITE_.load_site(None), "grid": SITE_.load_grid(None),
             "stairs": [], "stair_cad": {}, "materials": {},
-            "parking": {}, "ramps": [], "marks": {}, "landscape": {},
+            "parking": {}, "ramps": [], "marks": {}, "landscape": {}, "pavers": {},
             "off3d": [], "roof_terraces": [],
             "comp_names": {}, "man_shafts": [], "ceilings": {},
             "furniture": [], "ffl_marks": [], "slab_edges": {},
@@ -261,6 +262,8 @@ def load(raw) -> dict:
                     if k in ids and isinstance(v, list)}
     doc["landscape"] = {k: v for k, v in (raw.get("landscape") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["pavers"] = {k: v for k, v in (raw.get("pavers") or {}).items()
+                     if k in ids and isinstance(v, list)}
     # elements kept out of the 3D model (drawn on a floor they are not on)
     doc["off3d"] = sorted({str(k) for k in raw.get("off3d") or []
                            if isinstance(k, str) and "|" in k})
@@ -6123,6 +6126,17 @@ def _parking_import(doc, lid, pl, P) -> dict:
         doc["landscape"][lid] = [[list(p) for p in a] for a in green]
     else:
         doc["landscape"].pop(lid, None)
+    try:                       # the stepping stones / pavers in the lawns
+        pv_ = LS.pavers(pl, green) if green else []
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.pavers")
+        pv_ = []
+    if pv_:
+        doc.setdefault("pavers", {})[lid] = [[list(p) for p in a]
+                                             for a in pv_]
+    else:
+        doc.setdefault("pavers", {}).pop(lid, None)
     return {"bays": len(bays), "cars": len(cars), "stalls": len(stalls),
             "ramps": len(made),
             "ramp_cuts": cut, "marks": len(marks), "green": len(green)}
@@ -9328,7 +9342,7 @@ def levels_from_cad(doc) -> list:
     changed = []
     if g in want:
         proj["ground_level"] = round(want[g], 4)
-        if 0.0 < want[g] <= 3.0:        # «LEV. +4'-0"» over the road /
+        if 0.0 <= want[g] <= 3.0:       # «LEV. +4'-0"» over the road /
             st_ = doc["settings"]        # N.G.L. (±0): the F.F.L. field
             st_["ground_ffl"] = round(want[g], 4)
             st_["plinth"] = round(want[g], 4)
@@ -10527,7 +10541,65 @@ def _parking_groups(doc):
         # on the floor's finish (over its slab, never hidden under it)
         z = z_of[lid] + open_offset(doc, lid) + 0.012
         faces = [f for a in areas_ for f in LS.faces(a, z)]
+        zt_ = None
+        if g_i is not None and lid == arch["levels"][g_i]["id"]:
+            # 3.64.4: the ground floor's lawns as the plan hatches them, a
+            # bed of earth and grass 6" over the natural ground (the
+            # setting) — not on the floor's level
+            try:
+                from shapely.geometry import Polygon as _Pg
+                zb_ = plot_top(doc)
+                zt_ = zb_ + float(st.get("landscape_h", 0.1524) or 0.0)
+                pvs_ = [_Pg(q).buffer(0) for q in
+                        (doc.get("pavers") or {}).get(lid) or []]
+                from shapely.ops import unary_union as _uuL
+                pvu_ = _uuL(pvs_) if pvs_ else None
+                if zt_ - zb_ > 0.005:
+                    faces = []
+                    for q_ in pvs_:          # the stones, flush with it
+                        faces += [dict(f, color=(0.66, 0.64, 0.60))
+                                  for f in _prism(q_, zb_, zt_ + 0.012)]
+                    for a in areas_:
+                        pg_ = _Pg(a).buffer(0)
+                        if pvu_ is not None:
+                            pg_ = pg_.difference(pvu_)
+                        for f in _prism(pg_, zb_, zt_):
+                            top_ = all(abs(q[2] - zt_) < 1e-6
+                                       for q in f["loop"])
+                            faces.append(dict(f, color=LS.GREEN[:3] if top_
+                                              else (0.45, 0.36, 0.25),
+                                              grass=top_))
+                else:
+                    faces = [f for a in areas_ for f in LS.faces(a, zb_
+                                                                 + 0.005)]
+                    for f in faces:
+                        f["grass"] = True
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project.lawn")
         g = Group(_mesh_of(faces), name=f"Landscape · {names[lid]}")
+        try:                     # the grass texture on the lawn's top
+            from . import matlib as ML_
+            ga_ = next((ML_.attrs_of(k_) for k_ in LS.GRASS_KEYS
+                        if ML_.attrs_of(k_)), None)
+            if ga_:
+                ga_ = dict(ga_)
+                ga_["texture"] = dict(ga_["texture"], sw=1.0, sh=1.0)
+                pa_ = ML_.attrs_of("finish/slate_tiles.jpg") or \
+                    ML_.attrs_of("finish/sandstone_cladding.jpg")
+                zl_ = locals().get("zt_")
+                for fc_ in g.mesh.faces:
+                    n_ = fc_.normal()
+                    if n_.z() <= 0.9 * max(n_.length(), 1e-9):
+                        continue
+                    zf_ = fc_.vertices[0].z()
+                    if zl_ is None or abs(zf_ - zl_) < 1e-4:
+                        fc_.attrs.update(ga_)            # the grass
+                    elif pa_ and zf_ > zl_ + 1e-4:
+                        fc_.attrs.update(pa_)            # the stones
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.lawn texture")
         g.component = False
         g.material = {"color": LS.GREEN[:3], "opacity": 1.0}
         g.layer = level_layer(names[lid])
@@ -13205,7 +13277,7 @@ def transform_level(doc, lid, pt, vec, da) -> None:
                      for st in doc.get("stairs") or []]
     doc["ramps"] = [_xf(r, pt, vec, da) if r.get("level") == lid else r
                     for r in doc.get("ramps") or []]
-    for key in ("stair_cad", "parking", "marks", "landscape"):
+    for key in ("stair_cad", "parking", "marks", "landscape", "pavers"):
         m = doc.get(key)
         if isinstance(m, dict) and lid in m:
             m[lid] = _xf(m[lid], pt, vec, da)
@@ -13963,4 +14035,43 @@ def openings_along(doc, wall_ids, w=0.46, h=1.4, sill=0.5, pitch=0.75,
                              **({"ring": ring} if ring else {})})
         arch["openings"] += M.new_openings(arch["openings"], recs)
         n += len(recs)
+    return n
+
+
+def refresh_landscape(doc) -> int:
+    """The landscape areas of every imported floor read again from its CAD
+    plan (3.64.4: the lawn hatches too). How many areas."""
+    from . import furnish as FU_
+    from . import landscape as LS
+    n = 0
+    for lv in doc["arch"]["levels"]:
+        lid = lv["id"]
+        try:
+            pl = FU_.cad_plan(doc, lid)
+        except Exception:  # noqa: BLE001
+            pl = None
+        if not pl:
+            continue
+        for k_ in ("loops", "texts", "fills", "segs"):
+            pl.setdefault(k_, [])
+        try:
+            green = LS.areas(pl)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.refresh_landscape")
+            continue
+        if green:
+            doc["landscape"][lid] = [[list(p) for p in a] for a in green]
+            n += len(green)
+        else:
+            doc["landscape"].pop(lid, None)
+        try:
+            pv_ = LS.pavers(pl, green) if green else []
+        except Exception:  # noqa: BLE001
+            pv_ = []
+        if pv_:
+            doc.setdefault("pavers", {})[lid] = [[list(p) for p in a]
+                                                 for a in pv_]
+        else:
+            doc.setdefault("pavers", {}).pop(lid, None)
     return n

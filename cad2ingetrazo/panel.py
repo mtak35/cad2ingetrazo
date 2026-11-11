@@ -2117,6 +2117,21 @@ class Panel(QWidget):
         self.pl_plinth.setToolTip("How far the ground floor stands above the "
                                   "plot's ground")
         f.addRow("Plinth (floor above ground)", self.pl_plinth)
+        # 3.64.4: the lawns the plan hatches, over the natural ground
+        lrow_ = QHBoxLayout()
+        self.pl_lawn = _spin(0, 1.0, 0.1524, 0.0254)
+        self.pl_lawn.setToolTip(
+            "The lawns / landscape beds the CAD plan hatches (grass hatch "
+            "or a landscape layer): their top over the natural ground "
+            "(N.G.L.) — 6\" by default")
+        try:
+            self.pl_lawn.setValue(float(self.doc()["settings"].get(
+                "landscape_h", 0.1524)))
+        except Exception:  # noqa: BLE001
+            pass
+        lrow_.addWidget(self.pl_lawn, 1)
+        lrow_.addWidget(_btn("Apply", self._apply_lawn))
+        f.addRow("Landscape level (over ground)", lrow_)
         row = QHBoxLayout()
         row.addWidget(_btn("Apply setbacks", self._plot_setbacks,
                            primary=True))
@@ -2440,6 +2455,13 @@ class Panel(QWidget):
                             "<br><span style='color:#c0392b'>⚠ The building "
                             "crosses a setback line</span>")
         self.pl_info.setText(txt)
+
+    def _apply_lawn(self):
+        doc = self.doc()
+        doc["settings"]["landscape_h"] = round(self.pl_lawn.value(), 4)
+        from .host import len_txt
+        self.commit(doc, "Landscape level: " + len_txt(
+            doc["settings"]["landscape_h"]) + " over the ground")
 
     def _plot_store(self, corners, msg):
         doc = self.doc()

@@ -83,10 +83,28 @@ def ramp_notes(texts) -> list:
     return out
 
 
+#: 3.64.4: a level written after its value («+2'-0" F.F.L.», «+1'-6" LVL»),
+#: under a name («PLINTH LEVEL +2'-0"», «FLOOR LEVEL +2'-0"»), or a bare
+#: signed feet value («+2'-0"», «(±0'-0")») — the signed one only
+_LEV_AFTER = re.compile(r"^\s*\(?\s*([+\-±])\s*(\d+\s*'[^A-Za-z]*?)\)?\s*"
+                        r"(?:LEV(?:EL)?|LVL|F\.?F\.?L\.?|F\.?L\.?)?\.?\s*$",
+                        re.I)
+_LEV_NAMED = re.compile(r"^\s*(?:PLINTH|FLOOR|FINISH(?:ED)?\s+FLOOR|GROUND\s+"
+                        r"FLOOR|G\.?F\.?)\s*(?:LEV(?:EL)?|LVL)?\.?\s*[:=]?\s*"
+                        r"([+\-±]?)\s*(\d+\s*'.*?)\s*$", re.I)
+
+
 def level_note(text):
     """(«LEV. +4'-0"» as drawn, metres or None) — a level note — or None."""
     s = str(text or "").strip().split("\n")[0]
     m = _LEV.match(s)
+    if not m and len(s) <= 30:
+        m = _LEV_NAMED.match(s) or _LEV_AFTER.match(s)
+        if m:
+            v = feet(m.group(2))
+            if v is None:
+                return None
+            return s, -v if m.group(1) == "-" else v
     if not m or len(s) > 30:
         return None
     sign, val = m.group(1), m.group(2)
