@@ -267,6 +267,8 @@ def load(raw) -> dict:
     doc["pavers"] = {k: v for k, v in (raw.get("pavers") or {}).items()
                      if k in ids and isinstance(v, list)}
     # elements kept out of the 3D model (drawn on a floor they are not on)
+    doc["deleted_floors"] = [x for x in raw.get("deleted_floors") or []
+                             if isinstance(x, dict) and x.get("level")]
     doc["off3d"] = sorted({str(k) for k in raw.get("off3d") or []
                            if isinstance(k, str) and "|" in k})
     doc["roof_terraces"] = [str(k) for k in raw.get("roof_terraces") or []
@@ -14300,3 +14302,108 @@ def inner_walls(arch) -> set:
         if ok:
             out.add(w["id"])
     return out
+
+
+# ---- a whole floor deleted / put back (3.64.9) -------------------------------------
+_FLOOR_SKIP = ("settings", "site", "grid", "materials", "comp_names",
+               "fixture_lib", "deleted_floors")
+
+
+def delete_floor(doc, lid) -> tuple:
+    """Floor ``lid`` deleted with everything on it — its walls, doors and
+    windows, structure, rooms, stairs, furniture, fit-out, texts, imported
+    plan, level notes, landscape… — kept aside to put back (the last 6).
+    The ground floor is emptied, the level kept. (name, None) or (None,
+    why)."""
+    arch = doc["arch"]
+    lv = next((x for x in arch["levels"] if x["id"] == lid), None)
+    if lv is None:
+        return None, "no such floor"
+    import copy as _cp
+    snap = {"level": _cp.deepcopy(lv),
+            "index": arch["levels"].index(lv),
+            "kept_level": lv.get("kind") == "ground",
+            "arch": {}, "doc": {}, "doc_maps": {}, "arch_maps": {}}
+    wids = {w["id"] for w in arch["walls"] if w.get("level") == lid}
+    for k, v in list(arch.items()):
+        if k == "levels":
+            continue
+        if isinstance(v, list):
+            if k == "openings":
+                out = [o for o in v if o.get("wall") in wids or
+                       o.get("level") == lid]
+            else:
+                out = [e for e in v if isinstance(e, dict) and
+                       e.get("level") == lid]
+            if out:
+                snap["arch"][k] = _cp.deepcopy(out)
+                ids_ = {id(e) for e in out}
+                arch[k] = [e for e in v if id(e) not in ids_]
+        elif isinstance(v, dict) and lid in v and k not in ("project",
+                                                             "view"):
+            snap["arch_maps"][k] = _cp.deepcopy(v.pop(lid))
+    for k, v in list(doc.items()):
+        if k in _FLOOR_SKIP or k == "arch":
+            continue
+        if isinstance(v, list):
+            out = [e for e in v if isinstance(e, dict) and
+                   (e.get("level") == lid or e.get("to") == lid)]
+            if out:
+                snap["doc"][k] = _cp.deepcopy(out)
+                ids_ = {id(e) for e in out}
+                doc[k] = [e for e in v if id(e) not in ids_]
+        elif isinstance(v, dict) and lid in v:
+            snap["doc_maps"][k] = _cp.deepcopy(v.pop(lid))
+    if not snap["kept_level"]:
+        arch["levels"] = [x for x in arch["levels"] if x["id"] != lid]
+    dl = doc.setdefault("deleted_floors", [])
+    dl.append(snap)
+    del dl[:-6]
+    return lv["name"], None
+
+
+def deleted_floors(doc) -> list:
+    """[(index in the list, label)] — the floors deleted, newest first."""
+    out = []
+    for i, s in enumerate(doc.get("deleted_floors") or []):
+        n = sum(len(v) for v in s["arch"].values()) + sum(
+            len(v) for v in s["doc"].values())
+        out.append((i, f"{s['level'].get('name', 'Floor')} "
+                       f"({n} elements)"))
+    return out[::-1]
+
+
+def reinsert_floor(doc, i) -> tuple:
+    """A deleted floor put back where it was, with everything on it.
+    (name, None) or (None, why)."""
+    dl = doc.get("deleted_floors") or []
+    if not (0 <= i < len(dl)):
+        return None, "nothing to put back"
+    s = dl[i]
+    arch = doc["arch"]
+    lv = s["level"]
+    lid = lv["id"]
+    if not any(x["id"] == lid for x in arch["levels"]):
+        if lv.get("kind") == "ground" and any(
+                x.get("kind") == "ground" for x in arch["levels"]):
+            return None, "there is a ground floor already"
+        k = min(max(int(s.get("index", len(arch["levels"]))), 0),
+                len(arch["levels"]))
+        arch["levels"].insert(k, lv)
+        arch["levels"] = M.fix_levels(arch["levels"])
+    for k, items in s["arch"].items():
+        have = {e.get("id") for e in arch.get(k) or [] if isinstance(e, dict)}
+        arch.setdefault(k, [])
+        arch[k] += [e for e in items if e.get("id") is None or
+                    e.get("id") not in have]
+    for k, v in s["arch_maps"].items():
+        arch.setdefault(k, {})[lid] = v
+    for k, items in s["doc"].items():
+        have = {e.get("id") for e in doc.get(k) or [] if isinstance(e, dict)}
+        doc.setdefault(k, [])
+        doc[k] += [e for e in items if e.get("id") is None or
+                   e.get("id") not in have]
+    for k, v in s["doc_maps"].items():
+        doc.setdefault(k, {})[lid] = v
+    dl.pop(i)
+    return lv.get("name", "Floor"), None

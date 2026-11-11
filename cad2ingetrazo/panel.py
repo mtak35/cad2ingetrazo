@@ -787,6 +787,16 @@ class Panel(QWidget):
         self.level_box.currentIndexChanged.connect(self._level_changed)
         row.addWidget(QLabel("Level"))
         row.addWidget(self.level_box, 1)
+        # 3.64.9: the floor picked deleted whole / a deleted one put back
+        b_del = _btn("Delete floor", self.delete_floor_cmd,
+                     "Delete the floor picked here with everything on it "
+                     "(walls, doors, windows, slabs, rooms, stairs, "
+                     "furniture, its CAD plan…) — kept aside: «Reinsert» "
+                     "puts it back")
+        row.addWidget(b_del)
+        self.b_reins = _btn("Reinsert ▾", self._reinsert_menu,
+                            "Put a deleted floor back, as it was")
+        row.addWidget(self.b_reins)
         self.lay.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(_btn("3D", self.show_3d, "The whole model, uncut, "
@@ -1310,6 +1320,49 @@ class Panel(QWidget):
             arch["levels"])
         self.commit(doc, "Level added")
 
+    def delete_floor_cmd(self):
+        doc = self.doc()
+        lid = self.level_box.currentData()
+        lv = PJ.level_by_id(doc["arch"], lid) if lid else None
+        if lv is None:
+            self.flash("Pick a floor in the Level list first")
+            return
+        ground = lv.get("kind") == "ground"
+        msg = (f"Delete everything on «{lv['name']}»? The ground floor "
+               "level itself stays, empty." if ground else
+               f"Delete the floor «{lv['name']}» with everything on it?")
+        if QMessageBox.question(self, "Delete floor", msg + "\n\nIt is "
+                                "kept aside: «Reinsert» puts it back.") != \
+                QMessageBox.Yes:
+            return
+        name, why = PJ.delete_floor(doc, lid)
+        if why:
+            self.flash(f"Not deleted — {why}")
+            return
+        self.commit(doc, f"Floor «{name}» deleted (Reinsert puts it back)")
+
+    def _reinsert_menu(self):
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QMenu
+        doc = self.doc()
+        items = PJ.deleted_floors(doc)
+        if not items:
+            self.flash("No deleted floor to put back")
+            return
+        m = QMenu(self)
+        for i, lab in items:
+            m.addAction(f"Reinsert «{lab}»",
+                        lambda i=i: self.reinsert_floor_cmd(i))
+        m.exec(QCursor.pos())
+
+    def reinsert_floor_cmd(self, i):
+        doc = self.doc()
+        name, why = PJ.reinsert_floor(doc, i)
+        if why:
+            self.flash(f"Not put back — {why}")
+            return
+        self.commit(doc, f"Floor «{name}» put back")
+
     def _remove_level(self):
         doc = self.doc()
         arch = doc["arch"]
@@ -1325,14 +1378,7 @@ class Panel(QWidget):
                                 "» and everything on it?") != \
                 QMessageBox.Yes:
             return
-        ids = {w["id"] for w in arch["walls"] if w["level"] == lid}
-        arch["walls"] = [w for w in arch["walls"] if w["level"] != lid]
-        arch["openings"] = [o for o in arch["openings"] if o["wall"] not in ids]
-        arch["structure"] = [e for e in arch["structure"] if e["level"] != lid]
-        arch["rooms"] = [x for x in arch["rooms"] if x["level"] != lid]
-        doc["texts"] = [t for t in doc["texts"] if t["level"] != lid]
-        doc["imports"].pop(lid, None)
-        arch["levels"] = [x for x in arch["levels"] if x["id"] != lid]
+        PJ.delete_floor(doc, lid)          # (kept aside: Reinsert)
         self.commit(doc, f"«{lv['name']}» removed")
 
     def _apply_levels(self):
