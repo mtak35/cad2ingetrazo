@@ -558,7 +558,7 @@ def _front_parts(pr, k_body):
 
 def _body_mats(pr) -> set:
     """The model's carcass and door materials: each covering 5 % or more
-    of its upright area — less the worktop's (the most up-facing area at
+    of its upright area (1.2 %) — less the worktop's (the most up-facing area at
     its top), and less the small ones (handles, hinges, glass strips)."""
     up, top = {}, {}
     x0, y0, z0, x1, y1, z1 = pr["box"]
@@ -586,7 +586,7 @@ def _body_mats(pr) -> set:
         return set()
     tot = sum(up.values())
     body = max(up, key=up.get)
-    out = {k for k, a in up.items() if a >= 0.05 * tot}
+    out = {k for k, a in up.items() if a >= 0.012 * tot}
     if top:
         wt = max(top, key=top.get)
         if wt != body:
@@ -600,7 +600,7 @@ def restyled(key, entry, skey, sentry, strip=False):
     finish), and with ``strip`` its own handles left out (CAD2IngeTrazo's
     sized handles go on instead). The model as it is when nothing
     changes."""
-    ck = (key, skey, bool(LOWPOLY[0]), bool(strip), 2)
+    ck = (key, skey, bool(LOWPOLY[0]), bool(strip), 3)
     if ck in _RESTYLED:
         return _RESTYLED[ck]
     pr = proto(key, entry)
