@@ -13006,6 +13006,12 @@ def commit(viewport, doc, opts=None) -> None:
     arch["levels"] = M.fix_levels(arch["levels"])
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     arch["_walls_down"] = not slab_on_top(doc)
+    try:                      # 3.64.7: the walls inside a floor's slab
+        arch["_inner_walls"] = inner_walls(arch)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.inner_walls")
+        arch.pop("_inner_walls", None)
     arch["_ground_down"] = (float(doc["settings"].get(
         "ext_finish_drop", 0.3048) or 0.0) if not slab_on_top(doc)
         and not ground_slab_on(doc) else 0.0)
@@ -13200,6 +13206,7 @@ def commit(viewport, doc, opts=None) -> None:
     arch.pop("_plaster", None)
     arch.pop("_walls_down", None)
     arch.pop("_ground_down", None)
+    arch.pop("_inner_walls", None)
     data = copy.deepcopy(doc)
     arch["_plaster"] = float(doc["settings"].get("plaster_t", 0.0127) or 0.0)
     arch["_walls_down"] = not slab_on_top(doc)
@@ -14206,3 +14213,46 @@ def refresh_landscape(doc) -> int:
         else:
             doc.setdefault("pavers", {}).pop(lid, None)
     return n
+
+
+def inner_walls(arch) -> set:
+    """The ids of the walls standing inside their floor's slab — slab on
+    both sides of them (not on its edge, not by an opening in it): they
+    stand on the slab, it runs on under them (3.64.7)."""
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    out = set()
+    by = {}
+    for s in arch["structure"]:
+        if s["type"] != "slab" or s.get("roof") or not s.get("corners"):
+            continue
+        try:
+            by.setdefault(s["level"], []).append(_poly_of(s))
+        except Exception:  # noqa: BLE001
+            continue
+    U = {lid: unary_union(ps).buffer(-0.02) for lid, ps in by.items()}
+    for w in arch["walls"]:
+        S = U.get(w.get("level"))
+        if S is None or S.is_empty or w.get("rail") or \
+                w.get("kind", "line") != "line" or "a" not in w:
+            continue
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 0.05:
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        n = (-u[1], u[0])
+        off = float(w.get("t", 0.2)) / 2 + 0.15
+        ok = True
+        for f in (0.2, 0.5, 0.8):
+            c = (a[0] + u[0] * L * f, a[1] + u[1] * L * f)
+            for sg in (1, -1):
+                if not S.contains(Point(c[0] + n[0] * off * sg,
+                                        c[1] + n[1] * off * sg)):
+                    ok = False
+                    break
+            if not ok:
+                break
+        if ok:
+            out.add(w["id"])
+    return out

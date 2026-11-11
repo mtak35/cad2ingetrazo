@@ -67,6 +67,12 @@ def _down(doc, w, li) -> float:
     gd = float(doc.get("_ground_down", 0.0) or 0.0)
     if gd > 0 and li.get("ground"):       # on the ground: down to the
         return gd                         # outside finish's level
+    # 3.64.7: an inside wall of an upper floor stands ON its floor slab
+    # (the slab runs on under it); only the outside walls go down over the
+    # slab's edge (their face in one plane with the floor below)
+    inner = doc.get("_inner_walls")
+    if inner is not None and w.get("id") in inner:
+        return 0.0
     return max(float(li.get("slab", 0.0) or 0.0), 0.0)
 
 
@@ -2412,11 +2418,46 @@ def build(doc: dict, elevations) -> list[dict]:
         down_cut = []
         if doc.get("_walls_down"):         # the walls standing on the slab
             try:
+                # 3.64.7: only the outside walls, and of them only their
+                # plaster skins — the slab runs on under the walls' core
+                # (it was cut under every wall of the floor over it)
+                inner = doc.get("_inner_walls") or set()
+                pl_ = PLASTER(doc)
                 wp_ = W.plan([w for w in mine if not w.get("rail") and abs(
                     float(w.get("base", 0.0) or 0.0)) < 1e-6
                     and W.why_not(w) is None])
-                down_cut = [{"corners": [list(q) for q in pc["outer"]]}
-                            for pcs in wp_.values() for pc in pcs]
+                from shapely.geometry import Polygon as _PgS
+                down_cut = []
+                for wid_, pcs in wp_.items():
+                    if wid_ in inner:
+                        continue
+                    for pc in pcs:
+                        g_ = _PgS(pc["outer"]).buffer(0)
+                        if pl_ > 0:
+                            g_ = g_.difference(g_.buffer(-max(pl_, 0.005),
+                                                         join_style=2))
+                            if g_.geom_type == "Polygon" and g_.interiors:
+                                # the ring in two (a corner list keeps no
+                                # hole)
+                                from shapely.geometry import LineString \
+                                    as _LsS
+                                from shapely.ops import split as _spS
+                                c_ = g_.interiors[0].centroid
+                                b_ = g_.bounds
+                                ln_ = _LsS([(b_[0] - 1, c_.y - (b_[2] - b_[0]
+                                                                + 2) * 0.37),
+                                            (b_[2] + 1, c_.y + (b_[2] - b_[0]
+                                                                + 2) * 0.37)])
+                                try:
+                                    g_ = _spS(g_, ln_)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        for q_ in getattr(g_, "geoms", [g_]):
+                            if q_.geom_type == "Polygon" and \
+                                    q_.area > 1e-5 and not q_.interiors:
+                                down_cut.append({"corners": [
+                                    list(c) for c in
+                                    list(q_.exterior.coords)[:-1]]})
             except Exception:  # noqa: BLE001
                 down_cut = []
         main_t_ = {}                     # the main floor / roof slab depth
