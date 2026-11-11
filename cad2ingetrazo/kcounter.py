@@ -1067,3 +1067,93 @@ def _blocks(pl, poly, texts):
         big = max(sinks, key=lambda o: o[0].area)
         out = [o for o in out if o[1] != "ksink" or o is big]
     return out
+
+
+#: the bar handles' sizes (m, centre to centre ≈ the bar's length) offered
+HANDLE_SIZES = [(0.096, "96 mm"), (0.128, "128 mm"), (0.16, "160 mm"),
+                (0.192, "192 mm"), (0.256, "256 mm"), (0.32, "320 mm"),
+                (0.448, "448 mm")]
+HANDLE_COLOR = (0.74, 0.75, 0.77)          # brushed stainless
+#: where an L corner unit's diagonal door runs, as fractions of its box
+#: (x from −X, y from −Y): two ends
+CORNER_DOOR = {"corner_cabinet": ((0.0, 0.415), (0.254, 0.0)),
+               "upper_corner": ((0.263, 0.54), (0.571, 0.27))}
+
+
+def _bar(c, a, n, L, out):
+    """A bar handle: its bar ``L`` long along ``a`` standing off the face
+    at ``c`` (outward ``n``) on two legs."""
+    w = (a[1] * n[2] - a[2] * n[1], a[2] * n[0] - a[0] * n[2],
+         a[0] * n[1] - a[1] * n[0])
+
+    def box(cc, la, ln0, ln1, lw):
+        pts = {}
+        for i, sa in enumerate((-la / 2, la / 2)):
+            for j, sn in enumerate((ln0, ln1)):
+                for k, sw in enumerate((-lw / 2, lw / 2)):
+                    pts[i, j, k] = tuple(cc[m] + a[m] * sa + n[m] * sn +
+                                         w[m] * sw for m in range(3))
+        q = pts
+        out.extend([
+            [q[0, 0, 0], q[0, 0, 1], q[0, 1, 1], q[0, 1, 0]],
+            [q[1, 0, 0], q[1, 1, 0], q[1, 1, 1], q[1, 0, 1]],
+            [q[0, 0, 0], q[0, 1, 0], q[1, 1, 0], q[1, 0, 0]],
+            [q[0, 0, 1], q[1, 0, 1], q[1, 1, 1], q[0, 1, 1]],
+            [q[0, 0, 0], q[1, 0, 0], q[1, 0, 1], q[0, 0, 1]],
+            [q[0, 1, 0], q[0, 1, 1], q[1, 1, 1], q[1, 1, 0]]])
+    box(c, L + 0.024, 0.026, 0.038, 0.012)           # the bar
+    for s_ in (-L / 2, L / 2):                         # its two legs
+        box(tuple(c[m] + a[m] * s_ for m in range(3)), 0.01, 0.0, 0.027,
+            0.01)
+
+
+def handle_faces(f, pr, z, size) -> list:
+    """The bar handle(s) of kitchen piece ``f`` (drawn with model ``pr``,
+    standing on ``z``): [loop of (x, y, z)] — a lower cabinet's along its
+    top under the worktop, an upper's along its bottom, a corner unit's
+    upright on its diagonal door."""
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    fit = f.get("fit") or [x1 - x0, y1 - y0]
+    W, D = float(fit[0]), float(fit[1])
+    H = z1 - z0
+    if f.get("fit_h"):
+        H *= min(max(float(f["fit_h"]) / max(z1 - z0, 1e-6), 0.7), 1.4)
+    r = math.radians(float(f.get("rot", 0.0) or 0.0))
+    cr, sr = math.cos(r), math.sin(r)
+    mx = -1.0 if f.get("mirror") else 1.0
+
+    def P(lx, ly, h):
+        lx *= mx
+        return (float(f["x"]) + lx * cr - ly * sr,
+                float(f["y"]) + lx * sr + ly * cr, z + h)
+
+    def V(lx, ly):
+        lx *= mx
+        return (lx * cr - ly * sr, lx * sr + ly * cr, 0.0)
+    out = []
+    kind = f.get("kind")
+    up = (0.0, 0.0, 1.0)
+    if kind in CORNER_DOOR:
+        (fa, fb), (fc, fd) = CORNER_DOOR[kind]
+        pa = (-W / 2 + fa * W, -D / 2 + fb * D)
+        pb = (-W / 2 + fc * W, -D / 2 + fd * D)
+        t = 0.8                              # near the door's free edge
+        px, py = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+        ex, ey = pb[0] - pa[0], pb[1] - pa[1]
+        ln = math.hypot(ex, ey) or 1.0
+        nx, ny = -ey / ln, ex / ln           # outward: to (−X, −Y)
+        if nx + ny > 0:
+            nx, ny = -nx, -ny
+        L = min(size, H - 0.12)
+        h = H - 0.10 - L / 2 if kind == "corner_cabinet" else \
+            0.07 + L / 2
+        _bar(P(px, py, h), up, V(nx, ny), L, out)
+        return out
+    L = min(size, max(W - 0.1, 0.06))
+    fx = V(1.0, 0.0)
+    fn = V(0.0, -1.0)
+    if kind == "wall_cabinet":
+        _bar(P(0.0, -D / 2, 0.06), fx, fn, L, out)
+    else:                                       # under the worktop
+        _bar(P(0.0, -D / 2, H - 0.11), fx, fn, L, out)
+    return out

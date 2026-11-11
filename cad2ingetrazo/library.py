@@ -464,3 +464,127 @@ def groups_for(lib, fr, lf, name, layer, ext, ifc=None,
 def clear_cache():
     _PROTO.clear()
     _LOW.clear()
+    _RESTYLED.clear()
+
+
+_RESTYLED: dict = {}
+
+
+def _mat_key(at) -> tuple:
+    tex = at.get("texture") or {}
+    return (tuple(round(float(c), 3) for c in (at.get("color") or ())[:3]),
+            str(tex.get("path") if isinstance(tex, dict) else tex),
+            str(at.get("mat") or ""))
+
+
+def _body_mat(pr):
+    """The model's body material: the one covering most of its upright
+    faces (the carcass and the doors, not the worktop) — (key, attrs)."""
+    tot, att = {}, {}
+    for m, xf in pr["parts"]:
+        if m is None:
+            continue
+        for f in m.faces:
+            try:
+                n = f.normal()
+                a = f.area()
+            except Exception:  # noqa: BLE001
+                continue
+            if xf is not None:
+                n = xf.mapVector(n)
+            if abs(n.z()) > 0.5 * max(n.length(), 1e-9):
+                continue                       # a top / bottom
+            k = _mat_key(f.attrs)
+            tot[k] = tot.get(k, 0.0) + a
+            att.setdefault(k, f.attrs)
+    if not tot:
+        return None, None
+    k = max(tot, key=tot.get)
+    return k, att[k]
+
+
+def _front_parts(pr, k_body):
+    """The ids of the faces standing wholly in front of the model's doors
+    (its handles / knobs): past the front plane of its body faces — the
+    model's front its −Y side."""
+    yb = None
+    for m, xf in pr["parts"]:
+        for f in m.faces:
+            if _mat_key(f.attrs) != k_body:
+                continue
+            for p_ in f.vertices:
+                q = xf.map(p_) if xf is not None else p_
+                yb = q.y() if yb is None else min(yb, q.y())
+    if yb is None:
+        return set()
+    x0, y0, z0, x1, y1, z1 = pr["box"]
+    if yb - y0 < 0.004 or yb - y0 > 0.09:
+        return set()                     # nothing stands out (or a plinth)
+    out = set()
+    for m, xf in pr["parts"]:
+        for f in m.faces:
+            ys = [(xf.map(p_) if xf is not None else p_).y()
+                  for p_ in f.vertices]
+            if ys and max(ys) < yb - 0.001:
+                out.add(id(f))
+    return out
+
+
+def restyled(key, entry, skey, sentry, strip=False):
+    """Model ``key`` with its body material made the body material of model
+    ``skey`` (a style's cabinet: a kitchen corner unit in that style's
+    finish), and with ``strip`` its own handles left out (CAD2IngeTrazo's
+    sized handles go on instead). The model as it is when nothing
+    changes."""
+    ck = (key, skey, bool(LOWPOLY[0]), bool(strip))
+    if ck in _RESTYLED:
+        return _RESTYLED[ck]
+    pr = proto(key, entry)
+    sp = proto(skey, sentry) if skey else None
+    if pr is None:
+        return pr
+    out = pr
+    try:
+        from core.mesh import Mesh
+        k0, _a0 = _body_mat(pr)
+        k1, a1 = _body_mat(sp) if sp is not None else (None, None)
+        new = None
+        if k0 is not None and a1 is not None and k0 != k1:
+            new = {kk: a1[kk] for kk in ("color", "texture", "mat")
+                   if kk in a1}
+        drop = _front_parts(pr, k0) if strip and k0 is not None else set()
+        if new or drop:
+            parts = []
+            for m, xf in pr["parts"]:
+                nm = Mesh()
+                for f in m.faces:
+                    if id(f) in drop:
+                        continue
+                    try:
+                        hs = f.holes
+                        nf = nm.add_face(f.vertices, hs) if hs else \
+                            nm.add_face(f.vertices)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    at = dict(f.attrs)
+                    if new and _mat_key(at) == k0:
+                        for kk in ("color", "texture", "mat"):
+                            at.pop(kk, None)
+                        at.update({kk: (dict(v) if isinstance(v, dict)
+                                        else v) for kk, v in new.items()})
+                    nf.attrs = at
+                parts.append((nm, xf))
+            box = list(pr["box"])
+            if drop:                    # the handles gone: the box's front
+                ys = [(xf.map(p_) if xf is not None else p_).y()
+                      for m, xf in parts for f in m.faces
+                      for p_ in f.vertices]
+                if ys:
+                    box[1] = min(ys)
+            out = {"parts": parts, "box": tuple(box)}
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("library.restyled")
+        out = pr
+    _RESTYLED[ck] = out
+    return out

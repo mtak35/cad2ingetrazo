@@ -10072,6 +10072,7 @@ def _finish_groups(doc):
                 except Exception:  # noqa: BLE001
                     from .host import log_error
                     log_error("project edge finish trim")
+                ppcs_ = []
                 if lv.get("kind") == "ground" and pieces and \
                         platform_on(doc):
                     # on the foundation platform: the finish only where the
@@ -10079,8 +10080,8 @@ def _finish_groups(doc):
                     # the platform leaves out)
                     try:
                         from shapely.ops import unary_union as _uu3
-                        pu_ = _uu3([q_ for q_, _t in
-                                    platform_parts(doc)["pieces"]])
+                        ppcs_ = platform_parts(doc)["pieces"]
+                        pu_ = _uu3([q_ for q_, _t in ppcs_])
                         if not pu_.is_empty:
                             pieces = [g for p_ in pieces for g in getattr(
                                 p_.intersection(pu_), "geoms",
@@ -10112,6 +10113,13 @@ def _finish_groups(doc):
                         ez_).area > 0.5 * p_.area else drop_
                     z = elev[i] + floor_offset_at(doc, lid, (c_.x, c_.y)) \
                         - d2_            # outside, a step down (ground)
+                    # 3.63: on the platform as built (the entrance steps'
+                    # foot sets the porch they land on lower): the finish
+                    # on its top, not floating over it
+                    for pq_, tq_ in ppcs_:
+                        if pq_.buffer(0.01).contains(c_):
+                            z = tq_
+                            break
                     piece = {"outer": S._ccw([tuple(q) for q in
                                               list(p_.exterior.coords)[:-1]]),
                              "holes": [list(reversed(S._ccw(
@@ -11483,6 +11491,13 @@ def platform_parts(doc) -> dict:
                 nx, ny = -nx, -ny
             c_ = pg.representative_point()
             top = elev + floor_offset_at(doc, lid, (c_.x, c_.y)) - drop + fin
+            # 3.63: the porch's level as built (the entrance steps' foot
+            # may have set it lower than the outside drop): the ramp from
+            # its finished floor, no step at its top
+            for pq_, tq_ in out["pieces"]:
+                if pq_.buffer(0.01).contains(c_):
+                    top = tq_ + fin
+                    break
             H = top - zg
             if H < 0.03:
                 continue
@@ -11562,6 +11577,7 @@ def _platform_groups(doc):
     nos = float(st.get("stair_nosing", 0.025) or 0.0)
     if st.get("stair_nose_type") == "flush":
         nos = 0.0
+    fin_t = float(st.get("finish_t", 0.0508) or 0.0) if fin_on else 0.0
     try:
         from . import stairs as ST_
         fcol = ST_.fin_colour(st.get("stair_fin", "marble"))
@@ -11584,18 +11600,42 @@ def _platform_groups(doc):
             rr = p_[3] if len(p_) > 3 else 0.15
             if o is None and ft > 0:
                 # a CAD step strip (no direction): concrete, the tread's
-                # finish, and the riser's finish on its sides not under a
-                # higher step (3.57: they were bare concrete)
+                # finish with its nosing out over the riser on the sides
+                # that drop (3.63), and the riser's finish there (3.57:
+                # they were bare concrete)
                 f_ += _prism(pc, zg, zt - ft)
-                f_ += [dict(fc, color=fcol) for fc in _prism(pc, zt - ft, zt)]
+                hi_ = [q[0] for q in pcs if q[1] > zt + 0.01] + [
+                    q_ for q_, t_ in parts["pieces"]
+                    if t_ + fin_t > zt - 0.01]
+                hiu_ = _uu([q.buffer(0.003, join_style=2) for q in hi_]) \
+                    if hi_ else None
+                tread_ = pc
+                if nos + frt > 1e-4:
+                    try:
+                        nr_ = pc.buffer(nos + frt, join_style=2).difference(
+                            pc.buffer(-0.0005, join_style=2))
+                        if hiu_ is not None:
+                            nr_ = nr_.difference(hiu_)
+                        if land_u is not None:
+                            nr_ = nr_.difference(land_u)
+                        tread_ = _uu([pc, nr_]).buffer(0)
+                    except Exception:  # noqa: BLE001
+                        tread_ = pc
+                for tg_ in getattr(tread_, "geoms", [tread_]):
+                    if tg_.geom_type == "Polygon" and tg_.interiors:
+                        c_ = tg_.centroid           # (a ring: in two)
+                        b_ = tg_.bounds
+                        tg_ = tg_.difference(_LS(
+                            [(c_.x, b_[1] - 1), (c_.x, b_[3] + 1)])
+                            .buffer(0.0005))
+                    f_ += [dict(fc, color=fcol) for fc in
+                           _prism(tg_, zt - ft, zt)]
                 if frt > 0:
                     try:
-                        hi_ = [q[0] for q in pcs if q[1] > zt + 0.01]
                         ring_ = pc.buffer(frt, join_style=2).difference(
                             pc.buffer(-0.0005, join_style=2))
-                        if hi_:
-                            ring_ = ring_.difference(
-                                _uu(hi_).buffer(0.003, join_style=2))
+                        if hiu_ is not None:
+                            ring_ = ring_.difference(hiu_)
                         if land_u is not None:
                             ring_ = ring_.difference(land_u)
                         if any(getattr(g_, "interiors", None) and
@@ -11609,7 +11649,7 @@ def _platform_groups(doc):
                                 [(c_.x, b_[1] - 1), (c_.x, b_[3] + 1)])
                                 .buffer(0.0005))
                         f_ += [dict(fc, color=fcol) for fc in
-                               _prism(ring_, zg, zt, 0.0005)]
+                               _prism(ring_, zg, zt - ft, 0.0005)]
                     except Exception:  # noqa: BLE001
                         from .host import log_error
                         log_error("project step riser finish")
@@ -12066,14 +12106,47 @@ def _furniture_pose(f, pr, z):
     return m
 
 
+#: the kitchen pieces that take CAD2IngeTrazo's sized handles (3.63)
+HANDLE_KINDS = ("cabinet", "corner_cabinet", "wall_cabinet", "upper_corner",
+                "island", "ksink")
+
+
+def handles_on(doc, f) -> bool:
+    return bool(f.get("kc")) and f.get("kind") in HANDLE_KINDS and \
+        bool(doc["settings"].get("k_handles", True))
+
+
+def furn_proto(doc, f):
+    """The library model a furniture record is drawn with: as ``furn_lib``
+    names it — a kitchen corner unit in the kitchen style's finish (the
+    style's cabinet's body material over it), a kitchen cabinet without
+    the model's own handles when CAD2IngeTrazo's sized ones go on."""
+    from . import library as LB
+    key, entry = furn_lib(doc, f)
+    skey = sentry = None
+    if f.get("kind") in ("corner_cabinet", "upper_corner") and \
+            not (isinstance(f.get("lib"), dict) and f["lib"].get("key")):
+        sty_ = (doc.get("fixture_lib") or {}).get(
+            "cabinet" if f["kind"] == "corner_cabinet" else "wall_cabinet")
+        if isinstance(sty_, dict) and sty_.get("key"):
+            skey, sentry = sty_["key"], sty_.get("entry")
+    strip = handles_on(doc, f)
+    if skey or strip:
+        return LB.restyled(key, entry, skey, sentry, strip) or \
+            LB.proto(key, entry)
+    return LB.proto(key, entry)
+
+
 def furn_lib(doc, f) -> tuple:
     """(key, entry) of the library model a furniture / fixture record is
     drawn as: the one picked for it, else the one picked for its kind
     (every WC, every basin…), else its own."""
     o = f.get("lib")
     if not (isinstance(o, dict) and o.get("key")):
+        # (a kitchen corner unit keeps its L model: the style recolours it)
         o = (doc.get("fixture_lib") or {}).get(f.get("kind") or "") \
-            if f.get("kind") else None
+            if f.get("kind") and f.get("kind") not in (
+                "corner_cabinet", "upper_corner") else None
     if isinstance(o, dict) and o.get("key"):
         return o["key"], o.get("entry")
     return f["key"], f.get("entry")
@@ -12082,8 +12155,10 @@ def furn_lib(doc, f) -> tuple:
 def furn_name(doc, f) -> str:
     o = f.get("lib")
     if not (isinstance(o, dict) and o.get("key")):
+        # (a kitchen corner unit keeps its L model: the style recolours it)
         o = (doc.get("fixture_lib") or {}).get(f.get("kind") or "") \
-            if f.get("kind") else None
+            if f.get("kind") and f.get("kind") not in (
+                "corner_cabinet", "upper_corner") else None
     if isinstance(o, dict) and o.get("name"):
         return str(o["name"])
     return str(f.get("name", "Furniture"))
@@ -12101,10 +12176,11 @@ def _furniture_groups(doc):
     names = {lv["id"]: lv["name"] for lv in arch["levels"]}
     out = []
     _rooms_cache = {}
+    hfaces_ = {}
     for f in doc.get("furniture") or []:
         if f["level"] not in z_of:
             continue
-        pr = LB.proto(*furn_lib(doc, f))
+        pr = furn_proto(doc, f)
         if pr is None:
             continue
         rec = next((r for r in arch["rooms"] if r["id"] == f.get("room")),
@@ -12127,6 +12203,17 @@ def _furniture_groups(doc):
             z = z_of[f["level"]] + h_ - (pr["box"][5] - pr["box"][2])
         z += float(f.get("zoff", 0.0) or 0.0)    # a wall cabinet's height
         base = _furniture_pose(f, pr, z)
+        if handles_on(doc, f):          # 3.63: the sized bar handles
+            try:
+                from . import kcounter as KC_
+                hsz_ = float(f.get("handle") or doc["settings"].get(
+                    "k_handle_len", 0.16) or 0.16)
+                if hsz_ > 0.01:
+                    hfaces_.setdefault(f["level"], []).extend(
+                        KC_.handle_faces(f, pr, z, hsz_))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project.handles")
         nm = f"{furn_name(doc, f)} · {names[f['level']]}"
         if len(pr["parts"]) == 1:
             mesh, xf = pr["parts"][0]
@@ -12151,6 +12238,24 @@ def _furniture_groups(doc):
                        "at": [float(f["x"]), float(f["y"]),
                               float(f.get("rot", 0.0) or 0.0)]}}
         out.append(g)
+    for lid_, fs_ in hfaces_.items():      # the kitchen's handles: one group
+        if not fs_:
+            continue
+        try:
+            from . import kcounter as KC_
+            g = Group(_mesh_of([{"loop": q, "holes": [],
+                                 "color": KC_.HANDLE_COLOR} for q in fs_]),
+                      name=f"Kitchen handles · {names[lid_]}")
+            g.component = False
+            g.material = {"color": KC_.HANDLE_COLOR, "opacity": 1.0}
+            g.layer = level_layer(names[lid_])
+            g.ifc = {"class": "IfcFurniture", "name": "Kitchen handles"}
+            g.ext = {KEY: {"type": "khandles", "id": f"khandles-{lid_}",
+                           "level": lid_}}
+            out.append(g)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.handles group")
     return out
 
 
@@ -12168,8 +12273,7 @@ def moved_furniture(scene, doc) -> int:
         if f is None:
             continue
         m = g.xform
-        from . import library as LB0
-        pr0 = LB0.proto(*furn_lib(doc, f))
+        pr0 = furn_proto(doc, f)
         if pr0 is not None and len(pr0["parts"]) == 1 and \
                 pr0["parts"][0][1] is not None:
             inv, ok = pr0["parts"][0][1].inverted()
@@ -12185,8 +12289,7 @@ def moved_furniture(scene, doc) -> int:
         if f.get("mirror"):              # its x axis runs backwards
             rot = (rot + 180.0 + 180.0) % 360.0 - 180.0
         at = t.get("at") or [f["x"], f["y"], f.get("rot", 0.0)]
-        from . import library as LB
-        pr = LB.proto(*furn_lib(doc, f))
+        pr = pr0
         if pr is None:
             continue
         x0, y0, _z0, x1, y1, _z1 = pr["box"]
