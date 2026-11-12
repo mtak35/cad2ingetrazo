@@ -9421,31 +9421,11 @@ def note_weight(doc, lid):
             else None
     except Exception:  # noqa: BLE001
         return None
-    # 3.64.12: the floor's open hall (a parking hall, no room drawn round
-    # it): the main slab less the rooms — a note there counts by that
-    # area, the biggest floor of the level
-    open_ = []
-    try:
-        from shapely.geometry import Polygon as _Pg
-        from shapely.ops import unary_union as _uu
-        sl_ = [_Pg(e["corners"]).buffer(0) for e in arch["structure"]
-               if e["type"] == "slab" and e["level"] == lid
-               and not e.get("zone") and len(e.get("corners") or []) >= 3]
-        if sl_:
-            rest_ = _uu(sl_).difference(_uu(rooms) if rooms else _Pg())
-            open_ = [g_ for g_ in getattr(rest_, "geoms", [rest_])
-                     if g_.geom_type == "Polygon" and g_.area > 20.0]
-    except Exception:  # noqa: BLE001
-        open_ = []
-
     def fn(x, y):
         p = Point(x, y)
         for r in rooms:
             if r.contains(p):
                 return max(float(r.area), 1.0)
-        for g_ in open_:
-            if g_.buffer(0.05).contains(p):
-                return float(g_.area)
         return 1.0 if hull is not None and hull.contains(p) else 0.0
     return fn
 
