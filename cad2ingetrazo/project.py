@@ -9206,8 +9206,14 @@ def _stair_groups(doc):
     recs = {s_["id"]: s_ for s_ in doc.get("stairs") or []}
     stt = doc.get("settings") or {}
     prep, count = [], {}
+    try:
+        hid_ = stairs_hidden(doc)
+    except Exception:  # noqa: BLE001
+        hid_ = set()
     for name, sid, lid, parts, layer, rails in ST.groups(
             doc, z_of, lambda lid: level_layer(names[lid])):
+        if sid in hid_:              # 3.64.10: up to no floor yet
+            continue
         z = z_of[lid]
         items = [("stair", parts, None)] + \
             [("stairrail", [r_], k_) for k_, r_ in enumerate(rails or [])
@@ -9666,13 +9672,20 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
             arch["levels"][0]["id"] == lid     # (not over a basement)
     except Exception:  # noqa: BLE001
         on_platform = False
+    # 3.64.10: the floor's openings out of every piece (a ramp's well
+    # crossing a piece's edge too — kept only when wholly inside before,
+    # and the piece covered the ramp)
+    if holes_all:
+        hu_ = unary_union(holes_all)
+        pieces = [(pg_.difference(hu_), v_) for pg_, v_ in pieces]
     for part, lv in pieces:
         for g in getattr(part, "geoms", [part]):
             if g.geom_type != "Polygon" or g.area < 0.5:
                 continue
             g = g.buffer(0.0)
-            hs = [list(h.exterior.coords)[:-1] for h in holes_all
-                  if h.within(g.buffer(0.01))]
+            if g.geom_type != "Polygon" or g.is_empty:
+                continue
+            hs = [list(h.coords)[:-1] for h in g.interiors]
             step = max(0.0, lv - base)
             new.append({"type": "slab", "level": lid, "zone": True,
                         "note": True,
@@ -10367,11 +10380,19 @@ def ramp_solids(doc) -> list:
     z_of = {lv["id"]: elev[i] for i, lv in enumerate(arch["levels"])}
     st = doc["settings"]
     out = []
+    try:
+        rst_ = ramp_states(doc)
+    except Exception:  # noqa: BLE001
+        rst_ = {}
     for r in doc.get("ramps") or []:
         lid = r.get("level")
         if lid not in z_of or len(r.get("sections") or []) < 2:
             continue
-        z = z_of[lid] + open_offset(doc, lid)
+        rs_ = rst_.get(r.get("id")) or {}
+        if rs_.get("hide"):
+            continue
+        z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
+                                                      or 0.0)
         out.append({"sections": r["sections"],
                     "zs": [z + v for v in PK.ramp_z(r)],
                     "t": float(r.get("t", st.get("ramp_t", 0.2)))})
@@ -10654,11 +10675,21 @@ def _parking_groups(doc):
         g.ext = {KEY: {"type": "landscape", "id": f"green-{lid}",
                        "level": lid}}
         out.append(g)
+    try:
+        rst_ = ramp_states(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ramp_states")
+        rst_ = {}
     for r in doc["ramps"]:
         lid = r["level"]
         if lid not in z_of:
             continue
-        z = z_of[lid] + open_offset(doc, lid)
+        rs_ = rst_.get(r["id"]) or {}
+        if rs_.get("hide"):       # 3.64.10: to a floor not there / twice
+            continue
+        z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
+                                                      or 0.0)
         tt = float(r.get("t", st.get("ramp_t", 0.2)))
         faces = PK.ramp_faces(r, z, tt) + PK.pad_faces(r, z, tt)
         g = Group(_mesh_of(faces), name=f"{r['name']} · {names[lid]}")
@@ -14407,3 +14438,105 @@ def reinsert_floor(doc, i) -> tuple:
         doc.setdefault(k, {})[lid] = v
     dl.pop(i)
     return lv.get("name", "Floor"), None
+
+
+def ramp_states(doc) -> dict:
+    """3.64.10: how each ramp is shown — {ramp id: {"hide": why or None,
+    "z_base": m}}:
+    - a ramp climbing to a floor that is not there (up from the top
+      floor, down from the lowest) is not shown, as a stair is not, until
+      that floor is added;
+    - a ramp drawn on a floor going down over a ramp of the floor below
+      going up (the same ramp seen from above, «RAMP DN TO») is not shown
+      twice — the one below is;
+    - a ramp drawn on a floor going up over a ramp of the floor below (a
+      ramp stacked over it, to the floor above) belongs to the floor above:
+      not shown while that floor is not there;
+    - a short ramp of the floor below whose copy above ends at the upper
+      floor's level is lifted to end there (its top at the floor it
+      reaches)."""
+    from . import parking as PK
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    elev = elevations(arch)
+    z_of = dict(zip(ids, elev))
+    h_of = {lv["id"]: float(lv.get("height") or 3.0) for lv in arch["levels"]}
+    out = {}
+    fps = {}
+    for r in doc.get("ramps") or []:
+        try:
+            fps[r["id"]] = PK.footprint(r).buffer(0)
+        except Exception:  # noqa: BLE001
+            fps[r["id"]] = None
+        out[r["id"]] = {"hide": None, "z_base": 0.0}
+
+    def below(lid):
+        k = ids.index(lid) if lid in ids else -1
+        return ids[k - 1] if k > 0 else None
+
+    def above(lid):
+        k = ids.index(lid) if lid in ids else -1
+        return ids[k + 1] if 0 <= k < len(ids) - 1 else None
+
+    def over(a, b):
+        fa, fb = fps.get(a["id"]), fps.get(b["id"])
+        if fa is None or fb is None or fa.is_empty or fb.is_empty:
+            return 0.0
+        return fa.intersection(fb).area / max(min(fa.area, fb.area), 1e-6)
+    rs = list(doc.get("ramps") or [])
+    for r in rs:
+        lid = r.get("level")
+        if lid not in z_of:
+            continue
+        rise = float(r.get("rise") or 0.0)
+        big = abs(rise) >= 0.5 * h_of.get(lid, 3.0)
+        lo = below(lid)
+        under = [q for q in rs if q.get("level") == lo] if lo else []
+        if rise < 0:
+            twin = [q for q in under if float(q.get("rise") or 0) > 0 and
+                    over(r, q) >= 0.5]
+            if twin:
+                out[r["id"]]["hide"] = "the ramp of the floor below"
+                # a short piece below drawn at its floor, its copy here
+                # ending at this floor: lifted to end at this floor
+                for q in twin:
+                    rq = float(q.get("rise") or 0.0)
+                    top_q = z_of[lo] + rq
+                    if z_of[lid] - top_q > 1.0 and rq < 0.5 * h_of[lo]:
+                        out[q["id"]]["z_base"] = round(
+                            z_of[lid] - z_of[lo] - rq, 4)
+                continue
+            if big and lo is None:
+                out[r["id"]]["hide"] = "no floor below yet"
+        else:
+            if above(lid) is None and (big or any(
+                    float(q.get("rise") or 0) > 0 and over(r, q) >= 0.5
+                    for q in under)):
+                out[r["id"]]["hide"] = "no floor above yet"
+    return out
+
+
+
+def stairs_hidden(doc) -> set:
+    """3.64.10: the stairs not shown — a stair climbing a storey (1.2 m or
+    more) from the top floor, to no floor yet; shown again when the floor
+    above is added."""
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    hide = set()
+    for s_ in doc.get("stairs") or []:
+        if s_.get("to") in ids:
+            continue
+        lid = s_.get("level")
+        k = ids.index(lid) if lid in ids else -1
+        if 0 <= k < len(ids) - 1:
+            continue                     # a floor above: as before
+        try:
+            n = s_.get("risers")
+            n = len(n) if isinstance(n, list) else int(n or 0)
+            h = float(s_.get("rise") or 0.0) * n
+        except (TypeError, ValueError):
+            h = 0.0
+        if h >= 1.2:
+            hide.add(s_.get("id"))
+    return hide
