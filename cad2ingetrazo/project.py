@@ -4730,8 +4730,22 @@ def _parking_slab(walls, segs, blocks, ratio=0.4):
     except Exception:  # noqa: BLE001
         near_ = None
     if near_ is not None:
-        segs = [s_ for s_ in segs if near_.contains(_Pt(s_[0], s_[1]))
-                and near_.contains(_Pt(s_[2], s_[3]))]
+        # 3.64.11: the bays reached through the drive count too — a row of
+        # bays out past the building (an open parking deck, no walls round
+        # it) joined to it by the bay / aisle lines, lines 3 m apart or
+        # nearer one chain; a group of lines off on its own is left out
+        try:
+            from shapely.geometry import LineString as _LS
+            bl_ = [(_LS([(s_[0], s_[1]), (s_[2], s_[3])]).buffer(1.5), s_)
+                   for s_ in segs if (s_[0], s_[1]) != (s_[2], s_[3])]
+            grp_ = unary_union([b_ for b_, _s in bl_])
+            reach_ = unary_union([g_ for g_ in getattr(grp_, "geoms", [grp_])
+                                  if g_.intersects(near_)])
+            near2_ = unary_union([near_, reach_])
+        except Exception:  # noqa: BLE001
+            near2_ = near_
+        segs = [s_ for s_ in segs if near2_.contains(_Pt(s_[0], s_[1]))
+                and near2_.contains(_Pt(s_[2], s_[3]))]
         walls = [w for w in walls if "a" in w and near_.contains(
             _Pt(*w["a"][:2])) and near_.contains(_Pt(*w["b"][:2]))]
     pts = [tuple(w["a"]) for w in walls if "a" in w] + \
@@ -6900,9 +6914,16 @@ def _ramp_cut(doc, lid) -> int:
     from . import stairs as ST
     arch = doc["arch"]
     n = 0
+    try:
+        rst_ = ramp_states(doc)
+    except Exception:  # noqa: BLE001
+        rst_ = {}
     for r in doc["ramps"]:
         if r["level"] != lid:
             continue
+        hid_ = (rst_.get(r.get("id")) or {}).get("hide")
+        if hid_ and hid_.startswith("no floor"):
+            continue             # to a floor not there yet: no well
         if slab_on_top(doc):     # the slab over each floor is its own
             where = _ramp_level_below(arch, lid) if float(r["rise"]) < 0 \
                 else lid
@@ -10394,7 +10415,7 @@ def ramp_solids(doc) -> list:
         z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
                                                       or 0.0)
         out.append({"sections": r["sections"],
-                    "zs": [z + v for v in PK.ramp_z(r)],
+                    "zs": [z + v for v in PK.ramp_z(ramp_as_built(r, rs_))],
                     "t": float(r.get("t", st.get("ramp_t", 0.2)))})
     return out
 
@@ -10691,7 +10712,8 @@ def _parking_groups(doc):
         z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
                                                       or 0.0)
         tt = float(r.get("t", st.get("ramp_t", 0.2)))
-        faces = PK.ramp_faces(r, z, tt) + PK.pad_faces(r, z, tt)
+        rb_ = ramp_as_built(r, rs_)
+        faces = PK.ramp_faces(rb_, z, tt) + PK.pad_faces(rb_, z, tt)
         g = Group(_mesh_of(faces), name=f"{r['name']} · {names[lid]}")
         g.component = False
         g.material = {"color": (0.64, 0.64, 0.62), "opacity": 1.0}
@@ -10701,7 +10723,7 @@ def _parking_groups(doc):
         out.append(g)
         lines, (x, y, word) = PK.ramp_plan(r)
         plan.setdefault(lid, []).extend(lines + PK.pad_lines(r))
-        rise = float(r["rise"])
+        rise = float(rb_["rise"])
         from .host import len_txt
         labels.append(TextLabel(QVector3D(x, y, z + 0.02), QVector3D(0, 0, 0),
                                 f"RAMP {word} {len_txt(abs(rise))}",
@@ -14132,7 +14154,25 @@ def update_from_cad(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.update_from_cad stairs")
+    recut_ramps(doc)
     return out
+
+
+def recut_ramps(doc) -> int:
+    """3.64.11: every floor's ramp wells cut again — a floor added above
+    or below gets the wells of the ramps that now reach it."""
+    n = 0
+    for lv in doc["arch"]["levels"]:
+        try:
+            _ramp_uncut(doc, lv["id"])
+            for r in doc["ramps"]:
+                if r["level"] == lv["id"]:
+                    r.pop("cut", None)
+            n += _ramp_cut(doc, lv["id"])
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.recut_ramps")
+    return n
 
 
 def cad_changed(doc) -> list:
@@ -14470,13 +14510,28 @@ def ramp_states(doc) -> dict:
             fps[r["id"]] = None
         out[r["id"]] = {"hide": None, "z_base": 0.0}
 
+    # a floor counts once it is built (walls or slabs imported on it):
+    # a level only listed, empty, takes no ramp yet
+    built = {w["level"] for w in arch["walls"]} | \
+        {e["level"] for e in arch["structure"]}
+    order = [v["id"] for _e, v in sorted(zip(elev, arch["levels"]),
+                                         key=lambda p: p[0])]
+
     def below(lid):
-        k = ids.index(lid) if lid in ids else -1
-        return ids[k - 1] if k > 0 else None
+        k = order.index(lid) if lid in order else -1
+        nb = order[k - 1] if k > 0 else None
+        return nb if nb in built else None
 
     def above(lid):
-        k = ids.index(lid) if lid in ids else -1
-        return ids[k + 1] if 0 <= k < len(ids) - 1 else None
+        k = order.index(lid) if lid in order else -1
+        nb = order[k + 1] if 0 <= k < len(order) - 1 else None
+        return nb if nb in built else None
+
+    def fz(lid):
+        try:
+            return z_of[lid] + float(open_offset(doc, lid) or 0.0)
+        except Exception:  # noqa: BLE001
+            return z_of[lid]
 
     def over(a, b):
         fa, fb = fps.get(a["id"]), fps.get(b["id"])
@@ -14513,7 +14568,32 @@ def ramp_states(doc) -> dict:
                     float(q.get("rise") or 0) > 0 and over(r, q) >= 0.5
                     for q in under)):
                 out[r["id"]]["hide"] = "no floor above yet"
+    # 3.64.11: a storey ramp shown (its floor there) reaches that floor —
+    # its climb fitted to the two floors' levels, so it meets the slab
+    for r in rs:
+        lid = r.get("level")
+        st_ = out.get(r.get("id"))
+        if not st_ or st_["hide"] or lid not in z_of:
+            continue
+        rise = float(r.get("rise") or 0.0)
+        if abs(rise) < 0.5 * h_of.get(lid, 3.0):
+            continue
+        to = above(lid) if rise > 0 else below(lid)
+        if to is None:
+            continue
+        want = fz(to) - (fz(lid) + float(st_.get("z_base") or 0.0))
+        if want * rise > 0 and 0.6 <= want / rise <= 1.6:
+            st_["rise"] = round(want, 4)
+            st_["to"] = to
     return out
+
+
+def ramp_as_built(r, state) -> dict:
+    """The ramp record with the climb it is built with (fitted to the
+    floor it reaches)."""
+    if state and state.get("rise") is not None:
+        return dict(r, rise=state["rise"])
+    return r
 
 
 
@@ -14526,11 +14606,7 @@ def stairs_hidden(doc) -> set:
     hide = set()
     for s_ in doc.get("stairs") or []:
         if s_.get("to") in ids:
-            continue
-        lid = s_.get("level")
-        k = ids.index(lid) if lid in ids else -1
-        if 0 <= k < len(ids) - 1:
-            continue                     # a floor above: as before
+            continue                     # linked to the floor it reaches
         try:
             n = s_.get("risers")
             n = len(n) if isinstance(n, list) else int(n or 0)

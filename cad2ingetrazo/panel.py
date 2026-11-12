@@ -1865,6 +1865,10 @@ class Panel(QWidget):
             rep["stairs_built"] = sr.get("stairs", 0)
         except Exception:  # noqa: BLE001
             log_error("panel._import stairs")
+        try:                   # the ramps that now reach this floor: wells
+            PJ.recut_ramps(doc)
+        except Exception:  # noqa: BLE001
+            log_error("panel._import ramps")
         if not self.commit(doc):
             return
         if rep["columns"] == 0 and rep["walls"] and QMessageBox.question(

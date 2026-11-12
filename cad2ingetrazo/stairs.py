@@ -743,6 +743,15 @@ def auto(doc, cad=None, flip=False) -> dict:
                 cut += _cut(arch, lv["id"], well)
             elif up is not None:
                 cut += _cut(arch, up["id"], well)
+    if not PJ.slab_on_top(doc):   # 3.64.11: the well each floor's plan
+        for r_ in doc["stairs"]:      # draws over the stair coming up to it
+            try:
+                w_ = upper_well(doc, r_)
+                if w_:
+                    cut += _cut(arch, r_["to"], w_)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("stairs.upper_well")
     try:                       # no terrace railing floating over a flight
         PJ.rails_off_stairs(doc)
     except Exception:  # noqa: BLE001
@@ -2963,11 +2972,46 @@ def foot_of(st):
     return _mid(flights[0]["lines"][0])
 
 
+def upper_well(doc, st):
+    """3.64.11: the stair the floor above draws over ``st`` (its flights
+    up from there, in the same stair hall): its outline is the hole the
+    plan leaves in that floor — the well as drawn, or None."""
+    from shapely.geometry import Polygon as _P
+    if not st.get("to") or len(st.get("corners") or []) < 3:
+        return None
+    foot = _P([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    best_, ba_ = None, 0.0
+    for o_ in doc.get("stairs") or []:
+        if o_ is st or o_.get("level") != st.get("to") or \
+                len(o_.get("corners") or []) < 3:
+            continue
+        op = _P([tuple(p[:2]) for p in o_["corners"]]).buffer(0)
+        a_ = op.intersection(foot).area
+        if a_ >= 0.5 * min(op.area, foot.area) and a_ > ba_:
+            best_, ba_ = o_, a_
+    return [list(p[:2]) for p in best_["corners"]] if best_ else None
+
+
 def well_of(doc, st):
     """The well a stair cuts (as the import cuts it)."""
     stt = doc.get("settings") or {}
     H = float(st.get("rise", RISER)) * int(st.get("risers", 18))
     well = st["corners"]
+    # 3.64.11: the floor above draws the stair well (an outline on its
+    # stair layer over this stair): that well, as the plan has it
+    try:
+        from shapely.geometry import Polygon as _P
+        foot = _P([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+        for w_ in (doc.get("stair_cad") or {}).get(st.get("to")) or []:
+            wp = _P([tuple(p[:2]) for p in w_]).buffer(0)
+            if wp.is_valid and wp.intersection(foot).area >= \
+                    0.5 * min(wp.area, foot.area):
+                return [list(p[:2]) for p in w_]
+        up_ = upper_well(doc, st)
+        if up_:
+            return up_
+    except Exception:  # noqa: BLE001
+        pass
     wm = stt.get("stair_well", "railing")
     if wm != "outline" and stt.get("stair_headroom_cut", True):
         hc = headroom_cut(st, H, float(stt.get("slab_t", 0.15)),
