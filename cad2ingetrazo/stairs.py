@@ -1361,6 +1361,157 @@ def floor_finishes(doc, st) -> tuple:
     return max(lo, 0.0), max(hi, 0.0)
 
 
+def _flight_zones(st):
+    """Each flight's area in plan (its treads' band), as polygons."""
+    from shapely.geometry import MultiPoint
+    out = []
+    fl, _l = as_flights(st)
+    for f in fl:
+        pts = [tuple(p[:2]) for ln in f.get("lines") or [] for p in ln]
+        if len(pts) >= 3:
+            g = float(f.get("g", 0.28) or 0.28)
+            d = f.get("d") or (0.0, 0.0)
+            last = f["lines"][-1]
+            pts += [(p[0] + d[0] * g, p[1] + d[1] * g) for p in last]
+            out.append(MultiPoint(pts).convex_hull)
+    return out
+
+
+def cad_well(doc, st):
+    """The well the plan draws in the stair's hall: the closed outline its
+    rail layer draws inside the hall (the railing round the void between
+    the flights) — or None."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import polygonize, unary_union
+    lines = (doc.get("rail_cad") or {}).get(st.get("level")) or []
+    if not lines:
+        return None
+    foot = Polygon([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    inner = foot.buffer(0.05, join_style=2)
+    segs = [LineString([tuple(a[:2]), tuple(b[:2])]) for a, b in lines
+            if inner.contains(LineString([tuple(a[:2]), tuple(b[:2])]))]
+    if len(segs) < 3:
+        return None
+    best = None
+    for g in polygonize(unary_union([sg.buffer(0.001).exterior
+                                     if False else sg for sg in segs])):
+        if g.area < 0.3 or g.area > 0.6 * foot.area:
+            continue
+        if g.exterior.distance(foot.exterior) < 0.1:
+            continue                     # a box at the hall's edge
+        if best is None or g.area > best.area:
+            best = g
+    return best
+
+
+def well_poly(st, doc=None):
+    """The stair's well: as the plan draws it (its rail layer), else its
+    hall less its flights and landings — the middle void (None when it has
+    none, a straight flight)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    if doc is not None:
+        try:
+            cw_ = cad_well(doc, st)
+        except Exception:  # noqa: BLE001
+            cw_ = None
+        if cw_ is not None:
+            return cw_
+    foot = Polygon([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    _f, lands = as_flights(st)
+    solid = _flight_zones(st) + [
+        Polygon([tuple(p[:2]) for p in l_["corners"]]).buffer(0)
+        for l_ in lands if len(l_.get("corners") or []) >= 3]
+    if not solid:
+        return None
+    rest = foot.difference(unary_union(solid).buffer(0.02, join_style=2))
+    best = None
+    for g in getattr(rest, "geoms", [rest]):
+        if g.geom_type != "Polygon" or g.area < 0.2:
+            continue
+        if g.exterior.distance(foot.exterior) < 0.05 and \
+                g.area < 0.25 * foot.area:
+            continue                     # a sliver at the hall's wall
+        if best is None or g.area > best.area:
+            best = g
+    if best is None:
+        return None
+    # between two flights running opposite ways (a U): the void only as far
+    # as they both run — not on into the floor's landing past the shorter
+    try:
+        fl_, _l2 = as_flights(st)
+        zs_ = _flight_zones(st)
+        pairs = []
+        for i_, fa in enumerate(fl_):
+            for j_, fb in enumerate(fl_):
+                if j_ <= i_ or i_ >= len(zs_) or j_ >= len(zs_):
+                    continue
+                da, db = fa.get("d") or (0, 0), fb.get("d") or (0, 0)
+                if da[0] * db[0] + da[1] * db[1] < -0.9:
+                    pairs.append((da, zs_[i_], zs_[j_]))
+        if pairs:
+            da, za, zb = pairs[0]
+            nv = (-da[1], da[0])
+
+            def ext(g, v):
+                vs = [x * v[0] + y * v[1] for x, y in g.exterior.coords]
+                return min(vs), max(vs)
+            a0, a1 = ext(za, da)
+            b0, b1 = ext(zb, da)
+            lo, hi = max(a0, b0), min(a1, b1)
+            n0 = min(ext(za, nv)[0], ext(zb, nv)[0])
+            n1 = max(ext(za, nv)[1], ext(zb, nv)[1])
+            if hi - lo > 0.3:
+                def P(t, n):
+                    return (da[0] * t + nv[0] * n, da[1] * t + nv[1] * n)
+                box = Polygon([P(lo, n0), P(hi, n0), P(hi, n1), P(lo, n1)])
+                cut = best.intersection(box)
+                cand = max((g for g in getattr(cut, "geoms", [cut])
+                            if g.geom_type == "Polygon"),
+                           key=lambda g: g.area, default=None)
+                if cand is not None and cand.area >= 0.2:
+                    best = cand
+    except Exception:  # noqa: BLE001
+        pass
+    best = best.minimum_rotated_rectangle \
+        if best.area > 0.7 * best.minimum_rotated_rectangle.area else best
+    return best
+
+
+def _well_edges(doc, st, ztop, kind, h, gap):
+    """[(faces, None)] of the guard at the floor above along the well's
+    edges with no flight (of this stair, or of the stair going on up)
+    beside them; None when no well is found."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    from .engine import railings as RL
+    well = well_poly(st, doc)
+    if well is None:
+        return []                 # no well in it: no railing round the hall
+    zones = _flight_zones(st)
+    up = _upper_stair(doc, st)
+    if up is not None and up.get("id") not in _hidden_ids(doc):
+        zones += _flight_zones(up)
+    fz = unary_union(zones).buffer(0.2) if zones else None
+    pts = list(well.exterior.coords)[:-1]
+    out = []
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        seg = LineString([a, b])
+        if seg.length < 0.3:
+            continue
+        if fz is not None:
+            seg = seg.difference(fz)
+        for g in getattr(seg, "geoms", [seg]):
+            if g.geom_type != "LineString" or g.length < 0.3:
+                continue
+            c = list(g.coords)
+            out.append((RL.faces([(c[0][0], c[0][1], ztop),
+                                  (c[-1][0], c[-1][1], ztop)], h, kind,
+                                 gap=gap), None))
+    return out
+
+
 def _well_guard(doc, st, z0, kind, h, gap) -> list:
     """[(faces, None)] — a railing round the stair's opening in the floor
     above: along each edge of the slab's hole over the stair, on the slab
@@ -1402,40 +1553,18 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
             if hp.is_valid and hp.intersection(foot).area > 0.3 * min(
                     hp.area, foot.area):
                 holes.append(_opened(hp, 0.30, foot) or hp)
-    # 3.64.16: the plan of the floor above draws the railing round this
-    # hall (its rail layer): that railing, as drawn — none where it draws
-    # none (the stair going on up guards its own well)
-    cad_ = (doc.get("rail_cad") or {}).get(st["to"])
-    up_st = _upper_stair(doc, st)
-    if up_st is not None and up_st.get("id") in _hidden_ids(doc):
-        cad_ = None        # its flights not built yet: round the opening
-    if cad_ is not None:
-        hall_ = foot.buffer(0.8, join_style=2)
-        own_ = None
-        for s2 in doc.get("stairs") or []:
-            if s2.get("level") == st["to"] and s2 is not st and \
-                    len(s2.get("corners") or []) >= 3 and \
-                    s2.get("id") not in _hidden_ids(doc):
-                p2 = Polygon([tuple(p[:2]) for p in s2["corners"]]).buffer(0)
-                if p2.intersection(foot).area > 0.3 * min(p2.area, foot.area):
-                    own_ = p2.buffer(-0.3, join_style=2)
-        out = []
-        used_ = []
-        for a, b in cad_:
-            if any(min(math.dist(a[:2], u0) + math.dist(b[:2], u1),
-                       math.dist(a[:2], u1) + math.dist(b[:2], u0)) < 0.3
-                   for u0, u1 in used_):
-                continue              # the same railing drawn twice
-            used_.append((tuple(a[:2]), tuple(b[:2])))
-            ln = LineString([tuple(a[:2]), tuple(b[:2])])
-            if ln.length < 0.3 or not hall_.contains(ln):
-                continue
-            if own_ is not None and not own_.is_empty and \
-                    own_.contains(ln.interpolate(0.5, normalized=True)):
-                continue          # the stair's own (sloping) well railing
-            out.append((RL.faces([(a[0], a[1], ztop), (b[0], b[1], ztop)],
-                                 h, kind, gap=gap), None))
-        return out
+    # 3.64.20: the railing at the stair's WELL (the void between its
+    # flights, as the plan draws it) — on the floor above, along the well's
+    # edges no flight runs beside (the floor's landing between the flight
+    # arriving and the one going on up); nothing round the hall
+    try:
+        wg_ = _well_edges(doc, st, ztop, kind, h, gap)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs._well_edges")
+        wg_ = None
+    if wg_ is not None:
+        return wg_
     if not holes:
         return []
     walls = _walls_of(doc, st["to"])
