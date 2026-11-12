@@ -122,6 +122,14 @@ FALLBACK = {"marble": (0.93, 0.91, 0.88), "granite": (0.25, 0.25, 0.27),
             "black": (0.15, 0.15, 0.16)}
 
 
+def is_paint(key) -> bool:
+    """A paint / plaster finish (applied on the wall's face, no layer)."""
+    k = str(key or "").lower()
+    if any(k in ks for t, ks in GROUPS if t.lower().startswith("plaster")):
+        return True
+    return "paint" in k or k.startswith("rgb:")
+
+
 def groups_menu(floor=False) -> list:
     """[(title, [(key, label)])] of the finishes there are (a wall's, or a
     floor's)."""
@@ -361,12 +369,17 @@ def groups(doc) -> list:
                 # on the face: the plaster is in the wall's thickness
                 f0 = sg * t / 2
                 th = THICK.get(f_.get("band"), 0.012)
+                paint_ = is_paint(f_["mat"])
+                if paint_:                # 3.64.22: paint is on the face —
+                    f0 = sg * (t / 2 + 0.0015)   # no thickness added
+                    th = 0.0
 
                 def P(s, z, c, a=a, u=u, n=n, f0=f0, sg=sg):
                     cc = f0 + sg * c
                     return (a[0] + u[0] * s + n[0] * cc,
                             a[1] + u[1] * s + n[1] * cc, z)
-                fs = _layer(R, P, 0.0, th)
+                fs = _layer(R, P, 0.0, th) if not paint_ else \
+                    [f for f in _layer(R, P, 0.0, 0.0) if f.get("front")]
                 if sg < 0:                  # mirrored: the loops turned
                     for f in fs:
                         f["loop"] = f["loop"][::-1]

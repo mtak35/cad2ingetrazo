@@ -5314,6 +5314,37 @@ class Panel(QWidget):
         wood…) ▸ the finish; the face's finishes off; the same on every
         wall of the room."""
         from . import finishes as FN
+        # 3.64.22: several walls / rooms selected — one finish (or paint)
+        # on all their faces at once: a wall's room-side faces, a room's
+        # wall faces into it
+        try:
+            sel_ = self._selected_all()
+            wids_ = [i for k, i in sel_ if k == "wall"]
+            rids_ = [i for k, i in sel_ if k == "room"]
+            if len(wids_) > 1 or rids_:
+                groups_ = FN.groups_menu()
+                n_ = len(wids_) + len(rids_)
+                what_ = ", ".join(x for x in (
+                    f"{len(wids_)} wall(s)" if wids_ else "",
+                    f"{len(rids_)} room(s)" if rids_ else "") if x)
+                m_ = menu.addMenu(f"CAD2IngeTrazo · Wall finish / paint — "
+                                  f"{what_} selected")
+                for band, lab, _z0, _z1 in FN.BANDS:
+                    mb = m_.addMenu(lab)
+                    for title, ks in groups_:
+                        mg = mb.addMenu(title)
+                        for k_, lab_ in ks:
+                            mg.addAction(lab_, lambda k=k_, b_=band:
+                                         self._finish_many(wids_, rids_, k,
+                                                           b_))
+                m_.addSeparator()
+                m_.addAction("Take the finishes off them",
+                             lambda: self._finish_many(wids_, rids_, None,
+                                                       None))
+                if n_ > 1 or rids_:
+                    return
+        except Exception:  # noqa: BLE001
+            log_error("panel._finish_menu many")
         pick = self._face_pick()
         if not pick:
             return
@@ -5410,6 +5441,75 @@ class Panel(QWidget):
         else:
             self.commit(doc, f"{w.get('name') or 'Wall'}, {face} face: "
                              "finish taken off")
+
+    def _finish_many(self, wids, rids, mat, band):
+        """One finish on the faces of the walls / rooms selected: each
+        wall's face(s) toward a room (both when it has a room each side, or
+        none), each room's wall faces into it."""
+        from shapely.geometry import Point
+
+        from . import finishes as FN
+        from .engine import spaces
+        doc = self.doc()
+        arch = doc["arch"]
+        rooms_of = {}
+
+        def rooms(lid):
+            if lid not in rooms_of:
+                rooms_of[lid] = [r for r in spaces.of_level(arch, lid)
+                                 if r["area"] >= 1.0]
+            return rooms_of[lid]
+
+        def probe(w, sg, d):
+            a, b = w["a"], w["b"]
+            L = math.dist(a, b) or 1.0
+            m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            return Point(m[0] - (b[1] - a[1]) / L * sg * d,
+                         m[1] + (b[0] - a[0]) / L * sg * d)
+        faces = {}
+        for w in arch["walls"]:
+            if w.get("id") not in wids or "a" not in w or w.get("rail"):
+                continue
+            d = float(w["t"]) / 2 + 0.3
+            sides = [s_ for s_, g_ in (("l", 1), ("r", -1))
+                     if any(r["poly"].contains(probe(w, g_, d))
+                            for r in rooms(w["level"]))]
+            for s_ in sides or ["l", "r"]:
+                faces[(w["id"], s_)] = w
+        if rids:
+            polys = []
+            for lv in arch["levels"]:
+                for r in rooms(lv["id"]):
+                    try:
+                        key = PJ.room_key(lv["id"], r)
+                    except Exception:  # noqa: BLE001
+                        key = None
+                    if key in rids or r.get("id") in rids:
+                        polys.append((lv["id"], r["poly"].buffer(0.02)))
+            for w in arch["walls"]:
+                if "a" not in w or w.get("rail") or \
+                        w.get("kind", "line") != "line" or \
+                        w.get("type") == "curtain" or \
+                        math.dist(w["a"], w["b"]) < 0.2:
+                    continue
+                d = float(w["t"]) / 2 + 0.15
+                for lid, pg in polys:
+                    if w["level"] != lid:
+                        continue
+                    for s_, g_ in (("l", 1), ("r", -1)):
+                        if pg.contains(probe(w, g_, d)):
+                            faces[(w["id"], s_)] = w
+        for (wid, s_), w in faces.items():
+            if mat is None and band is None:
+                w["fin"] = [f_ for f_ in w.get("fin") or []
+                            if f_.get("side") != s_]
+            else:
+                FN.set_band(w, s_, mat, band)
+        if mat:
+            self.commit(doc, f"{FN.label(mat)} — {FN.BAND[band][0]}: "
+                             f"{len(faces)} wall face(s)")
+        else:
+            self.commit(doc, f"Finishes taken off {len(faces)} wall face(s)")
 
     def _finish_room(self, wid, side):
         """The finishes of a wall's face copied onto every wall face of

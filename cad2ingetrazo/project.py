@@ -6647,12 +6647,14 @@ def opening_parapets(doc) -> int:
     o_ = CURB_T / 2
     recs = []
 
+    ROOF_T_ = ROOF_PARAPET_T
+
     def ring(pts, lid, base, cd, inward, name, h_=None, solid=False):
         rh_ = rh if h_ is None else float(h_)
         p = Polygon(pts).buffer(0)
         if p.is_empty or p.area < 0.04:
             return
-        oo_ = ROOF_PARAPET_T / 2 if solid else o_
+        oo_ = ROOF_T_ / 2 if solid else o_
         q = p.buffer(-oo_ if inward else oo_, join_style=2)
         if q.is_empty:
             return
@@ -6666,7 +6668,7 @@ def opening_parapets(doc) -> int:
                  "side": 1, "base": round(base, 4), "level": lid,
                  "name": name}
             if solid:              # 3.64.8: the roof's parapet wall
-                r.update(t=ROOF_PARAPET_T, height=round(base + rh_, 4),
+                r.update(t=round(ROOF_T_, 4), height=round(base + rh_, 4),
                          type="solid")
             elif as_wall:
                 r.update(t=PARAPET_T, height=round(base + rh_, 4),
@@ -6695,6 +6697,23 @@ def opening_parapets(doc) -> int:
             e.get("offset", 0.0) or 0.0)
         cd = float(e.get("t", 0.1016) or 0.1016)
         if roof and st.get("roof_parapet", True):
+            # 3.64.22: the solid parapet as thick as the outside walls under
+            # it (its faces flush with theirs — one wall up past the roof)
+            try:
+                from shapely.geometry import LineString as _LSp
+                rim_p = Polygon(e["corners"]).buffer(0).exterior
+                tw_ = sorted(float(w_["t"]) for w_ in arch["walls"]
+                             if w_.get("level") == e["level"] and "a" in w_
+                             and not w_.get("rail") and not str(
+                                 w_.get("name", "")).startswith(AUTO_RAIL)
+                             and _LSp([w_["a"], w_["b"]]).length > 0.5
+                             and rim_p.distance(_LSp([w_["a"], w_["b"]])
+                                                .interpolate(0.5, True))
+                             <= float(w_["t"]) / 2 + 0.15)
+                ROOF_T_ = float(st.get("roof_parapet_t") or 0.0) or (
+                    tw_[len(tw_) // 2] if tw_ else ROOF_PARAPET_T)
+            except Exception:  # noqa: BLE001
+                ROOF_T_ = ROOF_PARAPET_T
             if st.get("roof_parapet_kind", "solid") == "solid":
                 # 3.64.8: by default a solid parapet wall on the roof's
                 # edge (its design: the solid parapet design setting)

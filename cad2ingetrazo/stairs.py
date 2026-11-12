@@ -1478,6 +1478,44 @@ def well_poly(st, doc=None):
     return best
 
 
+def _cad_guard(doc, st, ztop, kind, h, gap):
+    """3.64.22: the railing the floor above's plan draws round this stair
+    (its rail layer, inside the stair's hall), on that floor at the slab's
+    edge — less the stair going on up's own (sloping) well railing."""
+    from shapely.geometry import LineString, Polygon
+
+    from .engine import railings as RL
+    lines = (doc.get("rail_cad") or {}).get(st.get("to")) or []
+    if not lines:
+        return []
+    foot = Polygon([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    hall = foot.buffer(0.3, join_style=2)
+    own = None
+    up = _upper_stair(doc, st)
+    if up is not None and up.get("id") not in _hidden_ids(doc):
+        try:
+            w2 = well_poly(up, doc)
+            own = w2.buffer(0.15, join_style=2) if w2 is not None else None
+        except Exception:  # noqa: BLE001
+            own = None
+    out, used = [], []
+    for a, b in lines:
+        a, b = tuple(a[:2]), tuple(b[:2])
+        if any(min(math.dist(a, u0) + math.dist(b, u1),
+                   math.dist(a, u1) + math.dist(b, u0)) < 0.3
+               for u0, u1 in used):
+            continue
+        ln = LineString([a, b])
+        if ln.length < 0.3 or not hall.contains(ln):
+            continue
+        if own is not None and own.contains(ln):
+            continue              # the upper stair's well railing (its own)
+        used.append((a, b))
+        out.append((RL.faces([(a[0], a[1], ztop), (b[0], b[1], ztop)],
+                             h, kind, gap=gap), None))
+    return out
+
+
 def _well_edges(doc, st, ztop, kind, h, gap):
     """[(faces, None)] of the guard at the floor above along the well's
     edges with no flight (of this stair, or of the stair going on up)
@@ -1557,6 +1595,13 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
     # flights, as the plan draws it) — on the floor above, along the well's
     # edges no flight runs beside (the floor's landing between the flight
     # arriving and the one going on up); nothing round the hall
+    try:
+        cg_ = _cad_guard(doc, st, ztop, kind, h, gap)
+        if cg_:
+            return cg_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs._cad_guard")
     try:
         wg_ = _well_edges(doc, st, ztop, kind, h, gap)
     except Exception:  # noqa: BLE001
@@ -3249,24 +3294,43 @@ def foot_of(st):
     return _mid(flights[0]["lines"][0])
 
 
-def upper_well(doc, st):
-    """3.64.11: the stair the floor above draws over ``st`` (its flights
-    up from there, in the same stair hall): its outline is the hole the
-    plan leaves in that floor — the well as drawn, or None."""
+def stair_void(doc, st):
+    """3.64.22: the room the stair takes through the floor above: its
+    flights, its landings and its well (as the plan's railing draws it) —
+    the floor above stops at their edge (its floor landing kept)."""
     from shapely.geometry import Polygon as _P
-    if not st.get("to") or len(st.get("corners") or []) < 3:
+    from shapely.ops import unary_union
+    _f, lands = as_flights(st)
+    parts = list(_flight_zones(st))
+    parts += [_P([tuple(p[:2]) for p in l_["corners"]]).buffer(0)
+              for l_ in lands if len(l_.get("corners") or []) >= 3]
+    w_ = well_poly(st, doc)
+    if w_ is not None:
+        parts.append(w_)
+    if not parts:
         return None
     foot = _P([tuple(p[:2]) for p in st["corners"]]).buffer(0)
-    best_, ba_ = None, 0.0
-    for o_ in doc.get("stairs") or []:
-        if o_ is st or o_.get("level") != st.get("to") or \
-                len(o_.get("corners") or []) < 3:
-            continue
-        op = _P([tuple(p[:2]) for p in o_["corners"]]).buffer(0)
-        a_ = op.intersection(foot).area
-        if a_ >= 0.5 * min(op.area, foot.area) and a_ > ba_:
-            best_, ba_ = o_, a_
-    return [list(p[:2]) for p in best_["corners"]] if best_ else None
+    u = unary_union(parts).buffer(0.06, join_style=2).buffer(
+        -0.06, join_style=2).intersection(foot.buffer(0.02, join_style=2))
+    best = max((g for g in getattr(u, "geoms", [u])
+                if g.geom_type == "Polygon"), key=lambda g: g.area,
+               default=None)
+    return best
+
+
+def upper_well(doc, st):
+    """The hole the stair leaves in the floor above: where its flights,
+    landings and well are (3.64.22) — the floor's own landing kept, the
+    slab stopping at the stair's railing — or None."""
+    if not st.get("to") or len(st.get("corners") or []) < 3:
+        return None
+    try:
+        v = stair_void(doc, st)
+    except Exception:  # noqa: BLE001
+        v = None
+    if v is None or v.area < 0.5:
+        return None
+    return [list(p) for p in list(v.exterior.coords)[:-1]]
 
 
 def _upper_stair(doc, st):

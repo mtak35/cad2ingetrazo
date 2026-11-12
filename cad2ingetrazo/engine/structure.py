@@ -2125,8 +2125,33 @@ def _above_bottoms(doc, info, lid):
     except ImportError:
         return []
     ids = [lv["id"] for lv in doc["levels"]]
-    if lid not in ids or ids.index(lid) + 1 >= len(ids):
+    if lid not in ids:
         return []
+    if ids.index(lid) + 1 >= len(ids):
+        # 3.64.22: the top floor under its roof: an outside wall with the
+        # roof's parapet over it runs on up into the parapet (one face)
+        try:
+            from shapely.geometry import LineString
+            from shapely.ops import unary_union
+            lv_ = doc["levels"][ids.index(lid)]
+            hgt = float(lv_.get("height") or 3.0)
+            pw = [w for w in doc.get("walls") or [] if w.get("level") == lid
+                  and "a" in w and not w.get("rail")
+                  and float(w.get("base", 0.0) or 0.0) >= hgt - 0.5]
+            roofs = [s for s in doc.get("structure") or []
+                     if s["type"] == "slab" and s.get("level") == lid
+                     and s.get("roof") and len(s.get("corners") or []) >= 3]
+            if not pw or not roofs:
+                return []
+            z0 = info[lid]["z0"]
+            zb = z0 + min(float(w.get("base", 0.0) or 0.0) for w in pw)
+            ups = [(LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]),
+                    float(w.get("t", 0.2))) for w in pw]
+            own = unary_union([Polygon([tuple(p[:2]) for p in s_["corners"]])
+                               .buffer(0) for s_ in roofs])
+            return [("_ctx", zb, (ups, own))]
+        except Exception:  # noqa: BLE001
+            return []
     up = ids[ids.index(lid) + 1]
     if any(s_.get("top") for s_ in doc.get("structure") or []
            if s_.get("type") == "slab" and s_.get("level") == lid):
