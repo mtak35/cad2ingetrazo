@@ -2154,6 +2154,26 @@ def _above_bottoms(doc, info, lid):
         else:
             bot = top - float(s["t"])
         out.append((g, bot, bool(s.get("zone"))))
+    # 3.64.20: the walls of the floor above (an outside wall going on up
+    # meets the one over it) and this floor's own floor outline (which
+    # side of a wall is out)
+    try:
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+        ups = [(LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]),
+                float(w.get("t", 0.2)))
+               for w in doc.get("walls") or [] if w.get("level") == up
+               and not w.get("rail") and "a" in w
+               and float(w.get("base", 0.0) or 0.0) < 0.05]
+        own = unary_union([Polygon([tuple(p[:2]) for p in s_["corners"]])
+                           .buffer(0) for s_ in doc.get("structure") or []
+                           if s_.get("type") == "slab" and
+                           s_.get("level") == lid and
+                           len(s_.get("corners") or []) >= 3
+                           and not s_.get("top") and not s_.get("roof")])
+        out.append(("_ctx", z0u, (ups, own)))
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -2163,10 +2183,37 @@ def _wall_top(w, under, above):
     if not above:
         return under
     try:
-        from shapely.geometry import LineString
+        from shapely.geometry import LineString, Point
         ln = LineString([tuple(w["a"][:2]), tuple(w["b"][:2])])
         if ln.length < 0.05:
             return under
+        ctx = next((a for a in above if a[0] == "_ctx"), None)
+        above = [a for a in above if a[0] != "_ctx"]
+        # 3.64.20: an outside wall with a wall standing on it above runs on
+        # up to that wall (one face, no joint at the slab's edge); with
+        # none over it, it stops under the slab
+        if ctx is not None and not w.get("rail"):
+            z0u, (ups, own) = ctx[1], ctx[2]
+            t2 = float(w.get("t", 0.2)) / 2
+            (ax, ay), (bx, by) = ln.coords[0], ln.coords[-1]
+            L = ln.length
+            nx, ny = -(by - ay) / L, (bx - ax) / L
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            sides = [own.contains(Point(mx + sg * nx * (t2 + 0.3),
+                                        my + sg * ny * (t2 + 0.3)))
+                     for sg in (1, -1)]
+            if not own.is_empty and sides.count(True) == 1:
+                band = ln.buffer(max(t2, 0.08) + 0.08, cap_style=2)
+                run = 0.0
+                for u, _t in ups:
+                    (ux0, uy0), (ux1, uy1) = u.coords[0], u.coords[-1]
+                    Lu = math.dist((ux0, uy0), (ux1, uy1)) or 1.0
+                    if abs((ux1 - ux0) / Lu * nx + (uy1 - uy0) / Lu * ny) \
+                            > 0.1:
+                        continue          # across it, not along it
+                    run += u.intersection(band).length
+                if run >= 0.5 * L:
+                    return z0u
         hits = []
         for g, bot, zone in above:
             if g.intersection(ln).length >= min(0.3, 0.5 * ln.length):
