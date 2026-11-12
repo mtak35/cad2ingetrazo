@@ -1291,6 +1291,13 @@ def groups(doc, z_of, layer_of):
             try:                         # round the opening, upstairs
                 guard = _well_guard(doc, st, z0, e["rail"], e["rail_h"],
                                     e["rail_gap"])
+                # 3.64.15: the stair of the floor above going on up in the
+                # same hall (shown): the opening is its stair hall — its
+                # flights' own railings guard the well, as the plan draws
+                # it; no railing round the hall across that floor
+                up_ = _upper_stair(doc, st)
+                if up_ is not None and up_.get("id") not in _hidden_ids(doc):
+                    guard = []
             except Exception:  # noqa: BLE001
                 guard = []
             skip = {int(k) for k in st.get("rail_skip") or []
@@ -3083,6 +3090,30 @@ def upper_well(doc, st):
         if a_ >= 0.5 * min(op.area, foot.area) and a_ > ba_:
             best_, ba_ = o_, a_
     return [list(p[:2]) for p in best_["corners"]] if best_ else None
+
+
+def _upper_stair(doc, st):
+    """The stair the floor above draws in ``st``'s hall, or None."""
+    from shapely.geometry import Polygon as _P
+    if not st.get("to") or len(st.get("corners") or []) < 3:
+        return None
+    foot = _P([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    for o_ in doc.get("stairs") or []:
+        if o_ is st or o_.get("level") != st.get("to") or \
+                len(o_.get("corners") or []) < 3:
+            continue
+        op = _P([tuple(p[:2]) for p in o_["corners"]]).buffer(0)
+        if op.intersection(foot).area >= 0.5 * min(op.area, foot.area):
+            return o_
+    return None
+
+
+def _hidden_ids(doc) -> set:
+    try:
+        from . import project as PJ
+        return PJ.stairs_hidden(doc)
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 def well_of(doc, st):

@@ -479,6 +479,25 @@ def build(doc, z_of, room_key) -> list:
         if lid not in z_of:
             continue
         wells = wells_over(lid)
+        wells0 = wells
+        try:                 # 3.64.15: no ceiling over a car ramp (the
+            from . import parking as PK_    # ramp's own area, climbing
+            from . import project as PJ_    # through the storey)
+            rst_ = PJ_.ramp_states(doc)
+            i_ = order.index(lid)
+            up_ = order[i_ + 1] if i_ + 1 < len(order) else None
+            rf_ = [PK_.footprint(r_, pads=True).buffer(0.15)
+                   for r_ in doc.get("ramps") or []
+                   if not (rst_.get(r_.get("id")) or {}).get("hide") and (
+                       r_.get("level") == lid or (
+                           r_.get("level") == up_ and
+                           float(r_.get("rise") or 0) < 0))]
+            if rf_:
+                ru_ = unary_union(rf_)
+                wells = ru_ if wells is None else unary_union([wells, ru_])
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("ceilings ramps")
         try:
             rails = unary_union([_rail_line(w).buffer(0.25)
                                  for w in arch["walls"] if w["level"] == lid
@@ -580,7 +599,7 @@ def build(doc, z_of, room_key) -> list:
                             room.get("key") or room_key(lid, room)))
                 done_.append(poly)
         try:                 # the beams round the stair well over it
-            out += _well_beams(doc, lid, order, z_of, wells)
+            out += _well_beams(doc, lid, order, z_of, wells0)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("ceilings._well_beams")

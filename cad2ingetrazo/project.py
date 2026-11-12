@@ -10508,7 +10508,7 @@ def ramp_solids(doc) -> list:
             continue
         z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
                                                       or 0.0)
-        out.append({"sections": r["sections"],
+        out.append({"sections": ramp_fitted(doc, r)["sections"],
                     "zs": [z + v for v in PK.ramp_z(ramp_as_built(r, rs_))],
                     "t": float(r.get("t", st.get("ramp_t", 0.2)))})
     return out
@@ -10806,7 +10806,7 @@ def _parking_groups(doc):
         z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
                                                       or 0.0)
         tt = float(r.get("t", st.get("ramp_t", 0.2)))
-        rb_ = ramp_as_built(r, rs_)
+        rb_ = ramp_fitted(doc, ramp_as_built(r, rs_))
         faces = PK.ramp_faces(rb_, z, tt) + PK.pad_faces(rb_, z, tt)
         g = Group(_mesh_of(faces), name=f"{r['name']} · {names[lid]}")
         g.component = False
@@ -14680,6 +14680,78 @@ def ramp_states(doc) -> dict:
             st_["rise"] = round(want, 4)
             st_["to"] = to
     return out
+
+
+_RAMP_WALLS = {}
+
+
+def ramp_fitted(doc, r, reach=0.6) -> dict:
+    """3.64.15: the ramp's width between the walls that confine it: each
+    section across it carried out to the wall face beside it (up to
+    ``reach`` past its end — no gap at the wall) and cut back where a
+    wall stands in it (never through the wall, beyond it)."""
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
+
+        from . import slabedges as SE
+        arch = doc["arch"]
+        lid = r.get("level")
+        ids = [lv["id"] for lv in arch["levels"]]
+        k = ids.index(lid) if lid in ids else -1
+        lv_ = {lid}
+        if 0 <= k < len(ids) - 1:
+            lv_.add(ids[k + 1])
+        if k > 0:
+            lv_.add(ids[k - 1])
+        key = (id(arch["walls"]), len(arch["walls"]), tuple(sorted(lv_)))
+        wu = _RAMP_WALLS.get(key)
+        if wu is None:
+            ws = [w for w in arch["walls"] if w.get("level") in lv_
+                  and "a" in w and not w.get("rail")
+                  and W.why_not(w) is None]
+            wu = unary_union(SE.wall_polys(ws)) if ws else None
+            if len(_RAMP_WALLS) > 16:
+                _RAMP_WALLS.clear()
+            _RAMP_WALLS[key] = wu
+        if wu is None or wu.is_empty:
+            return r
+        secs = []
+        changed = False
+        for a, b in r.get("sections") or []:
+            a, b = tuple(a[:2]), tuple(b[:2])
+            L = math.dist(a, b)
+            if L < 0.5:
+                secs.append([list(a), list(b)])
+                continue
+            m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            if wu.contains(Point(m)):
+                secs.append([list(a), list(b)])
+                continue
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            ends = []
+            for sg, e in ((-1, a), (1, b)):
+                far = (m[0] + sg * ux * (L / 2 + reach),
+                       m[1] + sg * uy * (L / 2 + reach))
+                hit = LineString([m, far]).intersection(wu)
+                if hit.is_empty:
+                    ends.append(e)
+                    continue
+                d_ = min(Point(m).distance(g_) for g_ in
+                         getattr(hit, "geoms", [hit]))
+                if d_ < 0.4 * L / 2:      # a wall well inside: left as is
+                    ends.append(e)
+                    continue
+                ends.append((m[0] + sg * ux * d_, m[1] + sg * uy * d_))
+            if math.dist(ends[0], a) > 1e-3 or math.dist(ends[1], b) > 1e-3:
+                changed = True
+            secs.append([[round(ends[0][0], 4), round(ends[0][1], 4)],
+                         [round(ends[1][0], 4), round(ends[1][1], 4)]])
+        return dict(r, sections=secs) if changed else r
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ramp_fitted")
+        return r
 
 
 def ramp_as_built(r, state) -> dict:
