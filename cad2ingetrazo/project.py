@@ -9815,6 +9815,35 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.slab_zones fill")
+    # 3.64.18: the thin leftovers of the floor no piece covers (a strip
+    # along a wall's face, under a wall between two levels): to the piece
+    # beside them along most of their edge — never the floor's own level
+    # standing up as a kerb between them
+    try:
+        if pieces:
+            cov_ = unary_union([pg_ for pg_, _v in pieces])
+            left_ = floor.difference(cov_)
+            add_ = {}
+            for g_ in getattr(left_, "geoms", [left_]):
+                if g_.geom_type != "Polygon" or g_.area < 0.01:
+                    continue
+                if g_.area / max(g_.length, 1e-6) >= 0.3:
+                    continue             # a real part of the floor: its own
+                bd_ = g_.boundary
+                best_, bl_ = None, 0.0
+                for k_, (pg_, _v) in enumerate(pieces):
+                    l_ = bd_.intersection(pg_.buffer(0.03)).length
+                    if l_ > bl_:
+                        best_, bl_ = k_, l_
+                if best_ is not None and bl_ > 0.0:
+                    add_.setdefault(best_, []).append(g_.buffer(0.005))
+            if add_:
+                pieces = [(unary_union([pg_] + add_.get(k_, [])), v_)
+                          if k_ in add_ else (pg_, v_)
+                          for k_, (pg_, v_) in enumerate(pieces)]
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.slab_zones leftovers")
     # 3.64.10: the floor's openings out of every piece (a ramp's well
     # crossing a piece's edge too — kept only when wholly inside before,
     # and the piece covered the ramp)

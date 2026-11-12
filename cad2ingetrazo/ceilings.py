@@ -490,10 +490,20 @@ def build(doc, z_of, room_key) -> list:
             # to a floor not added yet too: its area is the ramp's)
             rf_ = [PK_.footprint(r_, pads=True).buffer(0.15)
                    for r_ in doc.get("ramps") or []
-                   if r_.get("level") == lid or (
-                       r_.get("level") == up_ and
-                       float(r_.get("rise") or 0) < 0 and
-                       not (rst_.get(r_.get("id")) or {}).get("hide"))]
+                   if r_.get("level") in (lid, up_)]
+            # 3.64.18: nor over a stair (its hall's flights and landings,
+            # this floor's and the one coming down from the floor above)
+            from shapely.geometry import Polygon as _PgS
+            for s_ in doc.get("stairs") or []:
+                if (s_.get("level") == lid or s_.get("to") == up_ and
+                        s_.get("level") == lid) and \
+                        len(s_.get("corners") or []) >= 3:
+                    rf_.append(_PgS([tuple(p[:2]) for p in s_["corners"]])
+                               .buffer(0.15, join_style=2))
+                elif s_.get("level") == up_ and \
+                        len(s_.get("corners") or []) >= 3:
+                    rf_.append(_PgS([tuple(p[:2]) for p in s_["corners"]])
+                               .buffer(0.15, join_style=2))
             if rf_:
                 ru_ = unary_union(rf_)
                 wells = ru_ if wells is None else unary_union([wells, ru_])
@@ -601,7 +611,8 @@ def build(doc, z_of, room_key) -> list:
                             room.get("key") or room_key(lid, room)))
                 done_.append(poly)
         try:                 # the beams round the stair well over it
-            out += _well_beams(doc, lid, order, z_of, wells0)
+            if doc["settings"].get("well_beams", False):
+                out += _well_beams(doc, lid, order, z_of, wells0)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("ceilings._well_beams")
