@@ -5019,9 +5019,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     arch["walls"] = [w for w in arch["walls"] if w["level"] != lid]
     arch["openings"] = [o for o in arch["openings"]
                         if o["wall"] not in old_walls]
+    # 3.64.25: a slab the user shaped by hand (stretched, extended to
+    # walls) stays as it is; the import's own slab under it left out
+    user_slabs_ = [e for e in arch["structure"] if e["level"] == lid and
+                   e["type"] == "slab" and (e.get("user_edges") or
+                                            e.get("user"))
+                   and not e.get("zone")]
     arch["structure"] = [e for e in arch["structure"]
                          if e["level"] != lid or e["type"] in ("footing",
-                                                               "roof")]
+                                                               "roof")
+                         or e in user_slabs_]
     arch["rooms"] = [r for r in arch["rooms"] if r["level"] != lid]
     doc["texts"] = [t for t in doc["texts"] if t["level"] != lid]
 
@@ -5585,6 +5592,19 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project edge fins")
+    if user_slabs_:                  # 3.64.25: under a hand-shaped slab
+        try:
+            from shapely.geometry import Polygon as _PgU
+            us_ = [_PgU([tuple(p[:2]) for p in e["corners"]]).buffer(0)
+                   for e in user_slabs_]
+            srecs = [r for r in srecs if not any(
+                _PgU([tuple(p[:2]) for p in r["corners"]]).buffer(0)
+                .intersection(u_).area > 0.5 * _PgU(
+                    [tuple(p[:2]) for p in r["corners"]]).buffer(0).area
+                for u_ in us_)]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project user slabs")
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
     # walls that stop short of one another (across a column, an arch, a
@@ -9306,8 +9326,12 @@ def _parapet_groups(doc, groups):
             continue
         done_.update(mates)
         from shapely.ops import unary_union as _uuc
-        foot = _uuc([p_.buffer(0.002, join_style=2) for p_ in fp])
-        faces = _prism(foot.buffer(0.04, join_style=2), top, top + 0.075)
+        # (3.64.25: one clean outline — the pieces' hairline seams and
+        # slivers at the corners closed, no spike out of the mitre)
+        foot = _uuc([p_.buffer(0.003, join_style=2) for p_ in fp]) \
+            .buffer(-0.003, join_style=2).simplify(0.004)
+        faces = _prism(foot.buffer(0.04, join_style=2, mitre_limit=1.5),
+                       top, top + 0.075)
         if style == "band":
             faces += _prism(foot.buffer(0.02, join_style=2), top - 0.20,
                             top - 0.14)

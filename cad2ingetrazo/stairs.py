@@ -1632,7 +1632,9 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
         cs_ = cad_split(doc, st)   # draws by the stair, where it draws it
     except Exception:  # noqa: BLE001
         cs_ = None
-    if cs_ is not None:
+    if cs_ is not None or not _slab_over(doc, st, foot):
+        if not _slab_over(doc, st, foot):
+            return []        # 3.64.25: no floor over it (an outside stair)
         out_ = []
         near_ = foot.buffer(0.35, join_style=2)
         for ln in cs_[2]:
@@ -3363,6 +3365,23 @@ def stair_void(doc, st):
     return best
 
 
+def _slab_over(doc, st, foot) -> bool:
+    """Whether the floor above has a slab over the stair's hall at all."""
+    from shapely.geometry import Polygon
+    a = 0.0
+    for e in doc["arch"]["structure"]:
+        if e["type"] != "slab" or e.get("level") != st.get("to") or \
+                e.get("roof") or e.get("top") or \
+                len(e.get("corners") or []) < 3:
+            continue
+        try:
+            g = Polygon([tuple(p[:2]) for p in e["corners"]]).buffer(0)
+            a += g.intersection(foot.buffer(0.3, join_style=2)).area
+        except Exception:  # noqa: BLE001
+            continue
+    return a >= 0.15 * foot.area
+
+
 def cad_split(doc, st):
     """3.64.24: the stair's hall on the floor above split by the railing
     that floor's plan draws by it: (void, floor, rail lines) — the void
@@ -3446,11 +3465,10 @@ def apply_cad_split(doc, st) -> int:
             continue
         if g.is_empty or g.distance(void) > 0.6:
             continue
-        g2 = g
-        if floor is not None and not floor.is_empty and \
-                g.buffer(0.6).intersects(floor):
-            g2 = g2.union(floor.buffer(0.01, join_style=2)).buffer(0)
-        g2 = g2.difference(void)
+        # 3.64.25: the floor's slab as it is (never stretched out over the
+        # stair — an outside stair has none over it), opened on the stair's
+        # side only
+        g2 = g.difference(void)
         if g2.geom_type != "Polygon":
             parts = [x for x in getattr(g2, "geoms", []) if
                      x.geom_type == "Polygon"]

@@ -6454,6 +6454,8 @@ class Panel(QWidget):
             self.flash("That slab is gone — pick it again")
             return
         n = SE.extend_to_selected(doc, slab, wall_ids)
+        if n:
+            slab["user_edges"] = True    # 3.64.25: kept by Update from CAD
         self._extend_pick = None
         if not n:
             self.flash("The slab already reaches those walls (or they are "
