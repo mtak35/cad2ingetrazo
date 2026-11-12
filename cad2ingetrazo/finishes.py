@@ -338,15 +338,15 @@ def groups(doc) -> list:
             if w.get("height", "level") == "level":
                 ztop = z_of[lid] + lvh[lid] - float(st.get("slab_t", 0.15)
                                                     or 0.15)
-            else:
-                ztop = z_of[lid] + float(w.get("base", 0.0) or 0.0) + \
-                    float(w["height"])
+            else:      # (3.64.26: «height» is the wall's top over the
+                ztop = z_of[lid] + float(w["height"])   # floor, as built)
+            zbase_ = z_of[lid] + float(w.get("base", 0.0) or 0.0)
             for f_ in w["fin"]:
                 sg = 1 if f_.get("side") == "l" else -1
                 s0, s1 = _face_span(w, sg, L, plans_of[lid])
                 side_pt = (mid[0] + n[0] * sg * (t / 2 + 0.3),
                            mid[1] + n[1] * sg * (t / 2 + 0.3))
-                za = zf + float(f_.get("z0") or 0.0)
+                za = max(zf + float(f_.get("z0") or 0.0), zbase_)
                 if float(f_.get("z1") or 0.0) > 0:
                     zb = zf + float(f_["z1"])
                 else:

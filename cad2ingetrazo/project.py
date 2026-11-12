@@ -5028,7 +5028,8 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     arch["structure"] = [e for e in arch["structure"]
                          if e["level"] != lid or e["type"] in ("footing",
                                                                "roof")
-                         or e in user_slabs_]
+                         or e in user_slabs_ or (
+                             e["type"] != "slab" and e.get("user"))]
     arch["rooms"] = [r for r in arch["rooms"] if r["level"] != lid]
     doc["texts"] = [t for t in doc["texts"] if t["level"] != lid]
 
@@ -9058,7 +9059,8 @@ def _groups(arch, doc=None):
                               else frozenset()),
                       name=name)
             g.component = False
-            if e.get("soft_z"):           # 3.64.24: one face up the wall
+            if e.get("soft_z") and (doc or {}).get("settings", {}).get(
+                    "hide_wall_joints", False):   # 3.64.26: off — as before
                 try:
                     _soften_at(g.mesh, e["soft_z"])
                 except Exception:  # noqa: BLE001

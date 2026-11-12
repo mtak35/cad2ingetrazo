@@ -5482,9 +5482,18 @@ class Panel(QWidget):
             return Point(m[0] - (b[1] - a[1]) / L * sg * d,
                          m[1] + (b[0] - a[0]) / L * sg * d)
         faces = {}
+
+        def parapet_(w):           # 3.64.26: a roof / terrace parapet
+            return float(w.get("base", 0.0) or 0.0) > 0.3 or str(
+                w.get("name", "")).startswith(PJ.PARAPET_NAMES +
+                                              PJ.AUTO_RAIL)
+        sel_w = [w for w in arch["walls"] if w.get("id") in wids]
+        only_par = bool(sel_w) and all(parapet_(w) for w in sel_w)
         for w in arch["walls"]:
             if w.get("id") not in wids or "a" not in w or w.get("rail"):
                 continue
+            if parapet_(w) and not only_par:
+                continue           # a parapet painted only when picked alone
             d = float(w["t"]) / 2 + 0.3
             sides = [s_ for s_, g_ in (("l", 1), ("r", -1))
                      if any(r["poly"].contains(probe(w, g_, d))
@@ -5502,7 +5511,7 @@ class Panel(QWidget):
                     if key in rids or r.get("id") in rids:
                         polys.append((lv["id"], r["poly"].buffer(0.02)))
             for w in arch["walls"]:
-                if "a" not in w or w.get("rail") or \
+                if "a" not in w or w.get("rail") or parapet_(w) or \
                         w.get("kind", "line") != "line" or \
                         w.get("type") == "curtain" or \
                         math.dist(w["a"], w["b"]) < 0.2:
