@@ -2116,6 +2116,72 @@ def _wall_under_ramps(w, ramps, bot, top, step=0.4):
     return [tuple(m) for m in merged]
 
 
+def _above_bottoms(doc, info, lid):
+    """3.64.19: [(plan shape, bottom z)] of the floor pieces of the level
+    over ``lid`` (its main slab and its level zones, each at its own
+    height): a wall stops at the soffit of the piece over it."""
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        return []
+    ids = [lv["id"] for lv in doc["levels"]]
+    if lid not in ids or ids.index(lid) + 1 >= len(ids):
+        return []
+    up = ids[ids.index(lid) + 1]
+    if any(s_.get("top") for s_ in doc.get("structure") or []
+           if s_.get("type") == "slab" and s_.get("level") == lid):
+        return []                  # its own slab over it: as before
+    z0u = info[up]["z0"]
+    sl = [s for s in doc.get("structure") or [] if s["type"] == "slab"
+          and s.get("level") == up and not s.get("top") and
+          not s.get("roof") and not s.get("skip") and not s.get("grade")
+          and len(s.get("corners") or []) >= 3]
+    main = [s for s in sl if not s.get("zone") and not s.get("user")]
+    mt = max((float(s["t"]) for s in main), default=0.0)
+    out = []
+    for s in sl:
+        try:
+            g = Polygon([tuple(p[:2]) for p in s["corners"]],
+                        [[tuple(p[:2]) for p in h]
+                         for h in s.get("holes") or [] if len(h) >= 3]
+                        ).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        off = float(s.get("offset", 0.0) or 0.0)
+        top = z0u + off
+        if s.get("zone"):
+            bot = min(top, z0u) - max(float(s["t"]), mt)
+        else:
+            bot = top - float(s["t"])
+        out.append((g, bot, bool(s.get("zone"))))
+    return out
+
+
+def _wall_top(w, under, above):
+    """The wall's top: the soffit of the floor piece over it (the lowest
+    one along it), else ``under``."""
+    if not above:
+        return under
+    try:
+        from shapely.geometry import LineString
+        ln = LineString([tuple(w["a"][:2]), tuple(w["b"][:2])])
+        if ln.length < 0.05:
+            return under
+        hits = []
+        for g, bot, zone in above:
+            if g.intersection(ln).length >= min(0.3, 0.5 * ln.length):
+                hits.append((bot, zone))
+        if not hits:
+            return under
+        zb = [b for b, z in hits if z]
+        bot = min(zb) if zb else min(b for b, _z in hits)
+        if abs(bot - under) > 0.6:      # not this wall's floor over it
+            return under
+        return bot
+    except Exception:  # noqa: BLE001
+        return under
+
+
 # ---- everything, with its faces ----------------------------------------------------
 def build(doc: dict, elevations) -> list[dict]:
     """[{"kind", "id", "name", "level", "faces"}] for every wall and
@@ -2127,6 +2193,7 @@ def build(doc: dict, elevations) -> list[dict]:
     openings = doc.get("openings") or []
     for lid, li in info.items():
         z0, under = li["z0"], li["under"]
+        above_ = _above_bottoms(doc, info, lid)
         # walls — cut by their openings
         mine = [_plastered(w, PLASTER(doc)) for w in walls
                 if w["level"] == lid]
@@ -2137,7 +2204,8 @@ def build(doc: dict, elevations) -> list[dict]:
             mine2, ops_extra = [], []
             for w in mine:
                 b_ = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
-                t_ = under if w.get("height", "level") == "level" \
+                t_ = _wall_top(w, under, above_) \
+                    if w.get("height", "level") == "level" \
                     else z0 + float(w["height"])
                 try:
                     runs = _wall_under_ramps(w, ramps, b_, t_)
@@ -2187,7 +2255,8 @@ def build(doc: dict, elevations) -> list[dict]:
             if not pieces:
                 continue
             b = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
-            top = under if w.get("height", "level") == "level" \
+            top = _wall_top(w, under, above_) \
+                if w.get("height", "level") == "level" \
                 else z0 + float(w["height"])
             if top - b < 0.01:
                 continue
