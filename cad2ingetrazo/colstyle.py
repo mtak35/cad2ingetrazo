@@ -425,9 +425,11 @@ def rcc_faces(c, outline, z0, z1, rebar=False) -> list:
             w = float(c.get("w", max(xs) - min(xs)))
             d = float(c.get("d", w) or w)
             pts = _rect(cx, cy, w, d, ang)
-        ch = 0.02                       # 20 mm chamfered arrises
-        sh = []
-        n = len(pts)
+        # 3.64.16: square arrises, as the plan draws the column (a chamfer
+        # only when asked for: c["chamfer"] in m)
+        ch = float(c.get("chamfer") or 0.0)
+        sh = [] if ch > 0 else list(pts)
+        n = len(pts) if ch > 0 else 0
         for i in range(n):
             a, b, c2 = pts[i - 1], pts[i], pts[(i + 1) % n]
             for q in (a, c2):

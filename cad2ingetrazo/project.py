@@ -251,6 +251,8 @@ def load(raw) -> dict:
                      and len(s.get("corners") or []) == 4]
     doc["stair_cad"] = {k: v for k, v in (raw.get("stair_cad") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
+                       if k in ids and isinstance(v, list)}
     doc["grid"] = SITE_.load_grid(raw.get("grid"))
     doc["parking"] = {k: v for k, v in (raw.get("parking") or {}).items()
                       if k in ids and isinstance(v, dict)}
@@ -5061,6 +5063,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rrecs = SE.rails_from_cad(pl, lambda n: _match(n, P["rails"]),
                                       lid, rk, float(st.get("rail_h",
                                                             SE.RAIL_H)))
+            # 3.64.16: every railing the plan draws, kept as drawn (the
+            # stair halls' railings are built from them)
+            doc.setdefault("rail_cad", {})[lid] = [
+                [list(r_["a"]), list(r_["b"])] for r_ in rrecs]
             # 3.64.12: a parking deck's edge drawn on the rail layer (a long
             # line by the bays, round the open deck): its parapet — a solid
             # wall, needing no text to say so

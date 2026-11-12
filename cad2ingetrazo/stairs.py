@@ -1296,7 +1296,9 @@ def groups(doc, z_of, layer_of):
                 # flights' own railings guard the well, as the plan draws
                 # it; no railing round the hall across that floor
                 up_ = _upper_stair(doc, st)
-                if up_ is not None and up_.get("id") not in _hidden_ids(doc):
+                if up_ is not None and up_.get("id") not in _hidden_ids(
+                        doc) and (doc.get("rail_cad") or {}).get(
+                        st.get("to")) is None:
                     guard = []
             except Exception:  # noqa: BLE001
                 guard = []
@@ -1400,6 +1402,40 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
             if hp.is_valid and hp.intersection(foot).area > 0.3 * min(
                     hp.area, foot.area):
                 holes.append(_opened(hp, 0.30, foot) or hp)
+    # 3.64.16: the plan of the floor above draws the railing round this
+    # hall (its rail layer): that railing, as drawn — none where it draws
+    # none (the stair going on up guards its own well)
+    cad_ = (doc.get("rail_cad") or {}).get(st["to"])
+    up_st = _upper_stair(doc, st)
+    if up_st is not None and up_st.get("id") in _hidden_ids(doc):
+        cad_ = None        # its flights not built yet: round the opening
+    if cad_ is not None:
+        hall_ = foot.buffer(0.8, join_style=2)
+        own_ = None
+        for s2 in doc.get("stairs") or []:
+            if s2.get("level") == st["to"] and s2 is not st and \
+                    len(s2.get("corners") or []) >= 3 and \
+                    s2.get("id") not in _hidden_ids(doc):
+                p2 = Polygon([tuple(p[:2]) for p in s2["corners"]]).buffer(0)
+                if p2.intersection(foot).area > 0.3 * min(p2.area, foot.area):
+                    own_ = p2.buffer(-0.3, join_style=2)
+        out = []
+        used_ = []
+        for a, b in cad_:
+            if any(min(math.dist(a[:2], u0) + math.dist(b[:2], u1),
+                       math.dist(a[:2], u1) + math.dist(b[:2], u0)) < 0.3
+                   for u0, u1 in used_):
+                continue              # the same railing drawn twice
+            used_.append((tuple(a[:2]), tuple(b[:2])))
+            ln = LineString([tuple(a[:2]), tuple(b[:2])])
+            if ln.length < 0.3 or not hall_.contains(ln):
+                continue
+            if own_ is not None and not own_.is_empty and \
+                    own_.contains(ln.interpolate(0.5, normalized=True)):
+                continue          # the stair's own (sloping) well railing
+            out.append((RL.faces([(a[0], a[1], ztop), (b[0], b[1], ztop)],
+                                 h, kind, gap=gap), None))
+        return out
     if not holes:
         return []
     walls = _walls_of(doc, st["to"])
