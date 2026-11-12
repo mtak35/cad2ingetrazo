@@ -9517,6 +9517,14 @@ def levels_from_cad(doc) -> list:
     for i, lv in enumerate(levels):
         if abs(el[i] - elev[i]) > 1e-4:
             changed.append((lv["name"], el[i]))
+            # 3.64.13: the level's noted pieces keep their own levels (the
+            # level moved under them: their offsets the other way)
+            d_ = el[i] - elev[i]
+            for e_ in arch["structure"]:
+                if e_.get("type") == "slab" and e_.get("zone") and \
+                        e_.get("note") and e_.get("level") == lv["id"]:
+                    o_ = float(e_.get("offset", 0.0) or 0.0) - d_
+                    e_["offset"] = 0.0 if abs(o_) < 0.005 else round(o_, 4)
     return changed
 
 
