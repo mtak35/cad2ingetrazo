@@ -251,6 +251,8 @@ def load(raw) -> dict:
                      and len(s.get("corners") or []) == 4]
     doc["stair_cad"] = {k: v for k, v in (raw.get("stair_cad") or {}).items()
                         if k in ids and isinstance(v, list)}
+    for k_ in ("gone3d", "kept3d"):      # 3.64.27: hand edits kept
+        doc[k_] = [str(x) for x in raw.get(k_) or [] if isinstance(x, str)]
     doc["removed"] = [r for r in raw.get("removed") or []
                       if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
@@ -8643,6 +8645,9 @@ def moved_openings(scene, doc, seen: dict) -> list:
         dx, dy = now[0] - tag["at"][0], now[1] - tag["at"][1]
         if math.hypot(dx, dy) < 0.005:
             continue
+        if shape_changed(scene, g) or _gk(g) in set(doc.get("kept3d")
+                                                    or []):
+            continue                 # 3.64.27: edited by hand, not moved
         key = (getattr(g, "uid", id(g)), round(now[0], 3), round(now[1], 3))
         if key in seen:
             continue
@@ -13340,7 +13345,12 @@ def store_only(viewport, doc) -> None:
             sc.plugin_data[KEY] = copy.deepcopy(self.old)
             sc.version += 1
 
+    sc_ = viewport.scene
+    was_ = _GS.get(id(sc_))
+    same_ = bool(was_) and was_[0] == _stored_id(sc_)
     viewport.history.execute(_Store())
+    if same_:                    # 3.64.27: the as-built shapes carried on
+        _GS[id(sc_)] = (_stored_id(sc_), was_[1])
     viewport.update()
 
 
@@ -13353,6 +13363,11 @@ def commit(viewport, doc, opts=None) -> None:
 
     opts = opts or {}
     arch = doc["arch"]
+    try:                    # 3.64.27: changed from the panel: made again
+        clear_changed(doc, viewport.scene.plugin_data.get(KEY))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.clear_changed")
     try:                    # furniture, fixtures, cars: light unless asked
         from . import library as _LB
         _LB.LOWPOLY[0] = not doc["settings"].get("hi_poly", False)
@@ -13552,6 +13567,12 @@ def commit(viewport, doc, opts=None) -> None:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project section box")
+    try:                             # 3.64.27: hand edits kept
+        assign_keys(new_groups)
+        new_groups = drop_gone(new_groups, doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project hand edits")
     if doc["settings"].get("level_groups"):
         try:
             new_groups = group_by_level(new_groups, arch)
@@ -13600,6 +13621,13 @@ def commit(viewport, doc, opts=None) -> None:
                             L.visible = False       # 2D: the plans show them
                         self.added.append(L)
             b = self.before
+            if not getattr(self, "_swapped", False):
+                self._swapped = True
+                try:                 # 3.64.27: the groups edited by hand
+                    swap_kept(new_groups, b["groups"], doc)
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("project swap_kept")
             sc.groups[:] = [g for g in sc.groups if g not in b["groups"]]
             at = min(b["at"], len(sc.groups))
             sc.groups[at:at] = new_groups
@@ -15156,3 +15184,263 @@ def apply_removed(doc, lid=None) -> int:
                 delete_record(doc, k, e["id"])
                 n += 1
     return n
+
+
+# ---- 3.64.27: what is changed by hand in the model stays as it was left -----
+#  Every built group carries «gk» (type|id|part|name#n) in its tag. Between
+#  two builds: a group gone from the model → its key in doc["gone3d"] (a
+#  rebuild leaves it out); a group whose shape / material was changed (push /
+#  pull, a face erased, painted with IngeTrazo's bucket, moved when it is
+#  not a wall / slab / opening…) → its key in doc["kept3d"]: a rebuild keeps
+#  the edited group in place of the one made again.
+_GS = {}
+_REC_MOVES = ("wall", "column", "beam", "slab", "stair", "ramp", "opening",
+              "furniture", "car", "gate")
+
+
+def _gk_base(t, name) -> str:
+    return (f"{t.get('type')}|{t.get('id')}|{t.get('part') or ''}|"
+            f"{name or ''}")
+
+
+def assign_keys(groups) -> None:
+    """«gk» on every tagged group just made (a counter keeps two groups of
+    one element and one name apart)."""
+    seen = {}
+
+    def walk(gs):
+        for g in gs:
+            t = tag_of(g)
+            if t is not None:
+                b = _gk_base(t, getattr(g, "name", ""))
+                n = seen.get(b, 0)
+                seen[b] = n + 1
+                t["gk"] = f"{b}#{n}"
+            kids = getattr(g, "children", None)
+            if kids:
+                walk(kids)
+    walk(groups)
+
+
+def _gk(g):
+    t = tag_of(g)
+    return t.get("gk") if t else None
+
+
+def _shape_sig(g):
+    """(vertex count, box size, spread, materials) of the group's own mesh —
+    the same after a move; changed by an edit."""
+    m = getattr(g, "mesh", None)
+    vs = list(getattr(m, "vertices", None) or []) if m is not None else []
+    n = len(vs)
+    if not n:
+        return (0, (0.0, 0.0, 0.0), 0.0, 0, 0)
+    xs = [v.position.x() for v in vs]
+    ys = [v.position.y() for v in vs]
+    zs = [v.position.z() for v in vs]
+    cx, cy, cz = sum(xs) / n, sum(ys) / n, sum(zs) / n
+    spread = sum((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2
+                 for x, y, z in zip(xs, ys, zs)) / n
+    mats = set()
+    nf = 0
+    for f in getattr(m, "faces", None) or []:
+        nf += 1
+        a = getattr(f, "attrs", None) or {}
+        mats.add(repr(sorted((k, repr(v)) for k, v in a.items())))
+    mats.add(repr(getattr(g, "material", None)))
+    return (n, (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)),
+            spread, nf, hash(tuple(sorted(mats))))
+
+
+def _pos_sig(g):
+    m = getattr(g, "mesh", None)
+    vs = list(getattr(m, "vertices", None) or []) if m is not None else []
+    xf = getattr(g, "xform", None)
+    xd = None if xf is None else tuple(round(v, 5) for v in xf.data())
+    if not vs:
+        return (0.0, 0.0, 0.0, xd)
+    n = len(vs)
+    return (sum(v.position.x() for v in vs) / n,
+            sum(v.position.y() for v in vs) / n,
+            sum(v.position.z() for v in vs) / n, xd)
+
+
+def _same_shape(a, b) -> bool:
+    if a[0] != b[0] or a[3] != b[3] or a[4] != b[4]:
+        return False
+    if any(abs(p - q) > 0.002 for p, q in zip(a[1], b[1])):
+        return False
+    return abs(a[2] - b[2]) <= 1e-4 + 1e-4 * abs(b[2])
+
+
+def _same_pos(a, b) -> bool:
+    return all(abs(p - q) < 0.002 for p, q in zip(a[:3], b[:3])) and \
+        a[3] == b[3]
+
+
+def _scene_keys(scene) -> dict:
+    out = {}
+    for g in all_groups(scene):
+        k = _gk(g)
+        if k and not str(k).startswith(("levelgroup|", "symbols|")):
+            out[k] = g
+    return out
+
+
+def note_shapes(scene) -> None:
+    try:
+        _GS[id(scene)] = (_stored_id(scene), {
+            k: (_shape_sig(g), _pos_sig(g))
+            for k, g in _scene_keys(scene).items()})
+    except Exception:  # noqa: BLE001
+        _GS.pop(id(scene), None)
+
+
+def hand_edits(scene, doc) -> tuple:
+    """The groups deleted / changed by hand since the last build written
+    into ``doc`` (gone3d / kept3d; a wall, column, slab… deleted: its record
+    taken out, as 3.64.23). (deleted, kept)."""
+    was = _GS.get(id(scene))
+    if not was or was[0] != _stored_id(scene):
+        note_shapes(scene)
+        return 0, 0
+    sigs = was[1]
+    now = _scene_keys(scene)
+    gone = [k for k in sigs if k not in now]
+    if len(gone) > max(40, 0.3 * len(sigs)):
+        note_shapes(scene)                # a floor hidden / taken away
+        return 0, 0
+    n_del = n_keep = 0
+    alive = {tuple(k.split("|", 2)[:2]) for k in now}
+    recs = []
+    gset = set(doc.get("gone3d") or [])
+    for k in gone:
+        typ, rid, part = (k.split("|") + ["", "", ""])[:3]
+        if typ in USER_DELETABLE and not part and (typ, rid) not in alive:
+            recs.append((typ, rid))
+        elif k not in gset:
+            gset.add(k)
+            n_del += 1
+    if recs:
+        n_del += remove_deleted(doc, sorted(set(recs)))
+    kset = set(doc.get("kept3d") or [])
+    for k, g in now.items():
+        if k not in sigs or k in kset:
+            continue
+        s0, p0 = sigs[k]
+        s1 = _shape_sig(g)
+        if _same_shape(s0, s1):
+            if _same_pos(p0, _pos_sig(g)):
+                continue
+            if k.split("|", 1)[0] in _REC_MOVES:
+                continue       # moved: its record follows (a Move / Rotate)
+        kset.add(k)
+        n_keep += 1
+    if n_del:
+        doc["gone3d"] = sorted(gset)
+    if n_keep:
+        doc["kept3d"] = sorted(kset)
+    return n_del, n_keep
+
+
+def drop_gone(groups, doc) -> list:
+    """The groups made again that were deleted by hand: left out."""
+    gone = set(doc.get("gone3d") or [])
+    if not gone:
+        return groups
+
+    def keep(gs):
+        out = []
+        for g in gs:
+            if _gk(g) in gone:
+                continue
+            kids = getattr(g, "children", None)
+            if isinstance(kids, list) and kids:
+                kids[:] = keep(kids)
+            out.append(g)
+        return out
+    return keep(groups)
+
+
+def swap_kept(new_groups, old_groups, doc) -> None:
+    """In the groups made again, the ones edited by hand put back as they
+    were left (the same objects)."""
+    kept = set(doc.get("kept3d") or [])
+    if not kept:
+        return
+    old = {}
+
+    def collect(gs):
+        for g in gs:
+            k = _gk(g)
+            if k in kept:
+                old[k] = g
+            kids = getattr(g, "children", None)
+            if kids:
+                collect(kids)
+    collect(old_groups)
+    if not old:
+        return
+
+    def swap(gs):
+        for i, g in enumerate(gs):
+            k = _gk(g)
+            if k in old:
+                gs[i] = old[k]
+                continue
+            kids = getattr(g, "children", None)
+            if isinstance(kids, list) and kids:
+                swap(kids)
+    swap(new_groups)
+
+
+def shape_changed(scene, g) -> bool:
+    """The group's shape / material edited by hand since the last build
+    (not only moved)."""
+    was = _GS.get(id(scene))
+    k = _gk(g)
+    if not was or not k or k not in was[1]:
+        return False
+    try:
+        return not _same_shape(was[1][k][0], _shape_sig(g))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rec_map(d) -> dict:
+    import json as _j
+    out = {}
+    if not isinstance(d, dict) or "arch" not in d:
+        return out
+    a = d["arch"]
+    for r in (a.get("walls") or []) + (a.get("openings") or []) + \
+            (a.get("structure") or []) + (d.get("stairs") or []) + \
+            (d.get("ramps") or []) + (d.get("furniture") or []):
+        if isinstance(r, dict) and r.get("id"):
+            try:
+                out[str(r["id"])] = _j.dumps(r, sort_keys=True, default=str)
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
+def clear_changed(doc, old) -> None:
+    """An element changed from the panel (its record) is made again from
+    it: its hand-edit keys dropped."""
+    if not (doc.get("gone3d") or doc.get("kept3d")):
+        return
+    a, b = _rec_map(old), _rec_map(doc)
+    ch = {i for i, v in b.items() if a.get(i) != v}
+    if not ch:
+        return
+    for key in ("gone3d", "kept3d"):
+        if doc.get(key):
+            doc[key] = [k for k in doc[key]
+                        if k.split("|", 2)[1] not in ch]
+
+
+def ensure_shapes(scene) -> None:
+    """The as-built shapes noted once per model (opened, undone, stored)."""
+    was = _GS.get(id(scene))
+    if not was or was[0] != _stored_id(scene):
+        note_shapes(scene)

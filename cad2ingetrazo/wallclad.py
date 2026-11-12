@@ -340,6 +340,9 @@ def groups(doc) -> list:
                                          zs > zf + 0.05 else zf - 1,
                                          p_ + ww / 2 + mg,
                                          zs + float(o.get("h", 2.1)) + mg))
+                cb_ = FN.cwin_box(w, z_of[lid], L, 0.03)
+                if cb_ is not None:          # a corner window's glass
+                    R = R.difference(cb_)
                 if R.is_empty:
                     continue
                 f0 = sg * t / 2

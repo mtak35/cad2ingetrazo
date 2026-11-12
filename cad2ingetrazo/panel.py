@@ -729,10 +729,15 @@ class Panel(QWidget):
         doc["settings"]["park_nums"] = self.c_cars.isChecked()
         doc["settings"]["cars_lib"] = self.c_carlib.isChecked()
         doc["settings"]["car_model"] = self.c_carmodel.currentData() or "suv"
+        try:                # 3.64.27: what was changed by hand, kept
+            PJ.hand_edits(self.vp.scene, doc)
+        except Exception:  # noqa: BLE001
+            log_error("panel hand edits")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             PJ.commit(self.vp, doc, self.ann_opts())
             PJ.note_built(self.vp.scene)
+            PJ.note_shapes(self.vp.scene)
         except Exception as e:  # noqa: BLE001 — say it
             log_error("panel.commit")
             self.flash(f"Not built — {e}", 9000)
@@ -7397,6 +7402,37 @@ class Panel(QWidget):
             from .host import log_error
             log_error("context_flat")
 
+    def _hand_menu(self, menu) -> None:
+        d_ = getattr(self, "_doc_memo", None) or self.doc()
+        kept = set(d_.get("kept3d") or [])
+        gone = d_.get("gone3d") or []
+        ks = []
+        if kept:
+            for e in list(self.vp.scene.selection):
+                for g in (e, getattr(e, "owner", None)):
+                    k = PJ._gk(g) if g is not None else None
+                    if k in kept and k not in ks:
+                        ks.append(k)
+        if ks:
+            menu.addAction(f"CAD2IngeTrazo · Make the {len(ks)} element(s) "
+                           "again from the plan (drop my edits on them)",
+                           lambda ks_=list(ks): self._drop_hand(ks_))
+        if gone:
+            menu.addAction(f"CAD2IngeTrazo · Bring back the {len(gone)} "
+                           "part(s) I deleted (finishes, windows, railings…)",
+                           lambda: self._drop_hand(None))
+
+    def _drop_hand(self, keys) -> None:
+        doc = self.doc()
+        if keys is None:
+            doc["gone3d"] = []
+            msg = "Deleted parts brought back"
+        else:
+            doc["kept3d"] = [k for k in doc.get("kept3d") or []
+                             if k not in set(keys)]
+            msg = f"{len(keys)} element(s) made again from the plan"
+        self.commit(doc, msg)
+
     def _context_menu(self, menu) -> None:
         """The right-click menu of a CAD2IngeTrazo element: its fields in a
         dialog, its quick changes, delete."""
@@ -7451,6 +7487,10 @@ class Panel(QWidget):
             self._clad_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu cladding")
+        try:            # 3.64.27: hand edits — undone on request
+            self._hand_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu hand edits")
         sel = self._selected(fresh=True)
         if not sel:
             return
@@ -10734,6 +10774,11 @@ class Panel(QWidget):
             busy_ = pd_ is not None and pd_.length() > 1e-9
         except Exception:  # noqa: BLE001
             busy_ = False
+        try:                           # 3.64.27: the shapes as built
+            if not busy_:
+                PJ.ensure_shapes(self.vp.scene)
+        except Exception:  # noqa: BLE001
+            log_error("panel ensure_shapes")
         try:                           # 3.64.23: deleted in the model —
             gone_ = [] if busy_ else PJ.deleted_in_scene(self.vp.scene)
             if gone_:

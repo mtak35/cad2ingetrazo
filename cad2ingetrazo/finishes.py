@@ -222,6 +222,21 @@ def op_margin(o) -> float:
     return max(A, 0.0) + 0.003
 
 
+def cwin_box(w, z_floor, L, mg=0.0):
+    """3.64.27: a corner window's leg is glass from its sill up over its
+    whole length — the (s, z) box a finish / cladding leaves open there
+    (None: not a leg)."""
+    if not w.get("cwin"):
+        return None
+    from shapely.geometry import box
+    try:
+        zs = z_floor + float(w.get("cw_low", 0.9) or 0.0)
+        zt = zs + float(w.get("cwin_h", 1.2) or 1.2)
+    except (TypeError, ValueError):
+        return None
+    return box(-5.0, zs - mg, L + 5.0, zt + mg)
+
+
 def _face_span(w, sg, L, plans=None) -> tuple:
     """(s0, s1) of the face on side ``sg`` along the wall's centre line:
     its outline's points on that face, the wall joined with the others of
@@ -364,6 +379,9 @@ def groups(doc) -> list:
                     R = R.difference(box(p_ - ww / 2 - mg, zs if zs > zf +
                                          0.05 else zf - 1, p_ + ww / 2 + mg,
                                          zs + float(o.get("h", 2.1)) + mg))
+                cb_ = cwin_box(w, z_of[lid], L)
+                if cb_ is not None:          # a corner window's glass
+                    R = R.difference(cb_)
                 if R.is_empty:
                     continue
                 # on the face: the plaster is in the wall's thickness
