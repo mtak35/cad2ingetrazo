@@ -9787,6 +9787,28 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
             arch["levels"][0]["id"] == lid     # (not over a basement)
     except Exception:  # noqa: BLE001
         on_platform = False
+    # 3.64.15: a piece's openings that are only the walls standing in it
+    # (the open floor round a room: the room's walls) filled — the floor
+    # runs on under its walls; only the other pieces and the real
+    # openings stay out of it (no ring of «holes» along every wall)
+    try:
+        filled_ = []
+        for k_, (pg_, v_) in enumerate(pieces):
+            others_ = unary_union([q_ for j_, (q_, _v) in enumerate(pieces)
+                                   if j_ != k_])
+            gs_ = []
+            for g_ in getattr(pg_, "geoms", [pg_]):
+                if g_.geom_type != "Polygon":
+                    continue
+                f_ = Polygon(g_.exterior).buffer(0)
+                if not others_.is_empty:
+                    f_ = f_.difference(others_)
+                gs_.append(f_)
+            filled_.append((unary_union(gs_) if gs_ else pg_, v_))
+        pieces = filled_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.slab_zones fill")
     # 3.64.10: the floor's openings out of every piece (a ramp's well
     # crossing a piece's edge too — kept only when wholly inside before,
     # and the piece covered the ramp)

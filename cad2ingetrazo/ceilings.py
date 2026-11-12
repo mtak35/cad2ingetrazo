@@ -486,12 +486,14 @@ def build(doc, z_of, room_key) -> list:
             rst_ = PJ_.ramp_states(doc)
             i_ = order.index(lid)
             up_ = order[i_ + 1] if i_ + 1 < len(order) else None
+            # (every ramp the floor's plan draws — the one going on up
+            # to a floor not added yet too: its area is the ramp's)
             rf_ = [PK_.footprint(r_, pads=True).buffer(0.15)
                    for r_ in doc.get("ramps") or []
-                   if not (rst_.get(r_.get("id")) or {}).get("hide") and (
-                       r_.get("level") == lid or (
-                           r_.get("level") == up_ and
-                           float(r_.get("rise") or 0) < 0))]
+                   if r_.get("level") == lid or (
+                       r_.get("level") == up_ and
+                       float(r_.get("rise") or 0) < 0 and
+                       not (rst_.get(r_.get("id")) or {}).get("hide"))]
             if rf_:
                 ru_ = unary_union(rf_)
                 wells = ru_ if wells is None else unary_union([wells, ru_])

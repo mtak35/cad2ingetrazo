@@ -1385,6 +1385,18 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
                 hp = Polygon([tuple(p[:2]) for p in hl])
             except Exception:  # noqa: BLE001
                 continue
+            if not hp.is_valid:
+                hp = hp.buffer(0)
+            # 3.64.15: only the opening over this stair's hall (a long
+            # hole running on past it — a level zone's gap, a ramp's well
+            # joined to it — not railed along its whole length)
+            if hp.area > 2.0 * foot.area:
+                hp = hp.intersection(foot.buffer(0.6, join_style=2))
+                hp = max((g_ for g_ in getattr(hp, "geoms", [hp])
+                          if g_.geom_type == "Polygon"),
+                         key=lambda g_: g_.area, default=None)
+                if hp is None:
+                    continue
             if hp.is_valid and hp.intersection(foot).area > 0.3 * min(
                     hp.area, foot.area):
                 holes.append(_opened(hp, 0.30, foot) or hp)
