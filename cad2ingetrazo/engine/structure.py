@@ -2255,6 +2255,32 @@ def _wall_top(w, under, above):
 
 
 # ---- everything, with its faces ----------------------------------------------------
+def _soft_joints(out) -> None:
+    """3.64.24: where an outside wall runs on up into the wall over it (or
+    the roof's parapet), the line where the two meet is not drawn — one
+    face up the elevation: the lower wall's top and the upper one's foot
+    marked ``soft_z``."""
+    from shapely.geometry import LineString
+    conts = [(LineString(e["_ab"]), e["_zt"], e) for e in out
+             if e.get("kind") == "wall" and e.get("_cont") and e.get("_ab")]
+    if not conts:
+        return
+    for e in out:
+        if e.get("kind") != "wall" or not e.get("_ab"):
+            continue
+        ln = LineString(e["_ab"])
+        if ln.length < 0.05:
+            continue
+        for cl, zt, ce in conts:
+            if ce is e or abs(zt - e["_zb"]) > 0.02:
+                continue
+            band = cl.buffer(0.15, cap_style=2)
+            if ln.intersection(band).length >= 0.5 * min(ln.length,
+                                                          cl.length):
+                e.setdefault("soft_z", []).append(e["_zb"])
+                ce.setdefault("soft_z", []).append(zt)
+
+
 def build(doc: dict, elevations) -> list[dict]:
     """[{"kind", "id", "name", "level", "faces"}] for every wall and
     structural element of the building, at its true heights."""
@@ -2425,7 +2451,11 @@ def build(doc: dict, elevations) -> list[dict]:
                 faces = faces + _plaster_skin(w, pieces, PLASTER(doc), top,
                                               z0 + li["height"] - 0.001)
             out.append({"kind": "wall", "id": w.get("_orig", w["id"]),
-                        "name": w["name"], "level": lid, "faces": faces})
+                        "name": w["name"], "level": lid, "faces": faces,
+                        "_ab": (tuple(w["a"][:2]), tuple(w["b"][:2])),
+                        "_zb": b, "_zt": top,
+                        "_cont": w.get("height", "level") == "level"
+                        and top > under + 0.005 and not w.get("rail")})
         if doc.get("_merge_walls"):     # the floor's walls as ONE solid
             try:
                 _merge_level(doc, lid, li, mine, plans, openings, out, z0,
@@ -2721,6 +2751,10 @@ def build(doc: dict, elevations) -> list[dict]:
         wall_t = max((float(w["t"]) for w in mine), default=0.20)
         for r in (e for e in els if e["type"] == "roof"):
             out.append(_el(r, lid, roof_faces(r, under, wall_t)))
+    try:
+        _soft_joints(out)
+    except Exception:  # noqa: BLE001
+        pass
     return [e for e in out if e["faces"]]
 
 

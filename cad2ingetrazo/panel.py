@@ -5334,14 +5334,19 @@ class Panel(QWidget):
                     f"{len(rids_)} room(s)" if rids_ else "") if x)
                 m_ = menu.addMenu(f"CAD2IngeTrazo · Wall finish / paint — "
                                   f"{what_} selected")
-                for band, lab, _z0, _z1 in FN.BANDS:
-                    mb = m_.addMenu(lab)
+                def _fill_many(mb, band, groups_=groups_):
+                    if mb.actions():
+                        return
                     for title, ks in groups_:
                         mg = mb.addMenu(title)
                         for k_, lab_ in ks:
                             mg.addAction(lab_, lambda k=k_, b_=band:
                                          self._finish_many(wids_, rids_, k,
                                                            b_))
+                for band, lab, _z0, _z1 in FN.BANDS:
+                    mb = m_.addMenu(lab)   # (filled when opened: quick)
+                    mb.aboutToShow.connect(
+                        lambda mb=mb, b_=band: _fill_many(mb, b_))
                 m_.addSeparator()
                 m_.addAction("Take the finishes off them",
                              lambda: self._finish_many(wids_, rids_, None,
@@ -5369,8 +5374,9 @@ class Panel(QWidget):
             m_ = menu.addMenu(f"CAD2IngeTrazo · Wall finish — "
                               f"{'this' if side else ('left' if sd == 'l' else 'right')}"
                               f" face (toward {toward})")
-            for band, lab, _z0, _z1 in FN.BANDS:
-                mb = m_.addMenu(lab + ("  ✓" if band in now else ""))
+            def _fill_one(mb, band, sd, now=now):
+                if mb.actions():
+                    return
                 for title, ks in groups_:
                     mg = mb.addMenu(title)
                     for k_, lab_ in ks:
@@ -5383,6 +5389,10 @@ class Panel(QWidget):
                     mb.addAction("Take this band off",
                                  lambda b_=band, s_=sd:
                                  self._set_finish(wid, s_, None, b_))
+            for band, lab, _z0, _z1 in FN.BANDS:
+                mb = m_.addMenu(lab + ("  ✓" if band in now else ""))
+                mb.aboutToShow.connect(       # (filled when opened: quick)
+                    lambda mb=mb, b_=band, s_=sd: _fill_one(mb, b_, s_))
             m_.addSeparator()
             if now:
                 if toward != "outside":

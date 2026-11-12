@@ -9038,6 +9038,11 @@ def _groups(arch, doc=None):
                               else frozenset()),
                       name=name)
             g.component = False
+            if e.get("soft_z"):           # 3.64.24: one face up the wall
+                try:
+                    _soften_at(g.mesh, e["soft_z"])
+                except Exception:  # noqa: BLE001
+                    pass
         g.material = {"color": COLOR[e["kind"]], "opacity": 1.0}
         if e["kind"] == "wall" and (walls_by.get(e["id"]) or {}).get("rcc"):
             g.material = {"color": COLOR["core"], "opacity": 1.0}
@@ -9245,6 +9250,10 @@ def _parapet_groups(doc, groups):
         return []
     lvn = {lv["id"]: lv["name"] for lv in arch["levels"]}
     out = []
+    # 3.64.24: each wall's footprint as built WITH its neighbours (mitred
+    # at the corners), the coping of walls meeting at one height joined:
+    # one coping round the corner, no step / overlap
+    tops = {}
     for g in groups:
         t = tag_of(g) or {}
         w = walls.get(t.get("id")) if t.get("type") == "wall" else None
@@ -9252,17 +9261,52 @@ def _parapet_groups(doc, groups):
             continue
         try:
             xf = g.xform
-            zs = [(xf.map(v.position) if xf is not None else v.position).z()
-                  for v in g.mesh.vertices]
-            top = max(zs)
-            fp = SE.wall_polys([w])
+            tops[w["id"]] = (max((xf.map(v.position) if xf is not None
+                                  else v.position).z()
+                                 for v in g.mesh.vertices), g)
         except Exception:  # noqa: BLE001
             continue
+    from .engine import walls as _Wp
+    by_lv = {}
+    for wid, (top, g) in tops.items():
+        by_lv.setdefault(walls[wid]["level"], []).append(walls[wid])
+    feet = {}
+    for lid_, ws_ in by_lv.items():
+        try:
+            pl_ = _Wp.plan(ws_)
+            for wid, pcs in pl_.items():
+                ps_ = []
+                for pc in pcs:
+                    try:
+                        q_ = SE._poly(pc["outer"])
+                        if not q_.is_empty:
+                            ps_.append(q_)
+                    except Exception:  # noqa: BLE001
+                        continue
+                if ps_:
+                    feet[wid] = ps_
+        except Exception:  # noqa: BLE001
+            continue
+    joined = {}
+    for wid, (top, g) in tops.items():
+        w = walls[wid]
+        k_ = (w["level"], round(top, 3))
+        joined.setdefault(k_, []).append(wid)
+    done_ = set()
+    for g in groups:
+        t = tag_of(g) or {}
+        w = walls.get(t.get("id")) if t.get("type") == "wall" else None
+        if w is None or w["id"] not in tops or w["id"] in done_:
+            continue
+        top = tops[w["id"]][0]
+        mates = joined.get((w["level"], round(top, 3)), [w["id"]])
+        fp = [p_ for m_ in mates for p_ in feet.get(m_, [])] or \
+            SE.wall_polys([w])
         if not fp:
             continue
-        foot = fp[0]
-        for p_ in fp[1:]:
-            foot = foot.union(p_)
+        done_.update(mates)
+        from shapely.ops import unary_union as _uuc
+        foot = _uuc([p_.buffer(0.002, join_style=2) for p_ in fp])
         faces = _prism(foot.buffer(0.04, join_style=2), top, top + 0.075)
         if style == "band":
             faces += _prism(foot.buffer(0.02, join_style=2), top - 0.20,
@@ -9417,6 +9461,20 @@ def _stair_groups(doc):
             g.name = f"{nm} · piece {seg + 1} · {names[lid]}"
         out.append(g)
     return out
+
+
+def _soften_at(mesh, zs, tol=0.004) -> None:
+    """The horizontal edges at the heights ``zs`` left undrawn (soft)."""
+    for e in mesh.edges:
+        try:
+            p0, p1 = e.v0.position, e.v1.position
+        except Exception:  # noqa: BLE001
+            continue
+        if abs(p0.z() - p1.z()) > tol:
+            continue
+        if any(abs(p0.z() - z) <= tol for z in zs):
+            e.soft = True
+            e.hidden = True
 
 
 def _mesh_of(faces):

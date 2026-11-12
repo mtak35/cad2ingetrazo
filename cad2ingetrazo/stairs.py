@@ -845,6 +845,13 @@ def auto(doc, cad=None, flip=False) -> dict:
             except Exception:  # noqa: BLE001
                 from .host import log_error
                 log_error("stairs.upper_well")
+    if not PJ.slab_on_top(doc):   # 3.64.24: the railing the floor above
+        for r_ in doc["stairs"]:      # draws by the stair: its slab up to it
+            try:
+                cut += apply_cad_split(doc, r_)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("stairs.apply_cad_split")
     try:                       # no terrace railing floating over a flight
         PJ.rails_off_stairs(doc)
     except Exception:  # noqa: BLE001
@@ -966,34 +973,42 @@ def clean_landings(st, thin=0.15) -> int:
 def _cut(arch, lid, corners) -> int:
     """The well cut in the level's slab(s) that hold it."""
     from shapely.geometry import Polygon
-    hole = Polygon(corners)
+    from shapely.ops import unary_union as _uu
+
+    def P(pts):
+        try:
+            g = Polygon([tuple(p[:2]) for p in pts])
+            return g if g.is_valid else g.buffer(0)
+        except Exception:  # noqa: BLE001
+            return Polygon()
+    hole = P(corners)
+    if hole.is_empty:
+        return 0
     n = 0
     for s in arch["structure"]:
         if s["type"] != "slab" or s["level"] != lid:
             continue
-        outer = Polygon(s["corners"])
-        if not outer.is_valid:
-            outer = outer.buffer(0)
+        if s.get("roof") or s.get("top"):
+            continue           # 3.64.24: the roof over the floor: closed
+        outer = P(s["corners"])
         part = outer.buffer(-0.02).intersection(hole)
         if part.is_empty or part.area < 0.5:
             continue
         holes = s.setdefault("holes", [])
-        if any(Polygon(h).intersects(part) for h in holes):
-            # an opening drawn there already (the CAD's stair hole):
-            # widened to the whole well
-            from shapely.ops import unary_union as _uu
-            merged = _uu([part])
-            keep = []
-            for h in holes:
-                if Polygon(h).intersects(merged):
-                    merged = merged.union(Polygon(h))
+        hp = [(h, P(h)) for h in holes]
+        if any(g.intersects(part) for _h, g in hp):
+            # 3.64.24: an opening there already (the CAD's stair hole): the
+            # two as one opening, their own outline (never their hull — a
+            # well spilling over the floor beside it)
+            keep, mg = [], [part]
+            for h, g in hp:
+                if not g.is_empty and g.intersects(part):
+                    mg.append(g)
                 else:
                     keep.append(h)
-            merged = merged.convex_hull.intersection(outer.buffer(-0.02))
+            part = _uu(mg).intersection(outer.buffer(-0.02))
             holes[:] = keep
-            part = merged
-        geom = getattr(part, "geoms", [part])
-        for gpart in geom:
+        for gpart in getattr(part, "geoms", [part]):
             if gpart.geom_type == "Polygon" and gpart.area >= 0.5:
                 holes.append([[round(x, 4), round(y, 4)]
                               for x, y in list(gpart.exterior.coords)[:-1]])
@@ -1361,19 +1376,25 @@ def floor_finishes(doc, st) -> tuple:
     return max(lo, 0.0), max(hi, 0.0)
 
 
-def _flight_zones(st):
-    """Each flight's area in plan (its treads' band), as polygons."""
+def _flight_zones(st, keep_none=False):
+    """Each flight's area in plan (its treads' band), as polygons (with
+    ``keep_none``: one entry per flight, None where it makes none)."""
     from shapely.geometry import MultiPoint
     out = []
     fl, _l = as_flights(st)
     for f in fl:
         pts = [tuple(p[:2]) for ln in f.get("lines") or [] for p in ln]
-        if len(pts) >= 3:
+        z = None
+        if len(pts) >= 2 and f.get("lines"):
             g = float(f.get("g", 0.28) or 0.28)
             d = f.get("d") or (0.0, 0.0)
             last = f["lines"][-1]
             pts += [(p[0] + d[0] * g, p[1] + d[1] * g) for p in last]
-            out.append(MultiPoint(pts).convex_hull)
+            h_ = MultiPoint(pts).convex_hull
+            if h_.geom_type == "Polygon" and h_.area > 1e-4:
+                z = h_
+        if z is not None or keep_none:
+            out.append(z)
     return out
 
 
@@ -1440,14 +1461,15 @@ def well_poly(st, doc=None):
     # as they both run — not on into the floor's landing past the shorter
     try:
         fl_, _l2 = as_flights(st)
-        zs_ = _flight_zones(st)
+        zs_ = _flight_zones(st, keep_none=True)
         pairs = []
         for i_, fa in enumerate(fl_):
             for j_, fb in enumerate(fl_):
                 if j_ <= i_ or i_ >= len(zs_) or j_ >= len(zs_):
                     continue
                 da, db = fa.get("d") or (0, 0), fb.get("d") or (0, 0)
-                if da[0] * db[0] + da[1] * db[1] < -0.9:
+                if da[0] * db[0] + da[1] * db[1] < -0.9 and \
+                        zs_[i_] is not None and zs_[j_] is not None:
                     pairs.append((da, zs_[i_], zs_[j_]))
         if pairs:
             da, za, zb = pairs[0]
@@ -1602,14 +1624,37 @@ def _well_guard(doc, st, z0, kind, h, gap) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("stairs._cad_guard")
-    try:
-        wg_ = _well_edges(doc, st, ztop, kind, h, gap)
+    # (3.64.24: so where the stair goes on up from that floor, in the same
+    # hall; at the last floor — nothing going on up — the opening the flights
+    # come up through railed along its edges on the floor, but where the
+    # stair arrives and where walls stand: the floor enclosed round it)
+    try:                      # 3.64.24: the railing that floor's plan
+        cs_ = cad_split(doc, st)   # draws by the stair, where it draws it
     except Exception:  # noqa: BLE001
-        from .host import log_error
-        log_error("stairs._well_edges")
-        wg_ = None
-    if wg_ is not None:
-        return wg_
+        cs_ = None
+    if cs_ is not None:
+        out_ = []
+        near_ = foot.buffer(0.35, join_style=2)
+        for ln in cs_[2]:
+            seg = ln.intersection(near_)
+            for g in getattr(seg, "geoms", [seg]):
+                if g.geom_type != "LineString" or g.length < 0.3:
+                    continue
+                c = list(g.coords)
+                out_.append((RL.faces([(c[0][0], c[0][1], ztop),
+                                       (c[-1][0], c[-1][1], ztop)], h, kind,
+                                      gap=gap), None))
+        return out_
+    up_go = _upper_stair(doc, st)
+    if up_go is not None and up_go.get("id") not in _hidden_ids(doc):
+        try:
+            wg_ = _well_edges(doc, st, ztop, kind, h, gap)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("stairs._well_edges")
+            wg_ = None
+        if wg_ is not None:
+            return wg_
     if not holes:
         return []
     walls = _walls_of(doc, st["to"])
@@ -3316,6 +3361,109 @@ def stair_void(doc, st):
                 if g.geom_type == "Polygon"), key=lambda g: g.area,
                default=None)
     return best
+
+
+def cad_split(doc, st):
+    """3.64.24: the stair's hall on the floor above split by the railing
+    that floor's plan draws by it: (void, floor, rail lines) — the void
+    the stair's high flights rise through (opened), the rest floor (the
+    slab on up to the railing), the railing as drawn; None without one."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import split, unary_union
+    up = st.get("to")
+    lines = (doc.get("rail_cad") or {}).get(up) or []
+    if not up or not lines or len(st.get("corners") or []) < 3:
+        return None
+    foot = Polygon([tuple(p[:2]) for p in st["corners"]]).buffer(0)
+    near = foot.buffer(0.35, join_style=2)
+    rails = []
+    for a, b in lines:
+        ln = LineString([tuple(a[:2]), tuple(b[:2])])
+        ins = ln.intersection(near)
+        if ins.length >= 0.5:
+            rails.append(ln)
+    if not rails:
+        return None
+    pieces = [foot.buffer(0.6, join_style=2)]   # (the floor on to its edge)
+    for ln in rails:
+        (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+        L = ln.length
+        ux, uy = (x1 - x0) / L, (y1 - y0) / L
+        ext = LineString([(x0 - ux * 1.0, y0 - uy * 1.0),
+                          (x1 + ux * 1.0, y1 + uy * 1.0)])
+        nxt = []
+        for pc in pieces:
+            try:
+                nxt += [g for g in split(pc, ext).geoms
+                        if g.geom_type == "Polygon" and g.area > 0.01]
+            except Exception:  # noqa: BLE001
+                nxt.append(pc)
+        pieces = nxt
+    # the flights high enough to want the floor above opened over them
+    n = int(st.get("risers") or 0)
+    rise = float(st.get("rise") or 0.17) or 0.17
+    k0 = max(0, n - int(math.ceil(HEADROOM / rise)))
+    fl, _l = as_flights(st)
+    zones = _flight_zones(st, keep_none=True)
+    high, k = [], 0
+    for f, z in zip(fl, zones):
+        k += len(f.get("lines") or [])
+        if k > k0 and z is not None:
+            high.append(z)
+    if not high:
+        return None
+    hz = unary_union(high)
+    void = [pc for pc in pieces
+            if pc.intersection(hz).area > 0.15 * min(pc.area, hz.area)]
+    floor = [pc for pc in pieces if pc not in void]
+    if not void:
+        return None
+    vu = unary_union(void).intersection(foot)
+    return vu, (unary_union(floor) if floor else None), rails
+
+
+def apply_cad_split(doc, st) -> int:
+    """The floor above's slab over the stair as its plan draws it: on up
+    to the railing (the floor's side), opened on the stair's side."""
+    from shapely.geometry import Polygon
+    res = cad_split(doc, st)
+    if res is None:
+        return 0
+    void, floor, _r = res
+    arch = doc["arch"]
+    n = 0
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e.get("level") != st["to"] or \
+                e.get("roof") or e.get("top") or e.get("zone") or \
+                len(e.get("corners") or []) < 3:
+            continue
+        try:
+            g = Polygon([tuple(p[:2]) for p in e["corners"]],
+                        [[tuple(p[:2]) for p in h]
+                         for h in e.get("holes") or [] if len(h) >= 3]
+                        ).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if g.is_empty or g.distance(void) > 0.6:
+            continue
+        g2 = g
+        if floor is not None and not floor.is_empty and \
+                g.buffer(0.6).intersects(floor):
+            g2 = g2.union(floor.buffer(0.01, join_style=2)).buffer(0)
+        g2 = g2.difference(void)
+        if g2.geom_type != "Polygon":
+            parts = [x for x in getattr(g2, "geoms", []) if
+                     x.geom_type == "Polygon"]
+            if not parts:
+                continue
+            g2 = max(parts, key=lambda x: x.area)
+        e["corners"] = [[round(x, 4), round(y, 4)]
+                        for x, y in list(g2.exterior.coords)[:-1]]
+        e["holes"] = [[[round(x, 4), round(y, 4)]
+                       for x, y in list(i.coords)[:-1]]
+                      for i in g2.interiors if Polygon(i).area > 0.05]
+        n += 1
+    return n
 
 
 def upper_well(doc, st):
