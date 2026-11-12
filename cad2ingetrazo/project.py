@@ -251,6 +251,8 @@ def load(raw) -> dict:
                      and len(s.get("corners") or []) == 4]
     doc["stair_cad"] = {k: v for k, v in (raw.get("stair_cad") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["removed"] = [r for r in raw.get("removed") or []
+                      if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
                        if k in ids and isinstance(v, list)}
     doc["grid"] = SITE_.load_grid(raw.get("grid"))
@@ -14308,6 +14310,11 @@ def update_from_cad(doc) -> list:
             continue
         try:
             rep = import_level(doc, lv["id"], how["file"], dict(how))
+            try:                       # 3.64.23: what was deleted stays so
+                apply_removed(doc, lv["id"])
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project.apply_removed")
         except Exception as e:  # noqa: BLE001
             rep = {"error": str(e)}
         out.append((lv["name"], rep))
@@ -14858,3 +14865,210 @@ def stairs_hidden(doc) -> set:
         if h >= 1.2:
             hide.add(s_.get("id"))
     return hide
+
+
+
+# ---- 3.64.23: elements deleted in the model stay deleted ---------------------
+USER_DELETABLE = ("wall", "column", "beam", "slab", "stair", "furniture",
+                  "ramp")
+_BUILT = {}
+
+
+def scene_tags(scene) -> set:
+    out = set()
+    for g in all_groups(scene):
+        t = tag_of(g)
+        if t and t.get("type") in USER_DELETABLE and t.get("id"):
+            out.add((t["type"], t["id"]))
+    return out
+
+
+def _stored_id(scene):
+    return id((getattr(scene, "plugin_data", {}) or {}).get(KEY))
+
+
+def _xforms(scene) -> dict:
+    out = {}
+    for g in all_groups(scene):
+        t = tag_of(g)
+        if t and t.get("type") in USER_DELETABLE and t.get("id"):
+            m = getattr(g, "xform", None)
+            out[(t["type"], t["id"])] = None if m is None else \
+                tuple(round(v, 6) for v in m.data())
+    return out
+
+
+def note_built(scene) -> None:
+    """What the model holds as just built (the document stored with it)."""
+    try:
+        _BUILT[id(scene)] = (_stored_id(scene), scene_tags(scene))
+        _XF[id(scene)] = _xforms(scene)
+    except Exception:  # noqa: BLE001
+        _BUILT.pop(id(scene), None)
+        _XF.pop(id(scene), None)
+
+
+_XF = {}
+
+
+def moved_in_scene(scene, doc) -> int:
+    """Walls, columns, slabs, stairs, ramps moved / turned with IngeTrazo's
+    Move / Rotate tools: their records moved the same way (a rebuild keeps
+    them where they were put). How many."""
+    from PySide6.QtGui import QMatrix4x4, QVector3D
+    was = _XF.get(id(scene))
+    if was is None or _BUILT.get(id(scene), (None,))[0] != _stored_id(scene):
+        return 0
+    n = 0
+    for (kind, rid), m0 in _xforms(scene).items():
+        if kind == "furniture" or (kind, rid) not in was:
+            continue
+        old = was[(kind, rid)]
+        if old == m0:
+            continue
+        m_new = QMatrix4x4(*m0).transposed() if m0 else QMatrix4x4()
+        m_old = QMatrix4x4(*old).transposed() if old else QMatrix4x4()
+        inv, ok = m_old.inverted()
+        if not ok:
+            continue
+        d = m_new * inv
+
+        def mp(p):
+            q = d.map(QVector3D(float(p[0]), float(p[1]), 0.0))
+            return [round(q.x(), 5), round(q.y(), 5)] + list(p[2:])
+        r = find_record(doc, kind, rid)
+        if r is None:
+            continue
+        if "a" in r and "b" in r:
+            r["a"], r["b"] = mp(r["a"]), mp(r["b"])
+        if r.get("corners"):
+            r["corners"] = [mp(p) for p in r["corners"]]
+        if r.get("holes"):
+            r["holes"] = [[mp(p) for p in h] for h in r["holes"]]
+        if r.get("pts"):
+            r["pts"] = [mp(p) for p in r["pts"]]
+        if "x" in r and "y" in r:
+            q = mp([r["x"], r["y"]])
+            r["x"], r["y"] = q[0], q[1]
+        if r.get("sections"):
+            r["sections"] = [[mp(a), mp(b)] for a, b in r["sections"]]
+        if kind == "stair":
+            for f in r.get("flights") or []:
+                f["lines"] = [[mp(a), mp(b)] for a, b in f.get("lines") or []]
+            for l_ in r.get("landings") or []:
+                if l_.get("corners"):
+                    l_["corners"] = [mp(p) for p in l_["corners"]]
+        n += 1
+    return n
+
+
+def deleted_in_scene(scene) -> list:
+    """[(kind, id)] of CAD2IngeTrazo elements deleted in the model since it
+    was built (with the same document stored — not an undo, not another
+    file opened)."""
+    was = _BUILT.get(id(scene))
+    if not was:
+        note_built(scene)
+        return []
+    sid, tags = was
+    now = scene_tags(scene)
+    if sid != _stored_id(scene):
+        note_built(scene)
+        return []
+    gone = sorted(tags - now)
+    if not gone or len(gone) > max(40, 0.3 * len(tags)):
+        note_built(scene)            # a whole floor hidden / taken away
+        return []
+    return gone
+
+
+def _sig(doc, kind, rid):
+    """Where an element stands — to know it again in a later import."""
+    import math as _m
+    r = find_record(doc, kind, rid)
+    if r is None:
+        return None
+    lid = r.get("level")
+    if kind == "wall" and "a" in r:
+        return {"kind": kind, "level": lid, "a": list(r["a"][:2]),
+                "b": list(r["b"][:2])}
+    pts = r.get("corners") or r.get("pts") or []
+    if pts:
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+    elif "x" in r and "y" in r:
+        cx, cy = float(r["x"]), float(r["y"])
+    elif r.get("sections"):
+        a, b = r["sections"][len(r["sections"]) // 2][:2]
+        cx, cy = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    else:
+        return None
+    if not (_m.isfinite(cx) and _m.isfinite(cy)):
+        return None
+    return {"kind": kind, "level": lid, "type": r.get("type"),
+            "c": [round(cx, 3), round(cy, 3)]}
+
+
+def remove_deleted(doc, gone) -> int:
+    """The records of the elements deleted in the model taken out, and
+    remembered (an Update from CAD does not bring them back)."""
+    n = 0
+    for kind, rid in gone:
+        sig = _sig(doc, kind, rid)
+        if find_record(doc, kind, rid) is None:
+            continue
+        delete_record(doc, kind, rid)
+        if sig is not None:
+            doc.setdefault("removed", []).append(sig)
+        n += 1
+    return n
+
+
+def apply_removed(doc, lid=None) -> int:
+    """The elements of a new import standing where one was deleted before:
+    left out."""
+    import math as _m
+    rem = [r for r in doc.get("removed") or []
+           if lid is None or r.get("level") == lid]
+    if not rem:
+        return 0
+    arch = doc["arch"]
+    n = 0
+
+    def cen(r):
+        pts = r.get("corners") or r.get("pts") or []
+        if pts:
+            return (sum(p[0] for p in pts) / len(pts),
+                    sum(p[1] for p in pts) / len(pts))
+        if "x" in r and "y" in r:
+            return float(r["x"]), float(r["y"])
+        if r.get("sections"):
+            a, b = r["sections"][len(r["sections"]) // 2][:2]
+            return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        return None
+    for t in rem:
+        k = t["kind"]
+        if k == "wall":
+            for w in list(arch["walls"]):
+                if w.get("level") != t["level"] or "a" not in w:
+                    continue
+                a, b = w["a"][:2], w["b"][:2]
+                if min(_m.dist(a, t["a"]) + _m.dist(b, t["b"]),
+                       _m.dist(a, t["b"]) + _m.dist(b, t["a"])) < 0.3:
+                    delete_record(doc, "wall", w["id"])
+                    n += 1
+            continue
+        pool = {"stair": doc.get("stairs") or [],
+                "furniture": doc.get("furniture") or [],
+                "ramp": doc.get("ramps") or []}.get(k)
+        if pool is None:
+            pool = [e for e in arch["structure"]
+                    if e.get("type") == t.get("type", k)]
+        for e in list(pool):
+            if e.get("level") != t["level"]:
+                continue
+            c = cen(e)
+            if c is not None and _m.dist(c, t["c"]) < 0.2:
+                delete_record(doc, k, e["id"])
+                n += 1
+    return n

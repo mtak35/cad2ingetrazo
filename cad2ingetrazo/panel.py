@@ -732,6 +732,7 @@ class Panel(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             PJ.commit(self.vp, doc, self.ann_opts())
+            PJ.note_built(self.vp.scene)
         except Exception as e:  # noqa: BLE001 — say it
             log_error("panel.commit")
             self.flash(f"Not built — {e}", 9000)
@@ -1843,6 +1844,10 @@ class Panel(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             rep = PJ.import_level(doc, lid, path, self._how())
+            try:                       # 3.64.23: deleted ones stay deleted
+                PJ.apply_removed(doc, lid)
+            except Exception:  # noqa: BLE001
+                log_error("panel apply_removed")
         except Exception as e:  # noqa: BLE001
             log_error("panel._import")
             self.i_report.setText(f"⚠ Not read — {e}")
@@ -10702,6 +10707,30 @@ class Panel(QWidget):
         except Exception:  # noqa: BLE001
             log_error("panel.refresh")
             return
+        try:
+            pd_ = getattr(getattr(self.vp, "active_tool", None),
+                          "_preview_delta", None)
+            busy_ = pd_ is not None and pd_.length() > 1e-9
+        except Exception:  # noqa: BLE001
+            busy_ = False
+        try:                           # 3.64.23: deleted in the model —
+            gone_ = [] if busy_ else PJ.deleted_in_scene(self.vp.scene)
+            if gone_:
+                n_ = PJ.remove_deleted(doc, gone_)
+                if n_:
+                    self.commit(doc, f"{n_} element(s) deleted — kept off "
+                                     "(a rebuild or an Update from CAD "
+                                     "leaves them out)")
+                    return
+        except Exception:  # noqa: BLE001
+            log_error("panel deleted elements")
+        try:                           # moved / turned in the model: kept
+            if not busy_ and PJ.moved_in_scene(self.vp.scene, doc):
+                self.commit(doc, "Moved element(s) kept where they were "
+                                 "put")
+                return
+        except Exception:  # noqa: BLE001
+            log_error("panel moved elements")
         if self._follow_moves(doc):
             return                     # rebuilt: refresh runs again
         try:                           # a shape drawn on a wall / slab face
