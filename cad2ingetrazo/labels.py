@@ -107,6 +107,16 @@ def _items(scene, level_name):
                 out.append((t["x"], t["y"], z, t["text"],
                             max(float(t.get("h", 0.2)), 0.02),
                             float(t.get("rot", 0.0)), False, "l"))
+        if st.get("ann_levels", True):   # 3.64.12: the CAD's level notes
+            shown_ = {(round(float(t["x"]), 1), round(float(t["y"]), 1))
+                      for t in doc["texts"] if t["level"] == lv["id"]}
+            for m in (doc.get("marks") or {}).get(lv["id"]) or []:
+                tx_ = str(m.get("text") or "").strip()
+                if not tx_ or (round(float(m["x"]), 1),
+                               round(float(m["y"]), 1)) in shown_:
+                    continue
+                out.append((float(m["x"]), float(m["y"]), z, "▽ " + tx_,
+                            0.2, 0.0, True, "l"))
         try:                     # level marks placed by a double-click
             from . import planedit as PE
             for m in doc.get("ffl_marks") or []:

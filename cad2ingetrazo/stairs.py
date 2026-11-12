@@ -495,6 +495,90 @@ def refit(r, H, n_need, mx=MAX_FLIGHT, stt0=None, flip=False) -> dict:
 
 
 # ---- doing it ---------------------------------------------------------------------------
+def landings_for(out):
+    """Landings between consecutive flights (a quarter turn: the corner
+    square between them; a half turn: the band across both, a flight
+    width deep) and the arrival past the last riser."""
+    lands, count = [], 0
+    for i, f in enumerate(out[:-1]):
+        count += len(f["lines"])
+        nx = out[i + 1]
+        la, lb = f["lines"][-1]
+        fa, fb = nx["lines"][0]
+        d, d2 = f["d"], nx["d"]
+        pts = [tuple(la), tuple(lb), tuple(fa), tuple(fb)]
+        if abs(d[0] * d2[0] + d[1] * d2[1]) > 0.5:      # a half turn / on
+            depth = float(f.get("w", 1.0))
+            g = float(f.get("g", 0.28))
+            pts = [(p[0] + d[0] * g, p[1] + d[1] * g) for p in pts[:2]] + \
+                pts[2:]
+            pts += [(p[0] + d[0] * depth, p[1] + d[1] * depth) for p in pts]
+        lands.append({"corners": [list(p) for p in _box_along(pts, d)],
+                      "after": count})
+    f = out[-1]
+    la, lb = f["lines"][-1]
+    d = f["d"]
+    g = float(f.get("g", 0.28) or 0.28)
+    a2 = (la[0] + d[0] * g, la[1] + d[1] * g)
+    b2 = (lb[0] + d[0] * g, lb[1] + d[1] * g)
+    pts = [a2, b2, (a2[0] + d[0] * g, a2[1] + d[1] * g),
+           (b2[0] + d[0] * g, b2[1] + d[1] * g)]
+    lands.append({"corners": [list(p) for p in _box_along(pts, d)],
+                  "after": count + len(f["lines"]), "top": True})
+    return lands
+
+
+def stacked(doc, lid_below, lid, flights, H):
+    """3.64.12: a stair hall stacked over the floor below's: the plan of
+    this floor draws the first flights going UP (the last one shows as the
+    flight coming up from below, «DN»); the flights still to come turn as
+    the stair below turns, in the same place — (flights, landings), or
+    None."""
+    from shapely.geometry import MultiPoint
+    fs = [f for f in flights if f.get("lines")]
+    if not fs or lid_below is None:
+        return None
+    have = sum(len(f["lines"]) for f in fs)
+    hull = MultiPoint([tuple(p) for f in fs for ln in f["lines"]
+                       for p in ln]).convex_hull.buffer(0.3)
+    best = None
+    for o in doc.get("stairs") or []:
+        if o.get("level") != lid_below or o.get("to") != lid:
+            continue
+        ofs = [f for f in o.get("flights") or [] if f.get("lines")]
+        if len(ofs) <= len(fs):
+            continue
+        if any(a["d"][0] * b["d"][0] + a["d"][1] * b["d"][1] < 0.9
+               for a, b in zip(fs, ofs)):
+            continue                     # it turns another way
+        ohull = MultiPoint([tuple(p) for f in ofs for ln in f["lines"]
+                            for p in ln]).convex_hull
+        if ohull.area <= 0 or \
+                hull.intersection(ohull).area < 0.6 * ohull.area:
+            continue
+        extra = ofs[len(fs):]
+        n = have + sum(len(f["lines"]) for f in extra)
+        if n <= 0 or not 0.14 <= H / n <= 0.2032:
+            continue
+        # the next flight starts past this floor's last flight drawn
+        last = fs[-1]
+        e = _mid(last["lines"][-1])
+        s0 = _mid(extra[0]["lines"][0])
+        dd = (s0[0] - e[0]) * last["d"][0] + (s0[1] - e[1]) * last["d"][1]
+        if dd < -0.3:
+            continue
+        best = (fs, extra)
+        break
+    if best is None:
+        return None
+    fs, extra = best
+    out = [dict(f, lines=[[list(a), list(b)] for a, b in f["lines"]])
+           for f in fs]
+    out += [dict(f, lines=[[list(a), list(b)] for a, b in f["lines"]])
+            for f in extra]
+    return out, landings_for(out)
+
+
 def auto(doc, cad=None, flip=False) -> dict:
     """Stairs on every floor, as the plans draw them: the tread lines of
     each level's stair layer give the flights (their width, risers, turn
@@ -633,6 +717,15 @@ def auto(doc, cad=None, flip=False) -> dict:
                 except Exception:  # noqa: BLE001
                     from .host import log_error
                     log_error("stairs.winders")
+            try:                 # the floor below's stair in this hall
+                stk_ = stacked(doc, levels[i - 1]["id"] if i > 0 else
+                               None, lv["id"], flights, H)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("stairs.stacked")
+                stk_ = None
+            if stk_ is not None:
+                fl, lands = stk_
             if not any(f.get("_ext") for f in fl):
                 fl, lands, _nl = split_flights(
                     fl, lands, int(stt0.get("stair_max_flight", MAX_FLIGHT)))

@@ -5061,6 +5061,45 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rrecs = SE.rails_from_cad(pl, lambda n: _match(n, P["rails"]),
                                       lid, rk, float(st.get("rail_h",
                                                             SE.RAIL_H)))
+            # 3.64.12: a parking deck's edge drawn on the rail layer (a long
+            # line by the bays, round the open deck): its parapet — a solid
+            # wall, needing no text to say so
+            deck_ = []
+            try:
+                if P.get("parking"):
+                    from shapely.geometry import LineString as _LSd
+                    from shapely.ops import unary_union as _uud
+                    pk_ = [_LSd([(s_[0], s_[1]), (s_[2], s_[3])])
+                           for s_ in pl["segs"]
+                           if _match(lay[s_[4]], P["parking"])]
+                    if len(pk_) >= 8:
+                        pku_ = _uud(pk_)
+                        from shapely.geometry import MultiPoint as _MPd
+                        # (on the building's outer edge only — a stair's
+                        # railing among the bays is not the deck's)
+                        rim_ = _MPd([(s_[k_], s_[k_ + 1]) for s_ in pl["segs"]
+                                     if _match(lay[s_[4]], P["parking"]) or
+                                     _match(lay[s_[4]], P["walls"])
+                                     for k_ in (0, 2)]
+                                    ).convex_hull.exterior
+                        def _on_rim(r_):
+                            ln_ = _LSd([r_["a"], r_["b"]])
+                            if ln_.length < 3.0 or ln_.distance(pku_) > 2.5:
+                                return False
+                            near_ = rim_.intersection(ln_.buffer(1.2))
+                            return (not near_.is_empty) and \
+                                near_.length >= 0.8 * ln_.length
+                        deck_ = [r_ for r_ in rrecs if _on_rim(r_)]
+                        rrecs = [r_ for r_ in rrecs if r_ not in deck_]
+                        for r_ in deck_:
+                            r_["rail"] = "solid"
+                            r_["t"] = ROOF_PARAPET_T
+                            r_["height"] = float(st.get(
+                                "parking_parapet_h") or ROOF_PARAPET_H)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project parking parapet")
+                deck_ = []
             if st.get("rail_needs_text", True):   # only where the CAD
                 from shapely.geometry import LineString as _LS2   # says so
                 from shapely.geometry import Point as _Pt2
@@ -5112,6 +5151,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             for k_, w_ in enumerate(made_r, 1):
                 w_["name"] = f"Balcony railing {n0 + k_}"
                 w_["rail"] = rk
+            if deck_:
+                made_d = M.new_walls(arch["walls"] + made_r, deck_)
+                for k_, w_ in enumerate(made_d, 1):
+                    w_["name"] = f"Parking parapet {k_}"
+                    w_["rail"] = "solid"
+                made_r = made_r + made_d
+                rep["parking_parapet"] = len(made_d)
             arch["walls"] += made_r
             rep["railings"] = len(made_r)
             edge_lines += [(tuple(w_["a"]), tuple(w_["b"])) for w_ in made_r]
@@ -5499,6 +5545,38 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             rep["slab"] += 1
             rep["holes"] += len(holes)
             rep["shafts"] += len(sh_open)
+    # 3.64.12: the small posts on any column layer along the floor's outer
+    # edge (a parking deck's fins, a facade's non-structural columns —
+    # drawn on the upper floors' column layer, shown in the elevations):
+    # non-structural columns, a storey high, on the slab's edge
+    try:
+        if st.get("edge_fins", True) and srecs:
+            from shapely.geometry import Point as _Ptf, Polygon as _Pgf
+            from shapely.ops import unary_union as _uuf
+            have_ = [(c_["x"], c_["y"]) for c_ in crecs]
+            rim_ = _uuf([_Pgf(r_["corners"]).buffer(0).exterior
+                         for r_ in srecs if len(r_["corners"]) >= 3])
+            fins_ = []
+            for c_ in columns_from(pl, P["columns"], lay):
+                w_, d_ = float(c_["w"]), float(c_["d"])
+                if c_.get("shape") != "rect" or w_ * d_ > 0.12 or \
+                        max(w_, d_) > 0.5:
+                    continue
+                if any(math.dist((c_["x"], c_["y"]), h_) < 0.15
+                       for h_ in have_):
+                    continue
+                if rim_.distance(_Ptf(c_["x"], c_["y"])) > 0.6:
+                    continue
+                fins_.append(dict(c_, type="column", level=lid,
+                                  anchor="centre", base=0.0,
+                                  height="level", fit=False,
+                                  nonstructural=True, pier=True))
+            if len(fins_) >= 4:
+                crecs = crecs + fins_
+                rep["edge_fins"] = len(fins_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project edge fins")
     new = [r for r in crecs + lrecs + brecs + srecs if S.why_not(r) is None]
     arch["structure"] += M.new_elements(arch["structure"], new)
     # walls that stop short of one another (across a column, an arch, a
@@ -9343,12 +9421,31 @@ def note_weight(doc, lid):
             else None
     except Exception:  # noqa: BLE001
         return None
+    # 3.64.12: the floor's open hall (a parking hall, no room drawn round
+    # it): the main slab less the rooms — a note there counts by that
+    # area, the biggest floor of the level
+    open_ = []
+    try:
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        sl_ = [_Pg(e["corners"]).buffer(0) for e in arch["structure"]
+               if e["type"] == "slab" and e["level"] == lid
+               and not e.get("zone") and len(e.get("corners") or []) >= 3]
+        if sl_:
+            rest_ = _uu(sl_).difference(_uu(rooms) if rooms else _Pg())
+            open_ = [g_ for g_ in getattr(rest_, "geoms", [rest_])
+                     if g_.geom_type == "Polygon" and g_.area > 20.0]
+    except Exception:  # noqa: BLE001
+        open_ = []
 
     def fn(x, y):
         p = Point(x, y)
         for r in rooms:
             if r.contains(p):
                 return max(float(r.area), 1.0)
+        for g_ in open_:
+            if g_.buffer(0.05).contains(p):
+                return float(g_.area)
         return 1.0 if hull is not None and hull.contains(p) else 0.0
     return fn
 
@@ -9551,6 +9648,15 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
     f = cad_floor(doc["marks"].get(lid), note_weight(doc, lid))
     base = f[1] if f and f[0] == "rel" else Counter(
         round(v, 3) for _x, _y, v in notes).most_common(1)[0][0]
+    # 3.64.12: the pieces against the level's own floor level (as set —
+    # from its notes, or its storey height): each piece's top at the
+    # level noted in it, whichever note the level was set by
+    try:
+        ids_ = [lv_["id"] for lv_ in arch["levels"]]
+        if lid in ids_ and f and f[0] == "rel":
+            base = round(elevations(arch)[ids_.index(lid)], 4)
+    except Exception:  # noqa: BLE001
+        pass
     slabs = [e for e in arch["structure"]
              if e["type"] == "slab" and e["level"] == lid
              and not e.get("zone")]

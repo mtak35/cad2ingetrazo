@@ -323,8 +323,12 @@ def _minus(s, cuts) -> list:
     try:
         g = Polygon(s["corners"], [h for h in s.get("holes") or []
                                    if len(h) >= 3]).buffer(0)
-        g = g.difference(unary_union([Polygon(c["corners"]).buffer(0)
-                                      for c in cuts]))
+        # 3.64.12: a cut with openings (a level zone round a ramp's well,
+        # round the rooms of another level): the slab stays in them — the
+        # floor never missing where no zone covers it
+        g = g.difference(unary_union([Polygon(
+            c["corners"], [h for h in c.get("holes") or [] if len(h) >= 3]
+            if c.get("zone") else []).buffer(0) for c in cuts]))
     except Exception:  # noqa: BLE001
         return None
     out = []
