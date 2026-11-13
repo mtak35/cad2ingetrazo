@@ -2135,6 +2135,78 @@ def _wall_footprint(doc, lid):
                         if g.geom_type == "Polygon"])
 
 
+def _edge_ctx(doc, lid):
+    """3.64.32: what an outside wall standing on its floor slab's edge
+    needs: (that slab's edges [(boundary, t)], the floor's wall footprint,
+    the walls of the floor under it) — None on the ground floor / no slab."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    ids = [lv["id"] for lv in doc["levels"]]
+    if lid not in ids or ids.index(lid) == 0:
+        return None
+    lo = ids[ids.index(lid) - 1]
+    edges = []
+    for s_ in doc.get("structure") or []:
+        if s_.get("type") != "slab" or s_.get("level") != lid or \
+                s_.get("zone") or s_.get("roof") or s_.get("top") or \
+                len(s_.get("corners") or []) < 3:
+            continue
+        try:
+            g = Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        for ring in [g.exterior] + list(g.interiors):
+            edges.append((ring, float(s_.get("t", 0.15))))
+    if not edges:
+        return None
+    foot = _wall_footprint(doc, lid)
+    if foot is None:
+        return None
+    low = [LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]).buffer(
+        float(w.get("t", 0.2)) / 2 + 0.05, cap_style=2)
+        for w in doc.get("walls") or [] if w.get("level") == lo
+        and "a" in w and not w.get("rail")
+        and math.dist(w["a"][:2], w["b"][:2]) > 0.05]
+    return edges, foot, (unary_union(low) if low else None)
+
+
+def _down_over_edge(w, ctx) -> float:
+    """3.64.32 (his ask): an outside wall on its slab's edge with no wall
+    under it on the floor below runs down over the slab's edge (its
+    thickness, how far): the edge not seen under it."""
+    if ctx is None or w.get("rail") or "a" not in w or \
+            float(w.get("base", 0.0) or 0.0) > 0.01:
+        return 0.0
+    try:
+        from shapely.geometry import LineString, Point
+        edges, foot, low = ctx
+        ln = LineString([tuple(w["a"][:2]), tuple(w["b"][:2])])
+        L = ln.length
+        if L < 0.3:
+            return 0.0
+        t2 = float(w.get("t", 0.2)) / 2
+        (ax, ay), (bx, by) = ln.coords[0], ln.coords[-1]
+        nx, ny = -(by - ay) / L, (bx - ax) / L
+        mx, my = (ax + bx) / 2, (ay + by) / 2
+        sides = [foot.contains(Point(mx + sg * nx * (t2 + 0.3),
+                                     my + sg * ny * (t2 + 0.3)))
+                 for sg in (1, -1)]
+        if sides.count(True) != 1:
+            return 0.0                    # an inside wall
+        band = ln.buffer(t2 + 0.08, cap_style=2)
+        best = 0.0
+        for ring, t in edges:
+            if ring.intersection(band).length >= 0.5 * L:
+                best = max(best, t)
+        if not best:
+            return 0.0
+        if low is not None and low.intersection(ln).length >= 0.5 * L:
+            return 0.0                    # the wall under it covers it
+        return best
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def _above_bottoms(doc, info, lid):
     """3.64.19: [(plan shape, bottom z)] of the floor pieces of the level
     over ``lid`` (its main slab and its level zones, each at its own
@@ -2166,9 +2238,9 @@ def _above_bottoms(doc, info, lid):
             zb = z0 + min(float(w.get("base", 0.0) or 0.0) for w in pw)
             ups = [(LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]),
                     float(w.get("t", 0.2))) for w in pw]
-            own = _wall_footprint(doc, lid) or unary_union(
-                [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
-                 for s_ in roofs])
+            own = unary_union([Polygon([tuple(p[:2]) for p in
+                                        s_["corners"]]).buffer(0)
+                               for s_ in roofs])
             return [("_ctx", zb, (ups, own))]
         except Exception:  # noqa: BLE001
             return []
@@ -2210,12 +2282,10 @@ def _above_bottoms(doc, info, lid):
                for w in doc.get("walls") or [] if w.get("level") == up
                and not w.get("rail") and "a" in w
                and float(w.get("base", 0.0) or 0.0) < 0.05]
-        own = _wall_footprint(doc, lid) or unary_union(
-            [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
-             for s_ in doc.get("structure") or []
-             if s_.get("type") == "slab" and s_.get("level") == lid and
-             len(s_.get("corners") or []) >= 3
-             and not s_.get("top") and not s_.get("roof")])
+        # 3.64.32: «outside» where the slab over it ends at the wall — the
+        # floor above on one side of it only (a slab edge to cover)
+        own = unary_union([g_ for g_, _b, _z in out]) if out else \
+            _wall_footprint(doc, lid)
         out.append(("_ctx", z0u, (ups, own)))
     except Exception:  # noqa: BLE001
         pass
@@ -2244,10 +2314,23 @@ def _wall_top(w, under, above):
             L = ln.length
             nx, ny = -(by - ay) / L, (bx - ax) / L
             mx, my = (ax + bx) / 2, (ay + by) / 2
-            sides = [own.contains(Point(mx + sg * nx * (t2 + 0.3),
-                                        my + sg * ny * (t2 + 0.3)))
-                     for sg in (1, -1)]
-            if not own.is_empty and sides.count(True) == 1 and \
+            def _in(px, py, sg, dd):
+                return own.contains(Point(px + sg * nx * (t2 + dd),
+                                          py + sg * ny * (t2 + dd)))
+            # 3.64.32: the slab over it on one side, and on the other it
+            # ends within 0.75 m of the wall's face (the floor above drawn
+            # a little out from it) — along any 0.4 m of it: the wall goes
+            # up over the slab's edge (inside the slab elsewhere, unseen)
+            n_ = max(4, min(60, int(L / 0.2)))
+            hit = 0
+            for j in range(n_):
+                f_ = (j + 0.5) / n_
+                px, py = ax + (bx - ax) * f_, ay + (by - ay) * f_
+                if any(_in(px, py, sg, 0.3) and not _in(px, py, -sg, 0.75)
+                       for sg in (1, -1)):
+                    hit += 1
+            out_ = hit * L / n_ >= min(0.4, 0.5 * L)
+            if not own.is_empty and out_ and \
                     under - 0.05 <= z0u <= under + 1.0:
                 # 3.64.31 (his ask): an outside wall always runs up to the
                 # top of the slab over it — the slab's edge inside it, one
@@ -2306,6 +2389,10 @@ def build(doc: dict, elevations) -> list[dict]:
     for lid, li in info.items():
         z0, under = li["z0"], li["under"]
         above_ = _above_bottoms(doc, info, lid)
+        try:
+            ectx_ = _edge_ctx(doc, lid)
+        except Exception:  # noqa: BLE001
+            ectx_ = None
         # walls — cut by their openings
         mine = [_plastered(w, PLASTER(doc)) for w in walls
                 if w["level"] == lid]
@@ -2367,6 +2454,8 @@ def build(doc: dict, elevations) -> list[dict]:
             if not pieces:
                 continue
             b = z0 + float(w.get("base", 0.0)) - _down(doc, w, li)
+            if not w.get("rail"):
+                b -= _down_over_edge(w, ectx_)
             top = _wall_top(w, under, above_) \
                 if w.get("height", "level") == "level" \
                 else z0 + float(w["height"])

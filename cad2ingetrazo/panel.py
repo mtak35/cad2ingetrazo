@@ -5418,19 +5418,28 @@ class Panel(QWidget):
                     f"{len(rids_)} room(s)" if rids_ else "") if x)
                 m_ = menu.addMenu(f"CAD2IngeTrazo · Wall finish / paint — "
                                   f"{what_} selected")
-                def _fill_many(mb, band, groups_=groups_):
+                def _fill_many(mb, band, which, groups_=groups_):
                     if mb.actions():
                         return
                     for title, ks in groups_:
                         mg = mb.addMenu(title)
                         for k_, lab_ in ks:
-                            mg.addAction(lab_, lambda k=k_, b_=band:
+                            mg.addAction(lab_, lambda k=k_, b_=band, w_=which:
                                          self._finish_many(wids_, rids_, k,
-                                                           b_))
-                for band, lab, _z0, _z1 in FN.BANDS:
-                    mb = m_.addMenu(lab)   # (filled when opened: quick)
-                    mb.aboutToShow.connect(
-                        lambda mb=mb, b_=band: _fill_many(mb, b_))
+                                                           b_, w_))
+                # 3.64.32: which faces of the walls picked — the room side
+                # (as before), the outside ones (the elevations), or both
+                faces_ = [("in", "Inside faces (toward the rooms)")]
+                if wids_:
+                    faces_ += [("out", "Outside faces (elevations)"),
+                               ("both", "Both faces")]
+                for which_, wlab_ in faces_:
+                    mw_ = m_.addMenu(wlab_) if len(faces_) > 1 else m_
+                    for band, lab, _z0, _z1 in FN.BANDS:
+                        mb = mw_.addMenu(lab)   # (filled when opened)
+                        mb.aboutToShow.connect(
+                            lambda mb=mb, b_=band, w_=which_:
+                            _fill_many(mb, b_, w_))
                 m_.addSeparator()
                 m_.addAction("Take the finishes off them",
                              lambda: self._finish_many(wids_, rids_, None,
@@ -5541,7 +5550,7 @@ class Panel(QWidget):
             self.commit(doc, f"{w.get('name') or 'Wall'}, {face} face: "
                              "finish taken off")
 
-    def _finish_many(self, wids, rids, mat, band):
+    def _finish_many(self, wids, rids, mat, band, which="in"):
         """One finish on the faces of the walls / rooms selected: each
         wall's face(s) toward a room (both when it has a room each side, or
         none), each room's wall faces into it."""
@@ -5582,7 +5591,13 @@ class Panel(QWidget):
             sides = [s_ for s_, g_ in (("l", 1), ("r", -1))
                      if any(r["poly"].contains(probe(w, g_, d))
                             for r in rooms(w["level"]))]
-            for s_ in sides or ["l", "r"]:
+            if which == "both":
+                pick_ = ["l", "r"]
+            elif which == "out":         # the faces no room is behind
+                pick_ = [s_ for s_ in ("l", "r") if s_ not in sides]
+            else:
+                pick_ = sides or ["l", "r"]
+            for s_ in pick_:
                 faces[(w["id"], s_)] = w
         if rids:
             polys = []

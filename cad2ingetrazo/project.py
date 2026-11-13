@@ -11637,7 +11637,11 @@ def platform_parts(doc) -> dict:
             # (the top step's L / U and the walls close the porch round:
             # its hull, less the slab, walls and rooms)
             zb_ = zone.buffer(0.3)
-            land_ = unary_union([zone.intersection(zg_).convex_hull
+            # (3.64.32: its bounding rectangle, not its hull — an L of
+            # steps round a lobby left the lobby's far half cut off on the
+            # diagonal, down at the walkway)
+            land_ = unary_union([zone.intersection(zg_)
+                                 .minimum_rotated_rectangle
                                  for zg_ in getattr(zb_, "geoms", [zb_])
                                  ]).difference(
                 unary_union([done_, R]).buffer(0.005))
