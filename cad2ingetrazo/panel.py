@@ -1853,10 +1853,46 @@ class Panel(QWidget):
             self._plot_from_cad()
             return
         roof_cad = False
-        if here == ROOF_NEW:
-            if not self._region:       # no roof plan picked: from the top
-                self._roof_level()     # floor's outline, as before
+        roof_lv = None
+        if here not in (ROOF_NEW, NEW, NEW_BELOW):
+            lv0_ = PJ.level_by_id(doc["arch"], here)
+            if lv0_ and str(lv0_.get("name", "")).strip().lower() == "roof":
+                roof_lv = here
+        if (here == ROOF_NEW or roof_lv) and not self._region:
+            # 3.64.30: no part picked — the roof plan found in the drawing
+            # (the part no floor took); else the roof from the top floor
+            try:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                h_ = dict(self._how())
+                reg = PJ.find_roof_part(doc, path, h_)
+                rep = None
+                if reg:
+                    rep = PJ.import_roof_part(doc, path, reg,
+                                              float(self.rl_h.value()),
+                                              roof_lv)
+            except Exception as e:  # noqa: BLE001
+                log_error("panel._import roof part")
+                rep = None
+                self.flash(f"Roof plan not read — {e}", 9000)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if rep and rep.get("parapets"):
+                mv = rep.get("moved")
+                txt = (f"«Roof» from the CAD's roof plan: {rep['parapets']} "
+                       f"parapet wall(s), {rep.get('inner', 0)} wall(s) "
+                       "inside, the roof slab as drawn" +
+                       (f"; laid over the floor below (best fit "
+                        f"{mv[2]:.0%})" if mv else ""))
+                if self.commit(doc, txt):
+                    self.i_report.setText(txt)
                 return
+            if here == ROOF_NEW:
+                self._roof_level()
+                return
+            self.i_report.setText("⚠ No roof plan found in the drawing — "
+                                  "«Select floor on drawing…» and mark it")
+            return
+        if here == ROOF_NEW:
             roof_cad = True            # 3.64.28: the roof plan of the CAD
         new = here == NEW
         if here == NEW_BELOW:          # «＋ basement»: made with its plan

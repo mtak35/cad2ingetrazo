@@ -12528,6 +12528,125 @@ def drop_roof_level(doc) -> None:
     arch["levels"] = M.fix_levels(arch["levels"])
 
 
+def find_roof_part(doc, path, how_ref) -> list | None:
+    """3.64.30: the roof plan in a drawing that holds the floors side by
+    side — the part of it no level took, with walls (or window-layer
+    outlines) on it: its region [x0, y0, x1, y1] in drawing units, or None."""
+    from . import cadread as CR
+    d = CR.read(path, how_ref.get("unit"))
+    k = float(d["unit"] or 1.0)
+    cell = 1.5 / k
+    taken = []
+    for lid_, h_ in (doc.get("imports") or {}).items():
+        if h_.get("region") and os.path.normcase(str(h_.get("file", ""))) \
+                == os.path.normcase(str(path)) and not h_.get("roof"):
+            taken.append(h_["region"])
+    if not taken:
+        return None
+    P, _f = layer_patterns(d, how_ref, doc["settings"])
+    wl = list(P.get("walls") or []) + list(P.get("windows") or [])
+    occ = {}
+    for i, (x0, y0, x1, y1, lay) in enumerate(d["segs"]):
+        n = max(1, min(400, math.ceil(2 * math.hypot(x1 - x0, y1 - y0)
+                                      / cell)))
+        for j in range(n + 1):
+            t = j / n
+            occ.setdefault((int((x0 + (x1 - x0) * t) // cell),
+                            int((y0 + (y1 - y0) * t) // cell)), []).append(i)
+    seen, comps = set(), []
+    for c0 in occ:
+        if c0 in seen:
+            continue
+        stack, cells = [c0], []
+        seen.add(c0)
+        while stack:
+            c = stack.pop()
+            cells.append(c)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    q = (c[0] + dx, c[1] + dy)
+                    if q in occ and q not in seen:
+                        seen.add(q)
+                        stack.append(q)
+        ids = {i for c in cells for i in occ[c]}
+        xs = [v for i in ids for v in (d["segs"][i][0], d["segs"][i][2])]
+        ys = [v for i in ids for v in (d["segs"][i][1], d["segs"][i][3])]
+        comps.append(([min(xs), min(ys), max(xs), max(ys)], ids))
+
+    def ov(a, b):
+        w = min(a[2], b[2]) - max(a[0], b[0])
+        h = min(a[3], b[3]) - max(a[1], b[1])
+        return max(w, 0) * max(h, 0)
+    best = None
+    for bb, ids in comps:
+        w, h = (bb[2] - bb[0]) * k, (bb[3] - bb[1]) * k
+        if w < 4.0 or h < 4.0 or w > 150 or h > 150:
+            continue
+        area = (bb[2] - bb[0]) * (bb[3] - bb[1])
+        if any(ov(bb, r) > 0.2 * area or ov(bb, r) > 0.2 * (
+                (r[2] - r[0]) * (r[3] - r[1])) for r in taken):
+            continue
+        nw = sum(1 for i in ids if _match(d["segs"][i][4], wl))
+        if nw < 8:
+            continue
+        if best is None or nw > best[0]:
+            best = (nw, bb)
+    if best is None:
+        return None
+    pad = 0.5 / k
+    bb = best[1]
+    return [round(bb[0] - pad, 4), round(bb[1] - pad, 4),
+            round(bb[2] + pad, 4), round(bb[3] + pad, 4)]
+
+
+def import_roof_part(doc, path, region, parapet_h=1.0, lid=None) -> dict:
+    """3.64.30: the roof plan ``region`` of ``path`` read into the «Roof»
+    level (made when ``lid`` is None) — placed over the top floor (centre
+    on centre, then the best fit of the wall corners). Its report."""
+    from . import cadread as CR
+    arch = doc["arch"]
+    if lid is None:
+        lid = new_roof_level(doc)
+    order = [lv["id"] for lv in arch["levels"]]
+    i = order.index(lid)
+    below = [x for x in order[:i] if (doc.get("imports") or {}).get(x)]
+    top = below[-1] if below else None
+    how = dict((doc.get("imports") or {}).get(top) or {})
+    how.update(region=list(region), roof=True, parapet_h=float(parapet_h),
+               file=str(path))
+    d = CR.read(path, how.get("unit"))
+    k = float(d["unit"] or 1.0)
+    tw = [w for w in arch["walls"] if w["level"] == top and "a" in w
+          and not w.get("rail")]
+    if tw:
+        mx = (min(min(w["a"][0], w["b"][0]) for w in tw) +
+              max(max(w["a"][0], w["b"][0]) for w in tw)) / 2
+        my = (min(min(w["a"][1], w["b"][1]) for w in tw) +
+              max(max(w["a"][1], w["b"][1]) for w in tw)) / 2
+    else:
+        mx = my = 0.0
+    cx, cy = (region[0] + region[2]) / 2, (region[1] + region[3]) / 2
+    r = math.radians(float(how.get("rot", 0.0) or 0.0))
+    ux, uy = mx - float(how.get("ix", 0.0) or 0.0), \
+        my - float(how.get("iy", 0.0) or 0.0)
+    vx, vy = (math.cos(r) * ux + math.sin(r) * uy) / k, \
+        (-math.sin(r) * ux + math.cos(r) * uy) / k
+    how.update(base="custom", bx=round(cx - vx, 4), by=round(cy - vy, 4))
+    rep = import_level(doc, lid, path, how)
+    if top:
+        try:
+            o = overlap_offset(doc, lid, top, "best")
+            if o and o[2] >= 0.2:
+                move_level(doc, lid, o[0], o[1])
+                rep["moved"] = (o[0], o[1], o[2])
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.import_roof_part align")
+    rep.update(roof_from_cad(doc, lid, parapet_h))
+    rep["roof_lid"] = lid
+    return rep
+
+
 def new_roof_level(doc, height=3.0) -> str:
     """3.64.28: an empty «Roof» level over the top floor (its plan read
     from the CAD next): its id."""
@@ -12612,7 +12731,8 @@ def roof_from_cad(doc, lid, parapet_h=1.0) -> dict:
                 rest = rest.buffer(-0.1, join_style=2).buffer(
                     0.1, join_style=2)
                 for g in getattr(rest, "geoms", [rest]):
-                    if g.geom_type == "Polygon" and g.area > 1.0:
+                    if g.geom_type == "Polygon" and g.area > 1.0 and \
+                            not g.buffer(-0.3).is_empty:   # no sliver
                         add.append({"type": "slab", "level": lo,
                                     "roof": True, "holes": [], "t": t,
                                     "offset": 0.0, "corners": [
@@ -14561,6 +14681,25 @@ def update_from_cad(doc, as_cad=False) -> list:
         except Exception as e:  # noqa: BLE001
             rep = {"error": str(e)}
         out.append((lv["name"], rep))
+    if not any(h_.get("roof") for h_ in doc["imports"].values()):
+        try:                  # 3.64.30: the roof plan the drawing holds
+            ref = [lv["id"] for lv in doc["arch"]["levels"]
+                   if (doc["imports"].get(lv["id"]) or {}).get("file")]
+            if ref:
+                h_ = doc["imports"][ref[-1]]
+                reg = find_roof_part(doc, h_["file"], h_)
+                if reg:
+                    rl = next((lv["id"] for lv in doc["arch"]["levels"]
+                               if str(lv.get("name", "")).strip().lower()
+                               == "roof"), None)
+                    rep = import_roof_part(
+                        doc, h_["file"], reg, float(doc["settings"].get(
+                            "parapet_h", 1.0) or 1.0), rl)
+                    out.append(("Roof", rep))
+        except Exception as e:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.update_from_cad roof")
+            out.append(("Roof", {"error": str(e)}))
     how = doc["imports"].get(FOUNDATION)
     if how and how.get("file"):
         try:
