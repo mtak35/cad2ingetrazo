@@ -13020,6 +13020,44 @@ def furn_frame(doc, f):
             "z": z}
 
 
+def _garden_z(doc, lid, x, y):
+    """3.64.33: the ground's top at (x, y) outside the ground floor's
+    building: the lawn's top over a landscape area, the walkway's on a
+    walkway, else the natural ground; None inside the building or on
+    another floor."""
+    from shapely.geometry import Point, Polygon
+    arch = doc["arch"]
+    gi = next((i for i, lv in enumerate(arch["levels"])
+               if lv.get("kind") == "ground"), None)
+    if gi is None or arch["levels"][gi]["id"] != lid:
+        return None
+    q = Point(float(x), float(y))
+    for s_ in arch["structure"]:
+        if s_["type"] == "slab" and s_["level"] == lid and \
+                len(s_.get("corners") or []) >= 3:
+            try:
+                if Polygon(s_["corners"]).buffer(0).contains(q):
+                    return None
+            except Exception:  # noqa: BLE001
+                pass
+    st = doc["settings"]
+    zb = plot_top(doc)
+    for a in (doc.get("landscape") or {}).get(lid) or []:
+        try:
+            if Polygon(a).buffer(0.05).contains(q):
+                return zb + float(st.get("landscape_h", 0.1524) or 0.0)
+        except Exception:  # noqa: BLE001
+            pass
+    for a in (doc.get("pavers") or {}).get(lid) or []:
+        try:
+            if Polygon(a).buffer(0.02).contains(q):
+                return zb + float(st.get("landscape_h", 0.1524) or 0.0) \
+                    + 0.012
+        except Exception:  # noqa: BLE001
+            pass
+    return zb
+
+
 def _furniture_groups(doc):
     """The furniture placed in rooms: IngeTrazo library models, one
     component each (the same model shares its mesh)."""
@@ -13043,6 +13081,13 @@ def _furniture_groups(doc):
         z = z_of[f["level"]] + (room_finish(doc, rec)
                                 if doc["settings"].get("finish_on", True)
                                 else 0.0)
+        if rec is None and not f.get("hang"):
+            try:                       # 3.64.33: out in the garden — on
+                zg_ = _garden_z(doc, f["level"], f["x"], f["y"])  # the lawn
+                if zg_ is not None:
+                    z = zg_
+            except Exception:  # noqa: BLE001
+                pass
         if f.get("hang"):              # hung under the false ceiling
             try:
                 from . import fitout as FO

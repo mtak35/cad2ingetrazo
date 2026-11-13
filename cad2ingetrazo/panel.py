@@ -7527,6 +7527,113 @@ class Panel(QWidget):
             msg = f"{len(keys)} element(s) made again from the plan"
         self.commit(doc, msg)
 
+    def _paint_menu(self, menu) -> None:
+        """«Paint ▸ External elevations / Inside of the rooms ▸ band ▸ group
+        ▸ finish» — every outside wall face of the building (parapets'
+        too), or every room-side face (the rooms selected, else all)."""
+        from . import finishes as FN
+        try:
+            rids_ = [i for k, i in self._selected_all() if k == "room"]
+        except Exception:  # noqa: BLE001
+            rids_ = []
+        m_ = menu.addMenu("CAD2IngeTrazo · Paint / wall finish")
+        for where, lab in (("out", "External elevations (all outside "
+                            "wall faces)"),
+                           ("in", f"Inside of the {len(rids_)} selected "
+                            "room(s)" if rids_ else
+                            "Inside of all rooms (every room-side face)")):
+            mw = m_.addMenu(lab)
+
+            def _fill(mb, band, where=where):
+                if mb.actions():
+                    return
+                for title, ks in FN.groups_menu():
+                    mg = mb.addMenu(title)
+                    for k_, lab_ in ks:
+                        mg.addAction(lab_, lambda k=k_, b_=band, w_=where:
+                                     self._paint_faces(w_, k, b_, rids_))
+            for band, blab, _z0, _z1 in FN.BANDS:
+                mb = mw.addMenu(blab)
+                mb.aboutToShow.connect(lambda mb=mb, b_=band, w_=where:
+                                       _fill(mb, b_, w_))
+            mw.addSeparator()
+            mw.addAction("Take the finishes off them",
+                         lambda w_=where: self._paint_faces(w_, None, None,
+                                                            rids_))
+
+    def _paint_faces(self, where, mat, band, rids=None) -> None:
+        """3.64.33: ``where`` "out": every wall face looking out of its
+        floor's footprint (the elevations, the parapets' outer faces);
+        "in": every face looking into it (into the rooms ``rids`` when
+        given). A finish ``mat`` on ``band`` — or the finishes off."""
+        from shapely.geometry import Point
+
+        from . import finishes as FN
+        from .engine import spaces
+        from .engine import structure as ST_
+        doc = self.doc()
+        arch = doc["arch"]
+        feet, rpolys = {}, {}
+        if where == "in" and rids:
+            for lv in arch["levels"]:
+                for r in spaces.of_level(arch, lv["id"]):
+                    try:
+                        key = PJ.room_key(lv["id"], r)
+                    except Exception:  # noqa: BLE001
+                        key = None
+                    if key in rids or r.get("id") in rids:
+                        rpolys.setdefault(lv["id"], []).append(
+                            r["poly"].buffer(0.05))
+        n = 0
+        for w in arch["walls"]:
+            if "a" not in w or w.get("rail") or \
+                    w.get("kind", "line") != "line" or \
+                    w.get("type") == "curtain":
+                continue
+            L = math.dist(w["a"], w["b"])
+            if L < 0.2:
+                continue
+            lid = w["level"]
+            if lid not in feet:
+                try:
+                    feet[lid] = ST_._wall_footprint(arch, lid)
+                except Exception:  # noqa: BLE001
+                    feet[lid] = None
+            foot = feet[lid]
+            if foot is None:
+                continue
+            parapet = float(w.get("base", 0.0) or 0.0) > 0.3 or str(
+                w.get("name", "")).startswith(PJ.PARAPET_NAMES +
+                                              PJ.AUTO_RAIL)
+            m = ((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
+            d = float(w["t"]) / 2 + 0.3
+            for s_, g_ in (("l", 1), ("r", -1)):
+                q = Point(m[0] - (w["b"][1] - w["a"][1]) / L * g_ * d,
+                          m[1] + (w["b"][0] - w["a"][0]) / L * g_ * d)
+                inside = foot.contains(q)
+                if where == "out":
+                    if inside:
+                        continue
+                else:
+                    if not inside or parapet:
+                        continue
+                    if rids and not any(pg.contains(q) for pg in
+                                        rpolys.get(lid) or []):
+                        continue
+                if mat is None:
+                    w["fin"] = [f_ for f_ in w.get("fin") or []
+                                if f_.get("side") != s_]
+                else:
+                    FN.set_band(w, s_, mat, band)
+                n += 1
+        what = "external elevations" if where == "out" else (
+            "the rooms selected" if rids else "the rooms' insides")
+        if mat:
+            self.commit(doc, f"{FN.label(mat)} — {FN.BAND[band][0]} on "
+                             f"{what}: {n} wall face(s)")
+        else:
+            self.commit(doc, f"Finishes taken off {what}: {n} wall face(s)")
+
     def _context_menu(self, menu) -> None:
         """The right-click menu of a CAD2IngeTrazo element: its fields in a
         dialog, its quick changes, delete."""
@@ -7544,6 +7651,10 @@ class Panel(QWidget):
                          lambda d_=drawn: self._shaft_drawn(d_, True))
             m_.addAction("Close the shaft / opening here",
                          lambda d_=drawn: self._shaft_close_drawn(d_))
+        try:            # 3.64.33: paint the elevations / the rooms' insides
+            self._paint_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu paint")
         try:            # the false ceiling's type / design, right here
             self._ceiling_menu(menu)
         except Exception:  # noqa: BLE001
