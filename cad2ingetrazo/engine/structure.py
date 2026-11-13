@@ -2116,6 +2116,25 @@ def _wall_under_ramps(w, ramps, bot, top, step=0.4):
     return [tuple(m) for m in merged]
 
 
+def _wall_footprint(doc, lid):
+    """3.64.31: the floor's footprint inside its walls (the walls' bodies
+    with what they enclose): a wall with one side out of it is an outside
+    wall — a terrace beside it is outside too."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    ws = [w for w in doc.get("walls") or [] if w.get("level") == lid
+          and "a" in w and not w.get("rail")
+          and math.dist(w["a"][:2], w["b"][:2]) > 0.05]
+    if not ws:
+        return None
+    body = unary_union([LineString([tuple(w["a"][:2]), tuple(w["b"][:2])])
+                        .buffer(float(w.get("t", 0.2)) / 2 + 0.03,
+                                cap_style=2, join_style=2) for w in ws])
+    return unary_union([Polygon(g.exterior) for g in
+                        getattr(body, "geoms", [body])
+                        if g.geom_type == "Polygon"])
+
+
 def _above_bottoms(doc, info, lid):
     """3.64.19: [(plan shape, bottom z)] of the floor pieces of the level
     over ``lid`` (its main slab and its level zones, each at its own
@@ -2147,8 +2166,9 @@ def _above_bottoms(doc, info, lid):
             zb = z0 + min(float(w.get("base", 0.0) or 0.0) for w in pw)
             ups = [(LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]),
                     float(w.get("t", 0.2))) for w in pw]
-            own = unary_union([Polygon([tuple(p[:2]) for p in s_["corners"]])
-                               .buffer(0) for s_ in roofs])
+            own = _wall_footprint(doc, lid) or unary_union(
+                [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
+                 for s_ in roofs])
             return [("_ctx", zb, (ups, own))]
         except Exception:  # noqa: BLE001
             return []
@@ -2190,12 +2210,12 @@ def _above_bottoms(doc, info, lid):
                for w in doc.get("walls") or [] if w.get("level") == up
                and not w.get("rail") and "a" in w
                and float(w.get("base", 0.0) or 0.0) < 0.05]
-        own = unary_union([Polygon([tuple(p[:2]) for p in s_["corners"]])
-                           .buffer(0) for s_ in doc.get("structure") or []
-                           if s_.get("type") == "slab" and
-                           s_.get("level") == lid and
-                           len(s_.get("corners") or []) >= 3
-                           and not s_.get("top") and not s_.get("roof")])
+        own = _wall_footprint(doc, lid) or unary_union(
+            [Polygon([tuple(p[:2]) for p in s_["corners"]]).buffer(0)
+             for s_ in doc.get("structure") or []
+             if s_.get("type") == "slab" and s_.get("level") == lid and
+             len(s_.get("corners") or []) >= 3
+             and not s_.get("top") and not s_.get("roof")])
         out.append(("_ctx", z0u, (ups, own)))
     except Exception:  # noqa: BLE001
         pass
@@ -2227,18 +2247,12 @@ def _wall_top(w, under, above):
             sides = [own.contains(Point(mx + sg * nx * (t2 + 0.3),
                                         my + sg * ny * (t2 + 0.3)))
                      for sg in (1, -1)]
-            if not own.is_empty and sides.count(True) == 1:
-                band = ln.buffer(max(t2, 0.08) + 0.08, cap_style=2)
-                run = 0.0
-                for u, _t in ups:
-                    (ux0, uy0), (ux1, uy1) = u.coords[0], u.coords[-1]
-                    Lu = math.dist((ux0, uy0), (ux1, uy1)) or 1.0
-                    if abs((ux1 - ux0) / Lu * nx + (uy1 - uy0) / Lu * ny) \
-                            > 0.1:
-                        continue          # across it, not along it
-                    run += u.intersection(band).length
-                if run >= 0.5 * L:
-                    return z0u
+            if not own.is_empty and sides.count(True) == 1 and \
+                    under - 0.05 <= z0u <= under + 1.0:
+                # 3.64.31 (his ask): an outside wall always runs up to the
+                # top of the slab over it — the slab's edge inside it, one
+                # face up the elevation; an inside wall stops under the slab
+                return z0u
         hits = []
         for g, bot, zone in above:
             if g.intersection(ln).length >= min(0.3, 0.5 * ln.length):

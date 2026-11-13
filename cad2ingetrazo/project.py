@@ -3491,6 +3491,19 @@ def drop_false_columns(doc, lid) -> int:
     plot = (arch.get("plot") or {}).get("corners") or []
     pline = Polygon([tuple(q[:2]) for q in plot]).exterior \
         if len(plot) >= 3 else None
+    # 3.64.31: the floor above — a column under it holds it up (a car
+    # porch's, an entrance's), out in the open or not
+    order = [lv["id"] for lv in arch["levels"]]
+    up_ = order[order.index(lid) + 1] if lid in order and \
+        order.index(lid) + 1 < len(order) else None
+    above = []
+    for e in arch["structure"]:
+        if e["type"] == "slab" and e.get("corners") and (
+                e["level"] == up_ or (e["level"] == lid and e.get("roof"))):
+            try:
+                above.append(Polygon(e["corners"]).buffer(0.3))
+            except Exception:  # noqa: BLE001
+                pass
     drop = set()
     for c in arch["structure"]:
         if c["type"] != "column" or c["level"] != lid or c.get("user"):
@@ -3499,6 +3512,8 @@ def drop_false_columns(doc, lid) -> int:
         if any(h.buffer(0.05).contains(P_) for h in holes):
             drop.add(c["id"])              # in a duct / shaft
             continue
+        if any(a_.contains(P_) for a_ in above):
+            continue                       # it carries the floor above
         if min(f.distance(P_) for f in floor) > 0.6 and \
                 not any(w.distance(P_) < 0.6 for w in walls) and \
                 (pline is None or pline.distance(P_) > 1.0):
