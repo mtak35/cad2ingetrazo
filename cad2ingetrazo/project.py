@@ -4998,6 +4998,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                        how.get("rot", 0.0))
     lay = pl["layers"]
     P, roles_found = layer_patterns(drawing, how, st)
+    if how.get("roof"):     # 3.64.28: a roof plan's outline (its parapet)
+        # is often drawn on the window layer — no windows on a roof
+        P = dict(P, walls=list(P["walls"]) + list(P.get("windows") or []),
+                 windows=[])
     # the project north, read from the CAD's north arrow (the whole file,
     # not only the floor picked); the import's own turn turns it too
     try:
@@ -5017,8 +5021,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         rep["layers"][lay[s[4]]] += 1
 
     # what an earlier import of this level made goes
-    old_walls = {w["id"] for w in arch["walls"] if w["level"] == lid}
-    arch["walls"] = [w for w in arch["walls"] if w["level"] != lid]
+    old_walls = {w["id"] for w in arch["walls"] if w["level"] == lid
+                 and not w.get("user")}      # 3.64.28: drawn by hand: kept
+    arch["walls"] = [w for w in arch["walls"] if w["id"] not in old_walls]
     arch["openings"] = [o for o in arch["openings"]
                         if o["wall"] not in old_walls]
     # 3.64.25: a slab the user shaped by hand (stretched, extended to
@@ -5890,8 +5895,8 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.basement_windows")
-    if st.get("terrace_rails", True):    # railings round its terraces
-        try:
+    if st.get("terrace_rails", True) and not how.get("roof"):
+        try:                 # railings round its terraces (a roof: parapet)
             rep["terrace_railings"] = terrace_railings(doc, lid, pl, P)
         except Exception:  # noqa: BLE001
             from .host import log_error
@@ -12505,6 +12510,131 @@ def grid_tags(doc):
                             float(grid["ext"]))[1]
 
 
+def drop_roof_level(doc) -> None:
+    """The «Roof» level made before, with all on it, taken away."""
+    arch = doc["arch"]
+    old = next((lv for lv in arch["levels"] if lv["name"] == "Roof"), None)
+    if old is None:
+        return
+    lid = old["id"]
+    ids = {w["id"] for w in arch["walls"] if w["level"] == lid}
+    arch["walls"] = [w for w in arch["walls"] if w["level"] != lid]
+    arch["openings"] = [o for o in arch["openings"] if o["wall"] not in ids]
+    arch["structure"] = [e for e in arch["structure"] if e["level"] != lid]
+    arch["rooms"] = [r for r in arch["rooms"] if r["level"] != lid]
+    doc["texts"] = [t for t in doc.get("texts") or [] if t["level"] != lid]
+    arch["levels"] = [lv for lv in arch["levels"] if lv["id"] != lid]
+    doc["imports"].pop(lid, None)
+    arch["levels"] = M.fix_levels(arch["levels"])
+
+
+def new_roof_level(doc, height=3.0) -> str:
+    """3.64.28: an empty «Roof» level over the top floor (its plan read
+    from the CAD next): its id."""
+    drop_roof_level(doc)
+    arch = doc["arch"]
+    before = {x["id"] for x in arch["levels"]}
+    arch["levels"] = M.add_floor(arch["levels"], height=height)
+    new = next(x for x in arch["levels"] if x["id"] not in before)
+    new["name"] = "Roof"
+    arch["levels"] = M.fix_levels(arch["levels"])
+    return new["id"]
+
+
+def roof_from_cad(doc, lid, parapet_h=1.0) -> dict:
+    """3.64.28: the roof plan read from the CAD made a roof: the walls on
+    the building's outer edge are its parapet (``parapet_h`` high, named
+    «Roof parapet n», the parapet type set in the panel); the walls inside
+    (a stair head room, a water tank) stay full height; the slab under the
+    outline is the roof slab. {"parapets", "rooms_walls"}."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    arch["walls"] = [w for w in arch["walls"] if not (
+        w["level"] == lid and str(w.get("name", "")).startswith(
+            "Terrace railing"))]
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w
+          and not w.get("rail")]
+    out = {"parapets": 0, "inner": 0}
+    if not ws:
+        return out
+    body = unary_union([LineString([w["a"][:2], w["b"][:2]]).buffer(
+        float(w["t"]) / 2 + 0.02, cap_style=2) for w in ws])
+    polys = list(getattr(body, "geoms", [body]))
+    shells = [Polygon(p.exterior) for p in polys if p.geom_type == "Polygon"]
+    if not shells:
+        return out
+    edge = unary_union([sh.exterior for sh in shells])
+    rk = doc["settings"].get("parapet_rail", "solid")
+    k = 0
+    for w in ws:
+        ln = LineString([w["a"][:2], w["b"][:2]])
+        if ln.length < 1e-3:
+            continue
+        near = ln.buffer(float(w["t"]) / 2 + 0.06, cap_style=2)
+        on_edge = near.intersection(edge).length >= 0.6 * ln.length
+        if on_edge:
+            k += 1
+            w["height"] = float(parapet_h)
+            w["base"] = 0.0
+            w["name"] = f"Roof parapet {k}"
+            if rk and rk != "solid":
+                w["rail"] = rk
+            out["parapets"] += 1
+        else:
+            out["inner"] += 1
+    # the floor under it: its own roof slab only where the roof plan does
+    # not cover it (this level's slab is the roof there) — «Lower roof n»
+    below = [lv["id"] for lv in arch["levels"]]
+    i = below.index(lid)
+    if i > 0:
+        lo = below[i - 1]
+        arch["structure"] = [e for e in arch["structure"] if not (
+            e["level"] == lo and e["type"] == "slab" and (
+                e.get("auto_roof") or str(e.get("name") or "").startswith(
+                    "Lower roof")))]
+        cover = unary_union([Polygon(e["corners"]).buffer(0)
+                             for e in arch["structure"]
+                             if e["level"] == lid and e["type"] == "slab"
+                             and e.get("corners")])
+        lw = [w_ for w_ in arch["walls"] if w_["level"] == lo
+              and not w_.get("rail") and W.why_not(w_) is None
+              and w_.get("height", "level") == "level"]
+        add = []
+        try:
+            plans = W.plan([S._plastered(w_, float(doc["settings"].get(
+                "plaster_t", 0.0127) or 0.0)) for w_ in lw])
+            loops = _outer_loops([pc for ps in plans.values() for pc in ps])
+            t = float(doc["settings"].get("roof_t") or doc["settings"].get(
+                "slab_t", 0.1016) or 0.1016)
+            for o in loops:
+                rest = Polygon(o).buffer(0).difference(cover.buffer(0.02))
+                rest = rest.buffer(-0.1, join_style=2).buffer(
+                    0.1, join_style=2)
+                for g in getattr(rest, "geoms", [rest]):
+                    if g.geom_type == "Polygon" and g.area > 1.0:
+                        add.append({"type": "slab", "level": lo,
+                                    "roof": True, "holes": [], "t": t,
+                                    "offset": 0.0, "corners": [
+                                        [round(x, 4), round(y, 4)] for x, y
+                                        in list(g.exterior.coords)[:-1]]})
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.roof_from_cad lower roof")
+        made = M.new_elements(arch["structure"], add) if add else []
+        for k_, e in enumerate(made, 1):
+            e["name"] = f"Lower roof {k_}"
+        arch["structure"] += made
+        out["roof_below"] = len(made)
+    if not any(r["level"] == lid for r in arch["rooms"]):
+        sh = max(shells, key=lambda p: p.area)
+        c = sh.representative_point()
+        arch["rooms"] = M._rooms(arch["rooms"] + [{
+            "id": "", "level": lid, "name": "Roof terrace",
+            "x": c.x, "y": c.y}], {lv["id"] for lv in arch["levels"]})
+    return out
+
+
 def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
                    height=3.0) -> str | None:
     """A «Roof» level over the top floor: a terrace slab round the outside
@@ -12513,15 +12643,7 @@ def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
     None, or why not."""
     from shapely.geometry import Polygon
     arch = doc["arch"]
-    old = next((lv for lv in arch["levels"] if lv["name"] == "Roof"), None)
-    if old is not None:                        # the roof level made before
-        lid = old["id"]
-        ids = {w["id"] for w in arch["walls"] if w["level"] == lid}
-        arch["walls"] = [w for w in arch["walls"] if w["level"] != lid]
-        arch["openings"] = [o for o in arch["openings"] if o["wall"] not in ids]
-        arch["structure"] = [e for e in arch["structure"] if e["level"] != lid]
-        arch["rooms"] = [r for r in arch["rooms"] if r["level"] != lid]
-        arch["levels"] = [lv for lv in arch["levels"] if lv["id"] != lid]
+    drop_roof_level(doc)                       # the roof level made before
     tops = [lv for lv in arch["levels"]
             if any(w["level"] == lv["id"] for w in arch["walls"])]
     if not tops:
@@ -14412,16 +14534,25 @@ def _apply_materials(groups, mats):
                     f.attrs["color"] = tuple(m["color"][:3])
 
 
-def update_from_cad(doc) -> list:
+def update_from_cad(doc, as_cad=False) -> list:
     """Every level read again from its CAD plan with the settings it was
-    imported with (the file may have changed): [(level name, report)]."""
+    imported with (the file may have changed): [(level name, report)].
+    ``as_cad`` (3.64.28): exactly as the plans draw it — what was deleted
+    or edited by hand in the model made again too."""
     out = []
+    if as_cad:
+        doc["removed"] = []
+        doc["gone3d"] = []
+        doc["kept3d"] = []
     for lv in list(doc["arch"]["levels"]):
         how = doc["imports"].get(lv["id"])
         if not how or not how.get("file"):
             continue
         try:
             rep = import_level(doc, lv["id"], how["file"], dict(how))
+            if how.get("roof"):        # 3.64.28: the roof plan → parapets
+                rep.update(roof_from_cad(doc, lv["id"],
+                                         float(how.get("parapet_h", 1.0))))
             try:                       # 3.64.23: what was deleted stays so
                 apply_removed(doc, lv["id"])
             except Exception:  # noqa: BLE001

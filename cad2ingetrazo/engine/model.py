@@ -290,6 +290,8 @@ def _walls(raw, level_ids: set) -> list[dict]:
             rec["height"] = "level" if h == "level" else \
                 min(max(float(h), 0.05), 50.0)
             rec["base"] = float(w.get("base", 0.0))
+            if w.get("user"):                # 3.64.28: drawn by hand
+                rec["user"] = True
             # built as a railing of this type (a parapet, a balcony edge)
             if w.get("rail") and str(w["rail"]) != "solid":
                 rec["rail"] = str(w["rail"])
@@ -471,6 +473,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
         t = e["type"]
         try:
             rec = {"type": t, "level": str(e["level"])}
+            for k_ in ("user", "user_edges"):     # 3.64.28: made / edited
+                if e.get(k_):                     # by hand: kept as such
+                    rec[k_] = True
             if t == "column":
                 shp = e.get("shape") if e.get("shape") in ("round", "poly") \
                     else "rect"
@@ -655,6 +660,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
                        "transom", "arch") else "flat",
                    "frame": o.get("frame") if o.get("frame") in (
                        "wood", "aluminium", "steel", "upvc") else "auto"}
+            if o.get("user"):                # 3.64.28: placed by hand
+                rec["user"] = True
         except (TypeError, ValueError, KeyError):
             continue
         oid = str(o.get("id") or "") or uuid.uuid4().hex[:8]

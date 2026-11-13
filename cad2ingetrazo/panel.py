@@ -1786,23 +1786,51 @@ class Panel(QWidget):
         if not any(k for k in doc["imports"] if not k.startswith("__plot")):
             self.flash("Nothing imported yet")
             return
-        if QMessageBox.question(
-                self, "Update from CAD", "Read every level again from its "
-                "CAD plan? Walls, doors, windows, columns and slabs made "
-                "from the plans are made again (Ctrl+Z undoes it).") != \
-                QMessageBox.Yes:
+        n_hand = len(doc.get("removed") or []) + \
+            len(doc.get("gone3d") or []) + len(doc.get("kept3d") or [])
+        box = QMessageBox(self)
+        box.setWindowTitle("Update from CAD")
+        box.setText("Read every level again from its CAD plan? Walls, doors, "
+                    "windows, columns, slabs and the roof made from the plans "
+                    "are made again (Ctrl+Z undoes it).")
+        b_cad = box.addButton("As the CAD plan", QMessageBox.AcceptRole)
+        b_keep = None
+        if n_hand:
+            box.setInformativeText(
+                f"{n_hand} element(s) were deleted or changed by hand in the "
+                "model. «As the CAD plan» makes them again as drawn; «Keep my "
+                "edits» leaves them as you left them.")
+            b_keep = box.addButton("Keep my edits", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() not in (b_cad, b_keep) or \
+                box.clickedButton() is None:
             return
+        as_cad = box.clickedButton() is b_cad
+        doc["settings"].update(self._settings_from_ui())
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            out = PJ.update_from_cad(doc)
+            out = PJ.update_from_cad(doc, as_cad=as_cad)
         except Exception as e:  # noqa: BLE001
             log_error("panel._update_cad")
             self.flash(f"Not updated — {e}", 9000)
             return
         finally:
             QApplication.restoreOverrideCursor()
-        self.commit(doc, "Updated from CAD: " + ", ".join(
-            f"{n} ({r.get('walls', r.get('pads', 0))})" for n, r in out))
+        bad = [(n, r["error"]) for n, r in out if r.get("error")]
+        msg = "Updated from CAD: " + ", ".join(
+            f"{n} ({r.get('walls', r.get('pads', 0))} walls"
+            f"{', ' + str(r['parapets']) + ' parapet' if r.get('parapets') else ''})"
+            for n, r in out if not r.get("error"))
+        if bad:
+            msg += " — NOT read: " + "; ".join(f"{n}: {e}" for n, e in bad)
+        self.commit(doc, msg)
+        try:
+            self.i_report.setText(msg)
+        except Exception:  # noqa: BLE001
+            pass
+        if bad:
+            self.flash(msg, 15000)
 
     def _show_roles(self, found):
         """The layers found, into the pattern fields (to see and to edit)."""
@@ -1824,9 +1852,12 @@ class Panel(QWidget):
         if here == SITE_LV:
             self._plot_from_cad()
             return
+        roof_cad = False
         if here == ROOF_NEW:
-            self._roof_level()
-            return
+            if not self._region:       # no roof plan picked: from the top
+                self._roof_level()     # floor's outline, as before
+                return
+            roof_cad = True            # 3.64.28: the roof plan of the CAD
         new = here == NEW
         if here == NEW_BELOW:          # «＋ basement»: made with its plan
             arch = doc["arch"]
@@ -1834,6 +1865,9 @@ class Panel(QWidget):
             arch["levels"] = M.add_basement(arch["levels"])
             lv = next(x for x in arch["levels"] if x["id"] not in old)
             lid = lv["id"]
+        elif roof_cad:
+            lid = PJ.new_roof_level(doc, float(self.i_floor_h.value()))
+            lv = PJ.level_by_id(doc["arch"], lid)
         elif new:                      # «＋ next level»: made with its plan
             arch = doc["arch"]
             old = {x["id"] for x in arch["levels"]}
@@ -1848,7 +1882,13 @@ class Panel(QWidget):
         doc["settings"].update(self._settings_from_ui())
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            rep = PJ.import_level(doc, lid, path, self._how())
+            how_ = self._how()
+            if roof_cad:
+                how_["roof"] = True
+                how_["parapet_h"] = round(float(self.rl_h.value()), 4)
+            rep = PJ.import_level(doc, lid, path, how_)
+            if roof_cad:               # its outer walls: the parapet
+                rep.update(PJ.roof_from_cad(doc, lid, how_["parapet_h"]))
             try:                       # 3.64.23: deleted ones stay deleted
                 PJ.apply_removed(doc, lid)
             except Exception:  # noqa: BLE001
