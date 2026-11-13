@@ -1876,6 +1876,9 @@ class Panel(QWidget):
             lid = lv["id"]
         else:
             lid, lv = self.level()
+            if str(lv.get("name", "")).strip().lower() == "roof" and \
+                    not new and here != NEW_BELOW:
+                roof_cad = True        # 3.64.29: the «Roof» level made
         lv_ = PJ.level_by_id(doc["arch"], lid)
         if lv_ is not None:              # its storey height, as typed
             lv_["height"] = round(float(self.i_floor_h.value()), 4)
