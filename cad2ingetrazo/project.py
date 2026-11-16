@@ -3788,6 +3788,8 @@ def opening_as(o, kind, st) -> dict:
     o = dict(o)
     old = o.get("kind")
     o["kind"] = kind
+    if kind != "void":
+        o.pop("niche", None)         # (only a plain opening is a niche)
     for k_ in ("frame_w", "frame_d", "panel", "handle", "leaves", "head",
                "glass"):
         if old != kind:
@@ -3884,11 +3886,116 @@ def apply_hidden_lines_new(doc) -> dict:
                    if not o.get("hl") and walls.get(o["wall"])})
     if not lids:
         return {}
+    new_ = {o["id"] for o in arch["openings"] if not o.get("hl")}
     out = apply_hidden_lines(doc, lids, only_new=True)
+    try:                             # 3.64.36: the niches drawn
+        detect_niches(doc, lids, new_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.detect_niches")
     for o in arch["openings"]:
         if walls.get(o["wall"]) in lids:
             o["hl"] = 1
     return out
+
+
+def niche_of(o: dict, w: dict, segs) -> dict | None:
+    """A niche, read off the plan: across the opening one face of the wall
+    runs on unbroken (its back) and the other is set in, with the recess's
+    back line drawn inside the wall. {"d": depth, "face": the open side
+    (+1 = the wall's n side)} or None (a hole through)."""
+    seg = W.centre(w)
+    if seg.kind != "line":
+        return None
+    u = seg.u
+    nv = (-u[1], u[0])
+    t = float(w["t"])
+    s0 = float(o["pos"]) - float(o["w"]) / 2 + 0.03
+    s1 = float(o["pos"]) + float(o["w"]) / 2 - 0.03
+    if s1 - s0 < 0.2:
+        return None
+    cover = {}                       # across (rounded) → spans along
+
+    def local(x, y):
+        dx, dy = x - seg.p0[0], y - seg.p0[1]
+        return dx * u[0] + dy * u[1], dx * nv[0] + dy * nv[1]
+    for sg in segs:
+        a_, ca = local(sg[0], sg[1])
+        b_, cb = local(sg[2], sg[3])
+        if abs(ca - cb) > 0.01 or abs(ca) > t / 2 + 0.03:
+            continue                 # parallel lines in the wall only
+        lo, hi = max(min(a_, b_), s0), min(max(a_, b_), s1)
+        if hi - lo > 0.01:
+            cover.setdefault(round((ca + cb) / 2, 3), []).append((lo, hi))
+
+    def frac(c0, tol=0.025):
+        sp = sorted(x for c, v in cover.items() if abs(c - c0) <= tol
+                    for x in v)
+        tot, end = 0.0, s0
+        for lo, hi in sp:
+            if hi > end:
+                tot += hi - max(lo, end)
+                end = hi
+        return tot / (s1 - s0)
+    fp, fm = frac(t / 2), frac(-t / 2)
+    if fp > 0.9 and fm < 0.1:
+        face = -1                    # the + face runs on: open to −
+    elif fm > 0.9 and fp < 0.1:
+        face = 1
+    else:
+        return None
+    # the recess's back: a line across most of the span inside the wall
+    inner = [c for c in cover if abs(c) < t / 2 - 0.02 and
+             frac(c, 0.005) > 0.6]
+    if not inner:
+        return None
+    c_ = min(inner) if face > 0 else max(inner)   # its deepest line
+    d = abs(face * t / 2 - c_)
+    if d < 0.03:
+        return None
+    return {"d": round(d, 3), "face": face}
+
+
+def detect_niches(doc, lids=None, ids=None) -> int:
+    """The void openings that are niches in the drawing (a recess, the
+    wall's other face unbroken): marked so — the wall built behind them.
+    The number found."""
+    arch = doc["arch"]
+    st = doc["settings"]
+    walls = {w["id"]: w for w in arch["walls"]}
+    n = 0
+    for lid, how in (doc.get("imports") or {}).items():
+        if lids is not None and lid not in lids:
+            continue
+        if not isinstance(how, dict) or not how.get("file"):
+            continue
+        ops = [o for o in arch["openings"] if o["kind"] == "void"
+               and (ids is None or o["id"] in ids)
+               and walls.get(o["wall"]) and
+               walls[o["wall"]]["level"] == lid]
+        if not ops:
+            continue
+        try:
+            raw = cadread.read(how["file"], how.get("unit"))
+        except Exception:  # noqa: BLE001
+            continue
+        drawing = cadread.crop(raw, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base,
+                           (how.get("ix", 0.0), how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _f = layer_patterns(drawing, how, st)
+        lay = pl["layers"]
+        dsh = pl.get("dashed") or [False] * len(pl["segs"])
+        segs = [s_ for s_, d_ in zip(pl["segs"], dsh)
+                if not d_ and _match(lay[s_[4]], P["walls"])]
+        for o in ops:
+            nz = niche_of(o, walls[o["wall"]], segs)
+            if nz:
+                o["niche"] = nz
+                n += 1
+    return n
 
 
 def apply_hidden_lines(doc, lids=None, only_new=False) -> dict:

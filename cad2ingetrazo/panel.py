@@ -209,7 +209,7 @@ FIELDS = {
                 ("ring", "Arch voussoirs", "choice",
                  ("none", "plain", "ablaq")),
                 ("frame", "Frame", "choice",
-                 ("auto", "wood", "aluminium", "steel", "upvc")),
+                 ("auto", "wood", "aluminium", "steel", "upvc", "black")),
                 ("frame_w", "Frame width (its face)", "len", (0.02, 0.30)),
                 ("frame_d", "Frame thickness (its depth)", "len",
                  (0.03, 0.50)),
@@ -3114,13 +3114,23 @@ class Panel(QWidget):
              ("void_seg", "Plain opening — doorway, semi-arched"),
              ("void_win", "Plain opening — window (on a sill)"),
              ("void_win_arch", "Plain opening — window, arched"),
-             ("void_win_seg", "Plain opening — window, semi-arched")]
+             ("void_win_seg", "Plain opening — window, semi-arched"),
+             # 3.64.36: a niche — a recess, the wall left behind it
+             ("void_niche", "Niche (recess — the wall stays behind it)"),
+             ("void_niche_flip", "Niche — open to the other face")]
 
     @staticmethod
     def _spec_apply(rec, spec, st):
         """A plain opening variant ``spec`` (VOIDS) on ``rec`` (a void)."""
         if not str(spec).startswith("void"):
             return rec
+        if "_niche" in spec:         # 3.64.36: a niche (door high)
+            f0_ = int((rec.get("niche") or {}).get("face", 1) or 1)
+            rec["niche"] = {
+                "d": float((rec.get("niche") or {}).get("d", 0.115)),
+                "face": -f0_ if spec.endswith("_flip") else f0_}
+            return rec
+        rec.pop("niche", None)       # a hole through
         if "_win" in spec:
             rec["sill"] = float(st.get("sill", 0.9))
             rec["h"] = float(st.get("win_h", 1.2))
@@ -6828,6 +6838,17 @@ class Panel(QWidget):
                     # a ground floor finish (no slab): its finish-only slab
                     self._sel_seg = None
                     return "slab", tag["slab"]
+                if tag and tag["type"] == "opening" and str(
+                        tag.get("id") or "").startswith("cw-"):
+                    # 3.64.36: a corner window's glass — its wall leg (the
+                    # window's own menu is on it)
+                    cid_ = str(tag["id"])[3:]
+                    doc_ = getattr(self, "_doc_memo", None) or self.doc()
+                    leg_ = next((w["id"] for w in doc_["arch"]["walls"]
+                                 if w.get("cwin") == cid_), None)
+                    if leg_:
+                        self._sel_seg = None
+                        return "wall", leg_
                 if tag and tag["type"] != "symbols":
                     self._sel_seg = tag.get("seg")
                     return tag["type"], tag["id"]
@@ -7867,7 +7888,7 @@ class Panel(QWidget):
                         mb.addSeparator()
                         mb.addAction("Plain (concrete / the default)",
                                      lambda kk=k: self._set_outside(kk, ""))
-                    mk.aboutToShow.connect(lambda mb=mk: fill_(mb))
+                    mk.aboutToShow.connect(lambda mb=mk, f_=fill_: f_(mb))
                 mo.addAction("The car porch's finish on all of them",
                              lambda: self._outside_same())
         if not (kinds & {"site", "gate"}) or not doc["site"].get("wall"):
@@ -8413,7 +8434,10 @@ class Panel(QWidget):
                                 self._convert_opening(("opening", i_), k_,
                                                       only=True))
                             a_.setCheckable(True)
-                            a_.setChecked(o_.get("kind") == k_)
+                            a_.setChecked((o_.get("kind") == k_ and not (
+                                k_ == "void" and o_.get("niche"))) or (
+                                k_ == "void_niche" and
+                                bool(o_.get("niche"))))
                     if len(ops_) > 1:
                         for k_, lab_ in (("door", "All doors"),
                                          ("window", "All windows")):

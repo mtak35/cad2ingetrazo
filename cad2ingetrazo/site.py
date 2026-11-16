@@ -55,6 +55,9 @@ WALL_STYLES = [("plain", "Plain (plastered)"),
                ("glass_top", "Low wall + glass panels between posts"),
                ("pipe", "Low wall + horizontal steel pipes"),
                ("ss_top", "Low wall + stainless steel balusters")]
+# 3.64.36: the designs from his pictures (siteorn.py)
+from . import siteorn as SO  # noqa: E402
+WALL_STYLES += SO.STYLES
 #: the designs that are a low wall with something over it: its kind
 OVER_KINDS = {"grille": "ms_grill", "wood_screen": "wood",
               "glass_top": "glass_post", "pipe": "pipe", "ss_top": "ss_bars"}
@@ -249,10 +252,12 @@ def build(corners, site, z0):
             ring_g = ring_g.difference(done_)
         done_ = band_ if done_ is None else done_.union(band_)
         col = WALL_FINISHES.get(fin_, ("", WALL_COLOR))[1]
-        over = OVER_KINDS.get(style)
-        cap_t = 0.075 if style != "plain" else 0.0
+        over = OVER_KINDS.get(style) or (style in SO.OVER_CUSTOM)
+        cap_t = 0.075 if style not in ("plain", "scallop") else 0.0
         solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
                           if over else h - cap_t)
+        if style == "scallop":       # the curved top made bay by bay
+            solid_top = z0 + h - 0.5
         for pc in getattr(ring_g, "geoms", [ring_g]):
             if pc.is_empty or pc.geom_type != "Polygon" or pc.area < 1e-4:
                 continue
@@ -271,7 +276,7 @@ def build(corners, site, z0):
                 out.append((f"Boundary wall {k_all} coping", "boundary",
                             W.solid(_piece(cp), solid_top,
                                     solid_top + cap_t), CAP_COLOR))
-        if over:                     # bars / slats / glass over the wall
+        if over or style in SO.PIER_STYLES:   # bars / slats / glass
             from .engine import railings as RL
             mid = plot.buffer(-t / 2, join_style=2)
             line = mid.exterior.intersection(band_) if not mid.is_empty \
@@ -287,7 +292,16 @@ def build(corners, site, z0):
                         "MultiLineString" else cut
                 except Exception:  # noqa: BLE001
                     pass
-                for k, ln in enumerate(getattr(cut, "geoms", [cut])):
+                if style in SO.PIER_STYLES:     # 3.64.36: his designs
+                    for nm_, fs_, col_ in SO.ornaments(
+                            style, cut, z0, solid_top + cap_t, h, t,
+                            float(site.get("pier_gap", 3.0)),
+                            float(site["pillar"])):
+                        out.append((nm_, "boundary", fs_, col_ or col))
+                    cut = None if style in SO.OVER_CUSTOM else cut
+                for k, ln in enumerate(getattr(cut, "geoms", [cut])
+                                       if over and cut is not None and
+                                       style in OVER_KINDS else []):
                     if ln.geom_type != "LineString":
                         continue
                     cs = list(ln.coords)
@@ -299,7 +313,7 @@ def build(corners, site, z0):
                                   t=0.03 if over == "ms_grill" else 0.05)
                     out.append((f"Boundary {dict(WALL_STYLES)[style]} "
                                 f"{k + 1}", "boundary", fs, GATE_COLOR))
-        if style in ("piers", "stone_piers"):
+        if style in ("piers", "stone_piers") + SO.PIER_STYLES:
             for i in ids_:
                 pier_sides[i] = style
     pil_ = bool(site.get("pillars"))
@@ -354,12 +368,18 @@ def build(corners, site, z0):
                                                            ang)),
                                      "holes": []}, z0 + h + 0.15,
                                     z0 + h + 0.25)
+            if "lamp_piers" in pier_sides.values() or \
+                    site.get("front_style") == "lamp_piers":
+                for fsl_, cl_ in SO.lamp(c, z0 + h + 0.25, s):   # 3.64.36
+                    out.append((f"Pillar lamp {k + 1}", "boundary", fsl_,
+                                cl_))
             if k >= n_c:                         # a gate's pillar: its block
                 out.append((f"Gate pillar {k - n_c + 1}", "gatepillar", fs_,
                             PILLAR_COLOR, gi_of[k]))
             else:
                 out.append((f"Pillar {k + 1}", "pillar", fs_,
                             WALL_FINISHES["stone"][1] if "stone_piers" in
+                            pier_sides.values() else SO.BRICK if "picket" in
                             pier_sides.values() else PILLAR_COLOR))
     for k, (g, (p0, p1, u, nv)) in enumerate(gates):
         wv = math.dist(p0, p1)

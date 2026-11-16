@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 
 from . import walls as W
+from . import windesign as WD
 
 SHRINK = 0.001          # m off every face of columns and beams
 #: …and of the ones FITTED inside a wall: the host draws edges with a
@@ -873,6 +874,71 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
     return faces
 
 
+def niche_wall(pieces, seg, ops, nz, t, z0, b, top) -> list:
+    """A wall with a niche in it, as two skins side by side: the back one
+    (unbroken across the niche, the other openings through it) and the
+    front one as deep as the niche (every opening through it) — the niche
+    reads as a recess on one face, the other face plain."""
+    from shapely.geometry import Polygon
+    from shapely.geometry.polygon import orient
+    f = -1 if float(nz[0]["niche"].get("face", 1)) < 0 else 1
+    d = min(max(float(nz[0]["niche"].get("d", 0.1)), 0.02), t - 0.02)
+    cm = f * (t / 2 - d)             # where the two skins meet
+    u = seg.u
+    n = (-u[1], u[0])
+    p0 = seg.p0
+
+    def band(c0, c1):
+        c0, c1 = sorted((c0, c1))
+        P = lambda s_, c_: (p0[0] + u[0] * s_ + n[0] * c_,   # noqa: E731
+                            p0[1] + u[1] * s_ + n[1] * c_)
+        return Polygon([P(-1e3, c0), P(1e3, c0), P(1e3, c1), P(-1e3, c1)])
+    back_ops = [o for o in ops if not (
+        o.get("niche") and (-1 if float(o["niche"].get("face", 1)) < 0
+                            else 1) == f)]
+    out = []
+    for pc in pieces:
+        poly = Polygon(pc["outer"], pc.get("holes") or [])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        for bd, oo in ((band(-f * (t / 2 + 1), cm), back_ops),
+                       (band(cm, f * (t / 2 + 1)), ops)):
+            part = poly.intersection(bd)
+            geoms = getattr(part, "geoms", [part])
+            for g in geoms:
+                if g.geom_type != "Polygon" or g.area < 1e-5:
+                    continue
+                g = orient(g)
+                sub = {"outer": list(g.exterior.coords)[:-1],
+                       "holes": [list(h.coords)[:-1] for h in g.interiors]}
+                if oo:
+                    out += wall_with_openings(sub, seg, oo, z0, b, top)
+                else:
+                    out += W.solid(sub, b, top)
+    return out
+
+
+def niche_back(o: dict, seg, t: float, z0: float, b: float,
+               top: float) -> list:
+    """A niche: the opening's hole is filled again behind its depth — the
+    wall left on the face it does not open to (its back)."""
+    nz = o.get("niche") or {}
+    d = min(max(float(nz.get("d", 0.1)), 0.02), t - 0.02)
+    f = -1 if float(nz.get("face", 1)) < 0 else 1
+    za = max(b, z0 + float(o.get("sill", 0.0)))
+    zb = min(top, z0 + float(o.get("sill", 0.0)) + float(o["h"]))
+    if zb - za < 0.01 or d <= 0:
+        return []
+    u = seg.u
+    n = (-u[1], u[0])
+    s0, s1 = o["pos"] - o["w"] / 2, o["pos"] + o["w"] / 2
+    # the open face is at c = f·t/2; the back runs from depth d to the
+    # other face (−f·t/2)
+    ca, cb = sorted((f * (t / 2 - d), -f * t / 2))
+    return [{"loop": q["loop"], "holes": []}
+            for q in _box(seg.p0, u, n, s0, s1, ca, cb, za, zb, None)]
+
+
 def _box(p0, u, n, sa, sb, ca, cb, za, zb, color) -> list:
     """A box along a wall: axial sa..sb, across ca..cb (n side), height
     za..zb — six faces, outward, each with its colour."""
@@ -892,7 +958,10 @@ HANDLE_COLOR = (0.78, 0.79, 0.80, 1.0)    # brushed steel ironmongery
 FRAMES = {"wood": ("Wood (chowkat)", (0.47, 0.31, 0.18, 1.0), 0.075, 0.10),
           "aluminium": ("Aluminium", (0.80, 0.81, 0.83, 1.0), 0.045, 0.07),
           "steel": ("Steel", (0.32, 0.34, 0.37, 1.0), 0.05, 0.06),
-          "upvc": ("uPVC (white)", (0.96, 0.96, 0.95, 1.0), 0.06, 0.07)}
+          "upvc": ("uPVC (white)", (0.96, 0.96, 0.95, 1.0), 0.06, 0.07),
+          # 3.64.36: the modern slim black aluminium section
+          "black": ("Black aluminium", (0.09, 0.09, 0.10, 1.0), 0.05,
+                    0.07)}
 WOOD_DOORS = ("hinged", "main", "double", "french", "glazed", "pocket",
               "folding")
 #: door types hung on hinges: one leaf or two («leaves»)
@@ -939,7 +1008,14 @@ def frame_of(o: dict) -> str:
             return "aluminium"
         if sty in WOOD_DOORS:
             return "wood"
+    from . import windesign as WD_
+    if o.get("kind") == "window" and sty in WD_.MODERN_WINDOWS:
+        return "black"
+    if o.get("kind") == "window" and sty in WD_.GRID_WINDOWS:
+        return "upvc"
     return "aluminium"
+
+
 HEADS = [("flat", "Flat head"), ("transom", "Transom (fixed light over)"),
          ("arch", "Arch top")]
 
@@ -1524,6 +1600,9 @@ def _opening_parts(o: dict, seg, z0: float) -> list:
                     parts.append(_box(p0, u, n, sh, sh + 0.02,
                                       c + cc * 0.012, c + cc * 0.03,
                                       zh - hl, zh + hl, HANDLE_COLOR))
+        elif style in WD.MODERN_WINDOWS or style in WD.GRID_WINDOWS:
+            parts += WD.window_design(style, p0, u, n, x0, x1, zb, zt2, F,
+                                      G)          # 3.64.36: his designs
         elif style == "fixed":
             parts.append(_box(p0, u, n, x0, x1, -0.005, 0.005, zb, zt2, G))
         elif style == "louvre":      # glass slats across
@@ -1595,7 +1674,7 @@ DOOR_STYLES = [("hinged", "Hinged, flush"),
                ("garage", "Garage (sectional)")]
 WINDOW_STYLES = [("casement", "Casement (hinged)"), ("sliding", "Sliding"),
                  ("fixed", "Fixed glass"), ("top-hung", "Top-hung"),
-                 ("louvre", "Louvre")]
+                 ("louvre", "Louvre")] + WD.DESIGNS   # 3.64.36
 PANEL_COLOR = (0.50, 0.36, 0.24, 1.0)      # a panelled leaf's mouldings
 SHUTTER_COLOR = (0.70, 0.72, 0.74, 1.0)    # rolling shutter / garage door
 
@@ -2548,9 +2627,15 @@ def build(doc: dict, elevations) -> list[dict]:
                 cwins.setdefault(w["cwin"], []).append((w, zs, zt))
             elif ops:
                 seg = W.centre(w)
-                faces = [f for pc in pieces
-                         for f in wall_with_openings(pc, seg, ops, z0, b,
-                                                     top)]
+                nz_ = [o for o in ops if o.get("niche")] \
+                    if seg.kind == "line" else []
+                if nz_:                      # 3.64.36: a niche — built in
+                    faces = niche_wall(pieces, seg, ops, nz_,   # two skins
+                                       float(w["t"]), z0, b, top)
+                else:
+                    faces = [f for pc in pieces
+                             for f in wall_with_openings(pc, seg, ops, z0,
+                                                         b, top)]
                 for o in ops:                # a round hole: the wall back
                     if o.get("shape") == "round":    # round it
                         try:

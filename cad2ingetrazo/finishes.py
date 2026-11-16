@@ -470,6 +470,9 @@ def groups(doc) -> list:
                     if R.is_empty or R.area < 1e-4:
                         continue
                 for o in ops_of.get(w["id"], []):
+                    if o.get("niche") and int((o["niche"] or {}).get(
+                            "face", 1)) != sg:
+                        continue             # 3.64.36: a niche's back face
                     p_ = float(o.get("pos", 0.0))
                     ww = float(o.get("w", 0.9))
                     zs = z_of[lid] + float(o.get("sill", 0.0) or 0.0)

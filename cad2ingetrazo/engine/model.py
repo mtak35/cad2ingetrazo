@@ -353,7 +353,7 @@ def _walls(raw, level_ids: set) -> list[dict]:
                                         0.2), 10.0)
                 # 3.64.35: its frame and type, as any window's
                 if w.get("cwin_frame") in ("wood", "aluminium", "steel",
-                                           "upvc"):
+                                           "upvc", "black"):
                     rec["cwin_frame"] = w["cwin_frame"]
                 if w.get("cwin_style") in ("fixed", "sliding", "casement",
                                            "void"):
@@ -677,7 +677,7 @@ def _openings(raw, wall_ids: set) -> list[dict]:
                    "head": o.get("head") if o.get("head") in (
                        "transom", "arch") else "flat",
                    "frame": o.get("frame") if o.get("frame") in (
-                       "wood", "aluminium", "steel", "upvc") else "auto"}
+                       "wood", "aluminium", "steel", "upvc", "black") else "auto"}
             if o.get("user"):                # 3.64.28: placed by hand
                 rec["user"] = True
         except (TypeError, ValueError, KeyError):
@@ -729,6 +729,15 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["arch"] = o["arch"]
         if o.get("ring") in ("ablaq", "plain"):   # its voussoirs shown
             rec["ring"] = o["ring"]
+        nz_ = o.get("niche")             # 3.64.36: a niche, not a hole
+        if rec["kind"] == "void" and isinstance(nz_, dict):
+            try:
+                rec["niche"] = {"d": min(max(float(nz_.get("d", 0.1)), 0.03),
+                                         1.0),
+                                "face": -1 if float(nz_.get("face", 1)) < 0
+                                else 1}
+            except (TypeError, ValueError):
+                pass
         rec["name"] = str(o.get("name")
                           or f"{_OP_LABEL[o['kind']]} {len(out) + 1}")
         out.append(rec)
