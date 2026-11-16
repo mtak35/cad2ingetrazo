@@ -5987,6 +5987,7 @@ class Panel(QWidget):
         if rids_:
             from .engine import spaces
             rp_ = []
+            rlv_ = {}                     # (the rooms' own floors)
             for lv in doc["arch"]["levels"]:
                 for r in spaces.of_level(doc["arch"], lv["id"]):
                     try:
@@ -5995,13 +5996,15 @@ class Panel(QWidget):
                         key = None
                     if key in rids_ or r.get("id") in rids_:
                         rp_.append(r["poly"])
+                        rlv_.setdefault(lv["id"], []).append(r["poly"])
         targets = [i for k, i in self._selected_all() if k == "wall"]
         if rp_:                 # the walls round the rooms selected
             from . import finishes as FN0
             for w in doc["arch"]["walls"]:
                 if "a" in w and not w.get("rail") and w["id"] not in \
                         targets and any(FN0.room_clip(w, s_, pg)
-                                        for pg in rp_ for s_ in ("l", "r")):
+                                        for pg in rlv_.get(w["level"]) or []
+                                        for s_ in ("l", "r")):
                     targets.append(w["id"])
         for i in targets:
             w = PJ.find_record(doc, "wall", i)
