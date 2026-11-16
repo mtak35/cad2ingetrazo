@@ -319,6 +319,12 @@ def _walls(raw, level_ids: set) -> list[dict]:
                                    ("clad_off", -100.0, 100.0)):
                     if w.get(k_) not in (None, ""):
                         rec[k_] = min(max(float(w[k_]), lo), hi)
+                try:                         # 3.64.35: kept to that room
+                    cr_ = w.get("clad_room")
+                    if cr_ and len(cr_) == 2:
+                        rec["clad_room"] = [float(cr_[0]), float(cr_[1])]
+                except (TypeError, ValueError):
+                    pass
             fins = []                        # face finishes (finishes.py)
             for f_ in w.get("fin") or []:
                 try:
@@ -345,6 +351,13 @@ def _walls(raw, level_ids: set) -> list[dict]:
                 rec["cwin"] = str(w["cwin"])[:40]
                 rec["cwin_h"] = min(max(float(w.get("cwin_h", 1.2) or 1.2),
                                         0.2), 10.0)
+                # 3.64.35: its frame and type, as any window's
+                if w.get("cwin_frame") in ("wood", "aluminium", "steel",
+                                           "upvc"):
+                    rec["cwin_frame"] = w["cwin_frame"]
+                if w.get("cwin_style") in ("fixed", "sliding", "casement",
+                                           "void"):
+                    rec["cwin_style"] = w["cwin_style"]
         except (TypeError, ValueError, KeyError, IndexError):
             continue
         rec["align"] = w.get("align") if w.get("align") in WALL_ALIGNS \

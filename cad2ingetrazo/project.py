@@ -43,6 +43,10 @@ PLOT_KEY = "__plot__"            # the import that gave the plot
 
 #: the panel's defaults (the user's last choices live in QSettings)
 DEFAULTS = {
+    # 3.64.34 / 3.64.35: the car porch at the lawn, the annexes' roofs, the
+    # entrance floor's finish, the building's elevation finish
+    "porch_at_ground": True, "annex_roof": True, "entrance_fin": "",
+    "elev_fin": "", "fin_porch": "", "fin_entrance": "", "fin_veranda": "",
     "walls": "*WALL*, A-WALL*, *MUR*",
     "doors": "*DOOR*, A-DOOR*",
     "windows": "*WIND*, *GLAZ*, A-GLAZ*",
@@ -6588,6 +6592,285 @@ def ensure_roof(doc) -> str | None:
     return top if made else None
 
 
+_OUT_ROOM = re.compile(r"TERRACE|BALCON|PORCH|VERAND|SIT\s*OUT|\bROOF\b|"
+                       r"PORTICO", re.I)
+
+
+def indoor_polys(doc) -> dict:
+    """3.64.35: {level id: [room polygons]} of the rooms indoors — not a
+    terrace, porch, verandah… (by name) and not open to the sky (under
+    the floor above or a roof slab)."""
+    from shapely.geometry import Polygon as _Pg
+    from shapely.ops import unary_union as _uu
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    out = {}
+    for i, lid in enumerate(ids):
+        up = ids[i + 1] if i + 1 < len(ids) else None
+        gs = []
+        for e in arch["structure"]:
+            if e["type"] != "slab" or not e.get("corners"):
+                continue
+            if e["level"] == up or (e["level"] == lid and (
+                    e.get("roof") or e.get("auto_roof"))):
+                try:
+                    gs.append(_Pg(e["corners"]).buffer(0))
+                except Exception:  # noqa: BLE001
+                    pass
+        cov = _uu(gs) if gs else None
+        out["_cov_" + lid] = cov           # what roofs the level over
+        rs_ = [r for r in spaces.of_level(arch, lid)
+               if r.get("area", 0) >= 1.0]
+        allr = _uu([r["poly"] for r in rs_]) if rs_ else None
+        # a loggia / covered balcony: a room open to the outside through a
+        # wide plain opening (no door, no window) — outside too
+        voids = []
+        wd_ = {w["id"]: w for w in arch["walls"] if w["level"] == lid
+               and "a" in w}
+        for o in arch["openings"]:
+            w = wd_.get(o["wall"])
+            if w is None or o.get("kind") != "void" or \
+                    float(o.get("w", 0)) < 1.5:
+                continue
+            a, b = w["a"], w["b"]
+            L = math.dist(a[:2], b[:2]) or 1.0
+            u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            c = (a[0] + u[0] * float(o["pos"]), a[1] + u[1] * float(o["pos"]))
+            d = float(w["t"]) / 2 + 0.3
+            voids.append([(c[0] - u[1] * sg * d, c[1] + u[0] * sg * d)
+                          for sg in (1, -1)])
+        from shapely.geometry import Point as _Pt
+        for r in rs_:
+            nm = str(r.get("name") or "")
+            if cov is None or r["poly"].intersection(cov).area < \
+                    0.5 * r["poly"].area:
+                continue                       # open to the sky
+            if OUTDOOR_WORDS.search(nm) or _OUT_ROOM.search(nm):
+                continue
+            open_ = False
+            for p1, p2 in voids:
+                q1, q2 = _Pt(p1), _Pt(p2)
+                for qa, qb in ((q1, q2), (q2, q1)):
+                    if r["poly"].contains(qa) and (allr is None or
+                                                   not allr.contains(qb)):
+                        open_ = True
+            if open_:
+                continue
+            out.setdefault(lid, []).append(r["poly"])
+    return out
+
+
+def outside_sides(w, indoor) -> list:
+    """3.64.35: the faces ("l" / "r") of wall ``w`` with no indoor room
+    behind them — its elevation faces."""
+    from shapely.geometry import Point
+    if "a" not in w:
+        return []
+    a, b = w["a"], w["b"]
+    L = math.dist(a[:2], b[:2])
+    if L < 0.2:
+        return []
+    ins = indoor.get(w["level"]) or []
+    m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    d = float(w["t"]) / 2 + 0.3
+    out = []
+    for s_, g_ in (("l", 1), ("r", -1)):
+        q = Point(m[0] - (b[1] - a[1]) / L * g_ * d,
+                  m[1] + (b[0] - a[0]) / L * g_ * d)
+        cov = indoor.get("_cov_" + w["level"])
+        if not any(pg.contains(q) for pg in ins) or (
+                cov is not None and not cov.buffer(-0.05).contains(q)):
+            out.append(s_)         # no room behind it, or open to the sky
+    return out
+
+
+def outside_stretches(w, indoor) -> list:
+    """3.64.35: [(side, clip)] — the faces of wall ``w`` on an elevation:
+    clip None the whole face; else the stretches [[s0, s1]] no indoor room
+    is behind (a wall running on past a room's corner out along the
+    facade)."""
+    from . import finishes as FN
+    whole = outside_sides(w, indoor)
+    out = [(s_, None) for s_ in whole]
+    a, b = w["a"], w["b"]
+    L = math.dist(a[:2], b[:2])
+    if L < 0.5:
+        return out
+    ins = indoor.get(w["level"]) or []
+    for s_ in ("l", "r"):
+        if s_ in whole:
+            continue
+        cl = []
+        for pg in ins:
+            cl += FN.room_clip(w, s_, pg, min_len=0.05)
+        if not cl:
+            continue
+        cl.sort()
+        free, at = [], 0.0
+        for c0, c1 in cl:
+            if c0 - at > 0.3:
+                free.append([round(at, 4), round(c0, 4)])
+            at = max(at, c1)
+        if L - at > 0.3:
+            free.append([round(at, 4), round(L + 0.3, 4)])
+        if free:
+            if free[0][0] <= 0.0:
+                free[0][0] = -0.3
+            out.append((s_, free))
+    return out
+
+
+def apply_elev_fin(doc) -> int:
+    """3.64.35: the elevation finish picked for the whole building
+    (settings «elev_fin») on every outside wall face that has none — the
+    walls made afterwards too (a parapet round a new roof, an annex's)."""
+    from . import finishes as FN
+    mat = doc["settings"].get("elev_fin")
+    if not mat:
+        return 0
+    ind = indoor_polys(doc)
+    n = 0
+    for w in doc["arch"]["walls"]:
+        if w.get("rail") or w.get("kind", "line") != "line" or \
+                w.get("type") == "curtain":
+            continue
+        for s_, cl_ in outside_stretches(w, ind):
+            if any(f_.get("side") == s_ and (cl_ is None or f_.get(
+                    "band") == "elev") for f_ in w.get("fin") or []):
+                continue
+            FN.set_band(w, s_, mat, "elev", cl_)
+            n += 1
+    return n
+
+
+def _elev_columns(doc, groups) -> None:
+    """3.64.35: the columns standing out on the elevations (a porch's, a
+    verandah's — not inside a room) in the elevation finish too."""
+    mat = doc["settings"].get("elev_fin")
+    if not mat:
+        return
+    from shapely.geometry import Point
+    from . import matlib as ML
+    try:
+        att = ML.attrs_of(mat)
+    except Exception:  # noqa: BLE001
+        att = None
+    if not att:
+        return
+    ind = indoor_polys(doc)
+    cols = {e["id"]: e for e in doc["arch"]["structure"]
+            if e["type"] in ("column", "core")}
+    walls_ = {w["id"]: w for w in doc["arch"]["walls"]}
+    bodies_ = {}
+    from shapely.geometry import LineString as _LS0
+    class _Sc:
+        pass
+    sc_ = _Sc()
+    sc_.groups = groups
+    for g in all_groups(sc_):
+        t = tag_of(g) or {}
+        if t.get("type") in ("slab", "finish_edge") and not t.get("part"):
+            # the slabs' edges on the elevation (a balcony's, a terrace's,
+            # a roof's): their upright faces in the finish too
+            m_ = getattr(g, "mesh", None)
+            for f in (m_.faces if m_ is not None else []):
+                try:
+                    n_ = f.normal()
+                    if abs(n_.z()) < 0.1 * max(n_.length(), 1e-9):
+                        f.attrs.update(att)
+                except Exception:  # noqa: BLE001
+                    continue
+            continue
+        if t.get("type") == "wall" and not t.get("part"):
+            # 3.64.35: the wall itself where its finish band does not
+            # reach — its ends / jambs and the outside face's own strips
+            # (over the slab's edge, a fin's narrow face)
+            w_ = walls_.get(t.get("id"))
+            if w_ is None or "a" not in w_:
+                continue
+            sides_ = [f_.get("side") for f_ in w_.get("fin") or []
+                      if f_.get("band") == "elev" and not f_.get("clip")]
+            a_, b_ = w_["a"], w_["b"]
+            L_ = math.dist(a_[:2], b_[:2]) or 1.0
+            ux, uy = (b_[0] - a_[0]) / L_, (b_[1] - a_[1]) / L_
+            # its ends out on an elevation (an inside wall's end flush
+            # with the facade between two outside walls): seen outside
+            ends_ = []
+            try:
+                lid_ = w_["level"]
+                if lid_ not in bodies_:
+                    bodies_[lid_] = [
+                        (x_["id"], _LS0([tuple(x_["a"][:2]),
+                                         tuple(x_["b"][:2])]).buffer(
+                            float(x_["t"]) / 2 + 0.005, cap_style=2))
+                        for x_ in doc["arch"]["walls"]
+                        if x_["level"] == lid_ and "a" in x_
+                        and not x_.get("rail")]
+                for sgn_, p_ in ((-1, a_), (1, b_)):
+                    q_ = Point(p_[0] + ux * sgn_ * 0.12,
+                               p_[1] + uy * sgn_ * 0.12)
+                    if any(bd_.contains(q_) for i_, bd_ in bodies_[lid_]
+                           if i_ != w_["id"]):
+                        continue
+                    if any(pg.contains(q_) for pg in ind.get(lid_) or []):
+                        continue
+                    ends_.append(sgn_)
+            except Exception:  # noqa: BLE001
+                ends_ = []
+            if not sides_ and not ends_:
+                continue
+            M_ = getattr(g, "xform", None)
+            m_ = getattr(g, "mesh", None)
+            for f in (m_.faces if m_ is not None else []):
+                try:
+                    n_ = f.normal()
+                    if M_ is not None:
+                        from PySide6.QtGui import QVector3D as _V3
+                        n_ = M_.map(n_) - M_.map(_V3(0, 0, 0))
+                    ln_ = max(n_.length(), 1e-9)
+                    nx, ny, nz = n_.x() / ln_, n_.y() / ln_, n_.z() / ln_
+                    if abs(nz) > 0.1:
+                        continue
+                    along = abs(nx * ux + ny * uy)
+                    lft = nx * -uy + ny * ux
+                    al_ = nx * ux + ny * uy
+                    if (along > 0.9 and (sides_ or (al_ > 0 and 1 in ends_)
+                                         or (al_ < 0 and -1 in ends_))) or \
+                            ("l" in sides_ and lft > 0.9) or \
+                            ("r" in sides_ and lft < -0.9):
+                        f.attrs.update(att)
+                except Exception:  # noqa: BLE001
+                    continue
+            continue
+        if t.get("type") not in ("column", "core") or t.get("part"):
+            continue
+        c = cols.get(t.get("id"))
+        if c is None or "x" not in c:
+            continue
+        try:            # a face of it out in the open: on the elevation
+            from shapely.geometry import Polygon as _Pg
+            from shapely.ops import unary_union as _uu
+            cp_ = _Pg(S.column_outline(c)).buffer(0.03, join_style=2)
+            iu_ = _uu(ind.get(c["level"]) or [])
+            if not iu_.is_empty and cp_.difference(iu_).area < \
+                    0.05 * cp_.area:
+                continue                   # inside a room
+            # all round by walls / rooms: not seen either
+            if not iu_.is_empty and cp_.buffer(0.35).difference(
+                    iu_.buffer(0.35)).is_empty:
+                continue
+        except Exception:  # noqa: BLE001
+            q = Point(float(c["x"]), float(c["y"]))
+            if any(pg.buffer(-0.02).contains(q)
+                   for pg in ind.get(c["level"]) or []):
+                continue
+        m_ = getattr(g, "mesh", None)
+        if m_ is None:
+            continue
+        for f in m_.faces:
+            f.attrs.update(att)
+
+
 def annex_roofs(doc) -> int:
     """3.64.34 (his ask): a lower part of a floor that the floor above does
     not cover (a guard room, an annex, a servant quarter) gets its own roof
@@ -9618,6 +9901,8 @@ def _mesh_of(faces):
                               for hh in f.get("holes") or []])
         if face is not None and f.get("color") is not None:
             face.attrs["color"] = tuple(f["color"][:3])
+        if face is not None and f.get("attrs"):       # 3.64.35: a texture
+            face.attrs.update(dict(f["attrs"]))
     return mesh
 
 
@@ -11782,6 +12067,8 @@ def platform_parts(doc) -> dict:
                         out["pieces"].append((qg, top))
                         if dz_ == "porch":
                             out.setdefault("porch", []).append(qg)
+                        elif part is outer:      # 3.64.35: a verandah,
+                            out.setdefault("veranda", []).append(qg)
     # the entrance steps' landing (the porch their top step bounds) where
     # no slab reaches it: the platform carried out to it, at the floor's
     # finished level (the porch floor the main door opens onto)
@@ -12283,8 +12570,31 @@ def _platform_groups(doc):
         lcol_ = None
     lcol_ = tuple(lcol_) if lcol_ else (0.92, 0.91, 0.88)
     lft_ = 0.02
+    # 3.64.35 (his ask): the outside floors' finishes picked from the
+    # right-click — the car porch, the entrances' landings, the verandahs /
+    # paved parts (each a material from the floor finishes, textured)
+    from . import matlib as ML_
+    ofin_ = {"porch": st.get("fin_porch") or "",
+             "land": st.get("fin_entrance") or "",
+             "veranda": st.get("fin_veranda") or ""}
+    sets_ = {"porch": parts.get("porch") or [],
+             "land": lands_, "veranda": parts.get("veranda") or []}
+
+    def cat_(pg):
+        for k_, l_ in sets_.items():
+            if any(pg is q_ for q_ in l_):
+                return k_
+        return None
     for pg, top in parts["pieces"]:
-        if any(pg is q_ for q_ in lands_) and top - zg > lft_ + 0.01:
+        c_ = cat_(pg)
+        mat_ = ofin_.get(c_) if c_ else ""
+        at_ = ML_.attrs_of(mat_) if mat_ else None
+        if at_ is not None and top - zg > lft_ + 0.01:
+            faces += _prism(pg, zg, top - lft_)
+            faces += [dict(fc, attrs=at_) for fc in
+                      _prism(pg, top - lft_, top)]
+            continue
+        if c_ == "land" and top - zg > lft_ + 0.01:
             faces += _prism(pg, zg, top - lft_)       # 3.64.34: its finish
             faces += [dict(fc, color=lcol_) for fc in
                       _prism(pg, top - lft_, top)]
@@ -12503,6 +12813,30 @@ def _site_groups(doc):
         _soften(mesh)
         return mesh
     lib_done = set()
+    # 3.64.35 (his ask): every gate the same design and colour — the one
+    # picked (right-click ▸ Boundary wall ▸ Gate design), else the model
+    # the main (widest) gate takes
+    gm_ = doc["site"].get("gate_model") or ""
+    gcol_ = SITE_.GATE_COLORS.get(doc["site"].get("gate_color") or "",
+                                  ("", None))[1]
+    main_lib = None
+    if gm_ != "plain" and doc["settings"].get("gate_lib", True):
+        try:
+            if gm_:
+                from . import library as LB0
+                e0 = next((e for e in LB0.list_entries() or []
+                           if e.get("key") == gm_), None)
+                if e0 is not None:
+                    main_lib = {"key": e0["key"], "entry": e0.get("entry"),
+                                "fit": "stretch", "name": e0.get("name")}
+            if main_lib is None and doc["site"]["gates"]:
+                g0 = max(doc["site"]["gates"], key=lambda q: q["w"])
+                gh0 = max(float(doc["site"]["h"]) - 0.15, 0.6)
+                two0 = g0.get("kind") == "double" or g0["w"] > 2.4
+                main_lib = _gate_lib(doc, g0["w"] / 2 if two0 else g0["w"],
+                                     gh0)
+        except Exception:  # noqa: BLE001
+            main_lib = None
     for k, part in enumerate(parts):
         name, kind, faces, color = part[:4]
         gi = part[4] if len(part) > 4 else None
@@ -12514,7 +12848,7 @@ def _site_groups(doc):
                 gh = max(float(doc["site"]["h"]) - 0.15, 0.6)
                 wd = math.dist(p0, p1)
                 two = gk.get("kind") == "double" or wd > 2.4
-                lib = _gate_lib(doc, wd / 2 if two else wd, gh)
+                lib = main_lib
                 if lib is not None:
                     t_ = float(doc["site"]["t"])
                     mid = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
@@ -12558,6 +12892,9 @@ def _site_groups(doc):
                             log_error("project gate library")
                             lg = []
                             break
+                    if lg and gcol_:          # the colour picked, on all
+                        for g_ in lg:
+                            g_.material = {"color": gcol_, "opacity": 1.0}
                     if lg:
                         blocks.setdefault(gi, []).extend(lg)
                         lib_done.add(gi)
@@ -13907,6 +14244,11 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.opening_parapets")
+    try:                       # 3.64.35: the elevation finish everywhere
+        apply_elev_fin(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.apply_elev_fin")
     try:
         sync_room_floors(doc)
     except Exception:  # noqa: BLE001
@@ -14048,6 +14390,11 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project._parapet_groups")
     _apply_materials(new_groups, doc.get("materials") or {})
+    try:
+        _elev_columns(doc, new_groups)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._elev_columns")
     try:                             # the rooms' / terraces' materials
         from . import matlib as ML
         ML.apply(new_groups, doc, tag_of,

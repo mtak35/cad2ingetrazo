@@ -1241,9 +1241,15 @@ def corner_window_faces(legs) -> list:
     sill z, head z)] → frame (jambs at its two free ends, sill and head
     running round), the corner post where two legs meet, fixed glass
     panes (mullions at most 1.2 m apart) — no wall between the panes."""
-    _lab, FC, f, dep = FRAMES["aluminium"]
+    w0_ = legs[0][0] if legs else {}
+    style = w0_.get("cwin_style") or "fixed"       # 3.64.35: its type
+    if style == "void":
+        return []                     # a plain opening round the corner
+    _lab, FC, f, dep = FRAMES.get(w0_.get("cwin_frame") or "aluminium",
+                                  FRAMES["aluminium"])
     hd = dep / 2
     ph = CW_POST / 2
+    pitch = {"casement": 0.6, "sliding": 0.9}.get(style, 1.2)
     segs = []
     for w, zs, zt in legs:
         sg = W.centre(w)
@@ -1273,13 +1279,25 @@ def corner_window_faces(legs) -> list:
             continue
         parts.append(_box(p0, u, n, sa, sb, -hd, hd, zs, zs + f, FC))
         parts.append(_box(p0, u, n, sa, sb, -hd, hd, zt - f, zt, FC))
-        k = max(1, int(math.ceil((sb - sa) / 1.2 - 1e-6)))
+        k = max(1, int(math.ceil((sb - sa) / pitch - 1e-6)))
         for i in range(1, k):                        # mullions
             sm = sa + (sb - sa) * i / k
             parts.append(_box(p0, u, n, sm - f / 2, sm + f / 2, -hd, hd,
                               zs + f, zt - f, FC))
-        parts.append(_box(p0, u, n, sa, sb, -0.005, 0.005, zs + f, zt - f,
-                          GLASS_COLOR))
+        if style == "sliding":       # the panes in two tracks, overlapping
+            for i in range(k):
+                q0 = sa + (sb - sa) * i / k
+                q1 = sa + (sb - sa) * (i + 1) / k
+                dz_ = hd * 0.45 * (1 if i % 2 else -1)
+                parts.append(_box(p0, u, n, q0, q1, dz_ - 0.005,
+                                  dz_ + 0.005, zs + f, zt - f, GLASS_COLOR))
+        else:
+            parts.append(_box(p0, u, n, sa, sb, -0.005, 0.005, zs + f,
+                              zt - f, GLASS_COLOR))
+        if style == "casement":      # a transom light across the top
+            zh_ = zt - max(min((zt - zs) * 0.25, 0.45), 0.2)
+            parts.append(_box(p0, u, n, sa, sb, -hd, hd, zh_ - f / 2,
+                              zh_ + f / 2, FC))
         for c, on in ((p0, ca), (p1, cb)):
             if on and not any(math.dist(c, q) < 0.02 for q in posts):
                 posts.append(c)

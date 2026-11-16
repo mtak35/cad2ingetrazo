@@ -650,10 +650,21 @@ def fill_menu(panel, menu):
     menu.addAction("Walk inside — the biggest room of "
                    f"{(lv or {}).get('name', lid)}",
                    lambda: start(panel, lid, 0))
-    sub = menu.addMenu("Walk into a room…")
-    for k, (name, poly) in enumerate(rooms(doc, lid)):
-        sub.addAction(f"{name}  ({poly.area:.0f} m²)",
-                      lambda kk=k: start(panel, lid, kk))
+    # 3.64.35 (his ask): the floor named — «Walk into a ground floor
+    # room…», one for each floor, the one picked first
+    order = [lid] + [lv_["id"] for lv_ in doc["arch"]["levels"]
+                     if lv_["id"] != lid]
+    names = {lv_["id"]: str(lv_.get("name") or lv_["id"])
+             for lv_ in doc["arch"]["levels"]}
+    for lid_ in order:
+        rs_ = rooms(doc, lid_)
+        if not rs_:
+            continue
+        sub = menu.addMenu(f"Walk into a {names.get(lid_, lid_).lower()} "
+                           "room…")
+        for k, (name, poly) in enumerate(rs_):
+            sub.addAction(f"{name}  ({poly.area:.0f} m²)",
+                          lambda kk=k, l_=lid_: start(panel, l_, kk))
     lm = menu.addMenu("On another level…")
     for lv_ in doc["arch"]["levels"]:
         lm.addAction(str(lv_.get("name") or lv_["id"]),

@@ -5321,12 +5321,15 @@ class Panel(QWidget):
         the other face or both)."""
         doc = self.doc()
         wids = [i for k, i in self._selected_all() if k == "wall"]
-        if not wids:
+        rids = [i for k, i in self._selected_all() if k == "room"]
+        if not wids and not rids:
             return
-        w0 = PJ.find_record(doc, "wall", wids[0]) or {}
+        w0 = (PJ.find_record(doc, "wall", wids[0]) if wids else None) or {}
         now = w0.get("clad") or "none"
         m_ = menu.addMenu(f"CAD2IngeTrazo · Wall cladding — {len(wids)} "
-                          "wall(s)")
+                          "wall(s)" if wids else
+                          f"CAD2IngeTrazo · Wall cladding — the walls of "
+                          f"{len(rids)} room(s) (inside them only)")
         for k_, lab_ in _WC.TYPES:
             a_ = m_.addAction(lab_, lambda k=k_: self.apply_clad(k))
             a_.setCheckable(True)
@@ -5948,19 +5951,73 @@ class Panel(QWidget):
             return t.get("level"), round(p.x, 3), round(p.y, 3)
         return None
 
+    def _clad_room_of(self, doc, w, rpolys=None):
+        """3.64.35 (his ask): the room a wall's cladding is kept to — a
+        room selected that the wall bounds, else the room the camera is in
+        (looking at the wall from inside it), else the room on the side it
+        goes on. A point inside it, or None."""
+        from . import finishes as FN
+        from .engine import spaces
+        cands = rpolys if rpolys is not None else [
+            r["poly"] for r in spaces.of_level(doc["arch"], w["level"])
+            if r["area"] >= 1.0]
+        mine = [pg for pg in cands if FN.room_clip(w, "l", pg) or
+                FN.room_clip(w, "r", pg)]
+        if not mine:
+            return None
+        pick = None
+        if rpolys is None and len(mine) > 1:
+            try:
+                from shapely.geometry import Point
+                e_ = self.vp.camera.eye()
+                q_ = Point(e_.x(), e_.y())
+                pick = next((pg for pg in mine if pg.contains(q_)), None)
+            except Exception:  # noqa: BLE001
+                pick = None
+        if pick is None:
+            pick = mine[0]
+        c = pick.representative_point()
+        return [round(c.x, 4), round(c.y, 4)]
+
     def apply_clad(self, kind):
         doc = self.doc()
         n = 0
-        for k, i in self._selected_all():
-            if k != "wall":
-                continue
+        rp_ = None
+        rids_ = [i for k, i in self._selected_all() if k == "room"]
+        if rids_:
+            from .engine import spaces
+            rp_ = []
+            for lv in doc["arch"]["levels"]:
+                for r in spaces.of_level(doc["arch"], lv["id"]):
+                    try:
+                        key = PJ.room_key(lv["id"], r)
+                    except Exception:  # noqa: BLE001
+                        key = None
+                    if key in rids_ or r.get("id") in rids_:
+                        rp_.append(r["poly"])
+        targets = [i for k, i in self._selected_all() if k == "wall"]
+        if rp_:                 # the walls round the rooms selected
+            from . import finishes as FN0
+            for w in doc["arch"]["walls"]:
+                if "a" in w and not w.get("rail") and w["id"] not in \
+                        targets and any(FN0.room_clip(w, s_, pg)
+                                        for pg in rp_ for s_ in ("l", "r")):
+                    targets.append(w["id"])
+        for i in targets:
             w = PJ.find_record(doc, "wall", i)
             if w is None:
                 continue
             if kind == "none":
                 w.pop("clad", None)
+                w.pop("clad_room", None)
             else:
                 w["clad"] = kind
+                try:            # 3.64.35: inside the room only
+                    cr_ = self._clad_room_of(doc, w, rp_)
+                    if cr_:
+                        w["clad_room"] = cr_
+                except Exception:  # noqa: BLE001
+                    log_error("panel.apply_clad room")
             n += 1
         if n:
             self.commit(doc, f"{_WC.BY.get(kind, kind)}: {n} wall(s)")
@@ -7762,6 +7819,157 @@ class Panel(QWidget):
         me.addAction("Take the finishes off the elevations",
                      lambda: self._paint_faces("out", None, None, rids_))
 
+    def _outside_menu(self, menu) -> None:
+        """3.64.35 (his ask): right-click on the ground outside — the car
+        porch / entrance / verandah floors' finish; on the boundary wall,
+        a pillar or a gate — the wall's designs and finishes (front, sides
+        and back) and the gates' design and colour (all gates alike)."""
+        from . import finishes as FN
+        from . import site as SITE0_
+        hit = None
+        try:
+            hit = self._under_cursor_raw()
+        except Exception:  # noqa: BLE001
+            hit = None
+        kinds = {k for k, _i in self._selected_all()}
+        if hit:
+            kinds.add(hit[0])
+        doc = getattr(self, "_doc_memo", None) or self.doc()
+        if kinds & {"platform", "landscape", "walkway", "site", "gate"} or \
+                not kinds:
+            flo = FN.groups_menu(floor=True)
+            if flo:
+                mo = menu.addMenu("CAD2IngeTrazo · Outside floor finish "
+                                  "(car porch, entrances, verandahs)")
+                for key_, lab_ in (("fin_porch", "Car porch / carport"),
+                                   ("fin_entrance",
+                                    "Entrances (the landings at the doors)"),
+                                   ("fin_veranda",
+                                    "Verandahs and paved areas"),
+                                   ("fin_terrace",
+                                    "Terraces and balconies (every floor)")):
+                    mk = mo.addMenu(lab_)
+
+                    def fill_(mb, k=key_):
+                        if mb.actions():
+                            return
+                        cur = doc["settings"].get(k) or ""
+                        for title, ks in flo:
+                            mg = mb.addMenu(title)
+                            for m_, l_ in ks:
+                                a_ = mg.addAction(l_, lambda m=m_, kk=k:
+                                                  self._set_outside(kk, m))
+                                a_.setCheckable(True)
+                                a_.setChecked(cur == m_)
+                        mb.addSeparator()
+                        mb.addAction("Plain (concrete / the default)",
+                                     lambda kk=k: self._set_outside(kk, ""))
+                    mk.aboutToShow.connect(lambda mb=mk: fill_(mb))
+                mo.addAction("The car porch's finish on all of them",
+                             lambda: self._outside_same())
+        if not (kinds & {"site", "gate"}) or not doc["site"].get("wall"):
+            return
+        st = doc["site"]
+        mb = menu.addMenu("CAD2IngeTrazo · Boundary wall and gates")
+        for key_, lab_, opts in (
+                ("front_style", "Front wall design",
+                 [("", "Same as the sides")] + SITE0_.WALL_STYLES),
+                ("style", "Sides / back design", SITE0_.WALL_STYLES),
+                ("front_finish", "Front wall finish / colour",
+                 [("", "Same as the sides")] + [
+                     (k, v[0]) for k, v in SITE0_.WALL_FINISHES.items()]),
+                ("finish", "Sides / back finish / colour", [
+                    (k, v[0]) for k, v in SITE0_.WALL_FINISHES.items()])):
+            m_ = mb.addMenu(lab_)
+            for k_, l_ in opts:
+                a_ = m_.addAction(l_, lambda kk=key_, v=k_:
+                                  self._set_site(kk, v))
+                a_.setCheckable(True)
+                a_.setChecked((st.get(key_) or "") == k_)
+        for key_, lab_ in (("sides_on", "Side walls"),
+                           ("back_on", "Back wall")):
+            a_ = mb.addAction(lab_, lambda on, kk=key_: self._set_site(kk,
+                                                                       on))
+            a_.setCheckable(True)
+            a_.setChecked(bool(st.get(key_, True)))
+        mb.addSeparator()
+        mg = mb.addMenu("Gates — design (every gate alike)")
+
+        def fill_g(m_):
+            if m_.actions():
+                return
+            cur = st.get("gate_model") or ""
+            for k_, l_ in [("", "Automatic (the main gate's model)"),
+                           ("plain", "Plain steel gate (sheet + frame)")]:
+                a_ = m_.addAction(l_, lambda v=k_: self._set_site(
+                    "gate_model", v))
+                a_.setCheckable(True)
+                a_.setChecked(cur == k_)
+            try:
+                from . import library as LB
+                ents = [e for e in LB.list_entries() or []
+                        if "gate" in str(e.get("name", "")).lower()
+                        and "fence" not in str(e.get("name", "")).lower()]
+            except Exception:  # noqa: BLE001
+                ents = []
+            if ents:
+                m_.addSeparator()
+            for e in ents[:40]:
+                a_ = m_.addAction(str(e.get("name")), lambda v=e["key"]:
+                                  self._set_site("gate_model", v))
+                a_.setCheckable(True)
+                a_.setChecked(cur == e["key"])
+        mg.aboutToShow.connect(lambda m_=mg: fill_g(m_))
+        mc = mb.addMenu("Gates — colour (every gate alike)")
+        for k_, (l_, _c) in SITE0_.GATE_COLORS.items():
+            a_ = mc.addAction(l_, lambda v=k_: self._set_site("gate_color",
+                                                              v))
+            a_.setCheckable(True)
+            a_.setChecked((st.get("gate_color") or "") == k_)
+
+    def _set_outside(self, key, mat):
+        from . import finishes as FN
+        doc = self.doc()
+        doc["settings"][key] = mat or ""
+        if key == "fin_terrace":       # the terraces' / balconies' rooms
+            n_ = 0
+            for r in doc["arch"]["rooms"]:
+                if re.search(r"TERRACE|BALCON|VERAND|SIT\s*OUT|DECK",
+                             str(r.get("name") or ""), re.I):
+                    if mat:
+                        r["mat_floor"] = mat
+                    else:
+                        r.pop("mat_floor", None)
+                    n_ += 1
+            self.commit(doc, f"Terraces and balconies ({n_}): " + (
+                FN.label(mat) if mat else "as built"))
+            return
+        what = {"fin_porch": "Car porch", "fin_entrance": "Entrances",
+                "fin_veranda": "Verandahs and paved areas"}[key]
+        self.commit(doc, f"{what}: " + (FN.label(mat) if mat else
+                                         "plain floor"))
+
+    def _outside_same(self):
+        doc = self.doc()
+        m = doc["settings"].get("fin_porch") or ""
+        for k in ("fin_entrance", "fin_veranda"):
+            doc["settings"][k] = m
+        for r in doc["arch"]["rooms"]:
+            if m and re.search(r"TERRACE|BALCON|VERAND|SIT\s*OUT|DECK",
+                               str(r.get("name") or ""), re.I):
+                r["mat_floor"] = m
+        self.commit(doc, "The car porch's finish on the entrances and "
+                         "verandahs too")
+
+    def _set_site(self, key, value):
+        doc = self.doc()
+        doc["site"][key] = value
+        try:
+            self._fill_site(doc)
+        except Exception:  # noqa: BLE001
+            pass
+        self.commit(doc, f"Boundary wall: {key.replace('_', ' ')} changed")
+
     def _paint_faces(self, where, mat, band, rids=None) -> None:
         """3.64.34: ``where`` "out": every wall face looking out of its
         floor's footprint (the elevations, parapets' outer faces); "in":
@@ -7852,24 +8060,28 @@ class Panel(QWidget):
                                     None if whole else clip)
                     n += 1
                 continue
-            # an elevation's face: no room (indoors) behind it — a face
-            # onto a terrace, a porch, a lobby or the garden is outside
-            ins_ = indoor.get(lid) or []
-            m = ((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
-            d = float(w["t"]) / 2 + 0.3
-            for s_, g_ in (("l", 1), ("r", -1)):
-                q = Point(m[0] - (w["b"][1] - w["a"][1]) / L * g_ * d,
-                          m[1] + (w["b"][0] - w["a"][0]) / L * g_ * d)
-                if any(pg.contains(q) for pg in ins_):
-                    continue
+            # an elevation's face: no room (indoors) behind it, or open to
+            # the sky (3.64.35: the project's own test, as the commit's)
+            if "_ind" not in feet:
+                feet["_ind"] = PJ.indoor_polys(doc)
+            for s_, cl_ in PJ.outside_stretches(w, feet["_ind"]):
                 if mat is None:
                     w["fin"] = [f_ for f_ in w.get("fin") or []
-                                if f_.get("side") != s_]
+                                if f_.get("side") != s_ or (
+                                    cl_ is not None and
+                                    f_.get("band") != "elev")]
                 else:
-                    FN.set_band(w, s_, mat, band)
+                    FN.set_band(w, s_, mat, band, cl_)
                 n += 1
             if not w.get("fin"):
                 w.pop("fin", None)
+        if where == "out" and band in ("elev", None):
+            # 3.64.35: the building's elevation finish — the walls made
+            # later (parapets, annexes) and the porch columns take it too
+            if mat:
+                doc["settings"]["elev_fin"] = mat
+            else:
+                doc["settings"].pop("elev_fin", None)
         what = "the external elevations" if where == "out" else (
             "the selected rooms" if rids else "the rooms' insides")
         if mat:
@@ -7899,6 +8111,10 @@ class Panel(QWidget):
             self._paint_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu paint")
+        try:            # 3.64.35: the outside floors, the boundary, gates
+            self._outside_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu outside")
         try:            # the false ceiling's type / design, right here
             self._ceiling_menu(menu)
         except Exception:  # noqa: BLE001
@@ -7987,8 +8203,52 @@ class Panel(QWidget):
                     gm.addAction(lab_, lambda k=k_, s=here:
                                  self._cw_panel_door(sel[1], k, s))
         if sel[0] == "wall" and rec.get("cwin"):
-            sub.addAction("Corner window → curtain wall (floor to top)",
+            # 3.64.35 (his ask): a corner window's menu as any window's —
+            # convert, type, frame, sill / height, close it
+            from .engine import structure as S2_
+            cid_ = rec["cwin"]
+            mc_ = sub.addMenu("Convert to door / window…")
+            for k_, lab_ in (("fixed", "Window (glazed round the corner)"),
+                             ("void", "Plain opening (no window)")):
+                a_ = mc_.addAction(lab_, lambda k=k_: self._cwin_set(
+                    cid_, cwin_style=k))
+                a_.setCheckable(True)
+                a_.setChecked((rec.get("cwin_style") == "void") ==
+                              (k_ == "void"))
+            mc_.addAction("Curtain wall (floor to top, doors in its panels)",
                           lambda: self._cwin_to_cw(sel[1]))
+            mt_ = sub.addMenu("Type")
+            for k_, lab_ in (("fixed", "Fixed glass (mullions ~4'-0\")"),
+                             ("sliding", "Sliding (two tracks)"),
+                             ("casement", "Casement + top light")):
+                a_ = mt_.addAction(lab_, lambda k=k_: self._cwin_set(
+                    cid_, cwin_style=k))
+                a_.setCheckable(True)
+                a_.setChecked((rec.get("cwin_style") or "fixed") == k_)
+            mf_ = sub.addMenu("Frame")
+            for k_, v_ in S2_.FRAMES.items():
+                a_ = mf_.addAction(v_[0], lambda k=k_: self._cwin_set(
+                    cid_, cwin_frame=k))
+                a_.setCheckable(True)
+                a_.setChecked((rec.get("cwin_frame") or "aluminium") == k_)
+            ms_ = sub.addMenu("Sill / height")
+            for ft_ in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
+                a_ = ms_.addAction(f"Sill {int(ft_)}'-{int(round((ft_ % 1) * 12))}\"",
+                                   lambda v=ft_ * 0.3048: self._cwin_set(
+                                       cid_, cw_low=round(v, 4)))
+                a_.setCheckable(True)
+                a_.setChecked(abs(float(rec.get("cw_low") or 0) - ft_ *
+                                  0.3048) < 0.01)
+            ms_.addSeparator()
+            for ft_ in (3.0, 4.0, 4.5, 5.0, 6.0, 7.0):
+                a_ = ms_.addAction(f"Height {int(ft_)}'-{int(round((ft_ % 1) * 12))}\"",
+                                   lambda v=ft_ * 0.3048: self._cwin_set(
+                                       cid_, cwin_h=round(v, 4)))
+                a_.setCheckable(True)
+                a_.setChecked(abs(float(rec.get("cwin_h") or 0) - ft_ *
+                                  0.3048) < 0.01)
+            sub.addAction("Replace with wall (close the corner window)",
+                          lambda: self._cwin_close(cid_))
             here = self._cursor_along_wall(rec)
             if here is not None:
                 gm = sub.addMenu("Glass door in the corner window here")
@@ -8565,6 +8825,35 @@ class Panel(QWidget):
             self.flash(f"Not added — {why}")
             return
         self.commit(doc, "Glass door in the curtain wall's panel")
+
+    def _cwin_set(self, cid, **kv):
+        """3.64.35: a corner window's frame / type / sill / height — on
+        every leg of it."""
+        doc = self.doc()
+        n = 0
+        for w in doc["arch"]["walls"]:
+            if w.get("cwin") == cid:
+                for k, v in kv.items():
+                    w[k] = v
+                n += 1
+        if not n:
+            self.flash("That corner window is gone — right-click it again")
+            return
+        what = ", ".join(f"{k.replace('cwin_', '').replace('cw_low', 'sill')}"
+                         f" {v}" for k, v in kv.items())
+        self.commit(doc, f"Corner window: {what}")
+
+    def _cwin_close(self, cid):
+        """3.64.35: the corner window taken out — its walls solid again."""
+        doc = self.doc()
+        n = 0
+        for w in doc["arch"]["walls"]:
+            if w.get("cwin") == cid:
+                for k in ("cwin", "cwin_h", "cw_low", "cwin_frame",
+                          "cwin_style"):
+                    w.pop(k, None)
+                n += 1
+        self.commit(doc, f"Corner window closed ({n} wall(s) solid again)")
 
     def _cwin_to_cw(self, wid):
         doc = self.doc()

@@ -32,6 +32,15 @@ GATE_KINDS = [("double", "Double swing"), ("single", "Single swing"),
 WALL_COLOR = (0.80, 0.78, 0.74)
 PILLAR_COLOR = (0.72, 0.70, 0.66)
 GATE_COLOR = (0.22, 0.24, 0.27)
+#: 3.64.35: the gates' colour, the same on every gate
+GATE_COLORS = {"": ("As the model", None),
+               "black": ("Black", (0.10, 0.10, 0.11)),
+               "charcoal": ("Charcoal grey", (0.22, 0.24, 0.27)),
+               "grey": ("Silver grey", (0.62, 0.64, 0.66)),
+               "white": ("White", (0.92, 0.92, 0.90)),
+               "brown": ("Dark brown", (0.30, 0.20, 0.13)),
+               "green": ("Bottle green", (0.10, 0.25, 0.17)),
+               "gold": ("Gold / brass", (0.70, 0.56, 0.24))}
 
 
 #: the boundary wall's designs and finishes
@@ -78,6 +87,10 @@ def load_site(raw) -> dict:
             out["front_style"] = raw["front_style"]
         if raw.get("front_finish") in WALL_FINISHES:
             out["front_finish"] = raw["front_finish"]
+        if raw.get("gate_color") in GATE_COLORS:
+            out["gate_color"] = raw["gate_color"]
+        if isinstance(raw.get("gate_model"), str):
+            out["gate_model"] = raw["gate_model"][:200]
         for k, lo, hi in (("h", 0.3, 6.0), ("t", 0.05, 1.0),
                           ("pillar", 0.1, 1.5)):
             try:
@@ -363,7 +376,9 @@ def build(corners, site, z0):
             out.append((f"Gate {k + 1}" + (f" leaf {j + 1}" if len(leaves) > 1
                                            else ""), "gate",
                         W.solid({"outer": _ccw(leaf), "holes": []},
-                                z0 + 0.05, z0 + 0.05 + gh), GATE_COLOR,
+                                z0 + 0.05, z0 + 0.05 + gh),
+                        GATE_COLORS.get(site.get("gate_color") or "",
+                                        ("", None))[1] or GATE_COLOR,
                         site["gates"].index(g)))
         # plan symbol: swings opening inwards, or the sliding track
         if g["kind"] == "sliding":

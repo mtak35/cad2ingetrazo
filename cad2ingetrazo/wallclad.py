@@ -310,12 +310,29 @@ def groups(doc) -> list:
                                         if x["level"] == lid
                                         and not x.get("rail")])
             seed = zlib.crc32(str(w["id"]).encode())
-            for sg in _sides(doc, w, mid, n, t, rooms):
+            rpoly_ = None
+            if w.get("clad_room"):          # 3.64.35: that room's only
+                from shapely.geometry import Point as _Pt
+                q_ = _Pt(*w["clad_room"])
+                rpoly_ = next((r["poly"] for r in rooms
+                               if r["poly"].contains(q_)), None)
+            sides_ = _sides(doc, w, mid, n, t, rooms)
+            if rpoly_ is not None and (w.get("clad_side") or "clad_in") \
+                    == "clad_in":           # the face looking into it
+                sides_ = [sg_ for sg_ in (1, -1) if FN.room_clip(
+                    w, "l" if sg_ == 1 else "r", rpoly_)] or sides_
+            for sg in sides_:
                 # the face's own ends (mitred at the corners: no gap)
                 f_a, f_b = FN._face_span(w, sg, L, plans_of[lid])
                 s_a, s_b = (f_a, f_b) if ln <= 0 else (
                     max(L / 2 + off - ln / 2, f_a),
                     min(L / 2 + off + ln / 2, f_b))
+                if rpoly_ is not None:
+                    cl_ = FN.room_clip(w, "l" if sg == 1 else "r", rpoly_)
+                    if not cl_:
+                        continue
+                    c0_, c1_ = max(cl_, key=lambda c: c[1] - c[0])
+                    s_a, s_b = max(s_a, c0_), min(s_b, c1_)
                 if s_b - s_a < 0.1:
                     continue
                 side_pt = (mid[0] + n[0] * sg * (t / 2 + 0.3),
