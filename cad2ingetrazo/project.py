@@ -47,6 +47,7 @@ DEFAULTS = {
     # entrance floor's finish, the building's elevation finish
     "porch_at_ground": True, "annex_roof": True, "entrance_fin": "",
     "elev_fin": "", "fin_porch": "", "fin_entrance": "", "fin_veranda": "",
+    "fin_terrace": "",
     "walls": "*WALL*, A-WALL*, *MUR*",
     "doors": "*DOOR*, A-DOOR*",
     "windows": "*WIND*, *GLAZ*, A-GLAZ*",
@@ -10941,6 +10942,34 @@ def _finish_groups(doc):
                 drop_ = float(st.get("ext_finish_drop", 0.3048) or 0.0) \
                     if lv.get("kind") == "ground" else 0.0
                 ez_ = entrance_zone(doc, lid) if drop_ else None
+                # 3.64.37 (his ask): the outside floors' finishes picked
+                # from the right-click go on THIS layer too (it is the one
+                # seen over the car porch / verandahs / terraces)
+                omat_ = []                   # [(polygon or None, attrs)]
+                try:
+                    from . import matlib as ML7_
+                    if lv.get("kind") == "ground":
+                        pp7_ = platform_parts(doc) if platform_on(doc) \
+                            else {}
+                        from shapely.ops import unary_union as _uu7
+                        for k7_, src7_ in (
+                                ("fin_entrance", [ez_] if ez_ is not None
+                                 and not ez_.is_empty else []),
+                                ("fin_entrance", pp7_.get("landings") or []),
+                                ("fin_porch", pp7_.get("porch") or []),
+                                ("fin_veranda", pp7_.get("veranda") or [])):
+                            at7_ = ML7_.attrs_of(st.get(k7_) or "")
+                            if at7_ and src7_:
+                                omat_.append((_uu7(src7_).buffer(0.05),
+                                              at7_))
+                    else:
+                        at7_ = ML7_.attrs_of(st.get("fin_terrace") or "")
+                        if at7_:
+                            omat_.append((None, at7_))
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("project edge finish outside material")
+                    omat_ = []
                 if ez_ is not None and not ez_.is_empty:
                     sp_ = []
                     for p_ in pieces:
@@ -10974,6 +11003,12 @@ def _finish_groups(doc):
                                  [tuple(q) for q in list(h.coords)[:-1]])))
                                  for h in p_.interiors]}
                     faces = W.solid(piece, z, z + f)
+                    for pz_, at_ in omat_:   # 3.64.37: its finish picked
+                        if pz_ is None or pz_.contains(c_):
+                            faces = [dict(f_ if isinstance(f_, dict) else
+                                          {"loop": f_, "holes": []},
+                                          attrs=at_) for f_ in faces]
+                            break
                     if faces:
                         # on the ground (no slab): the finish-only slab
                         # it belongs to — selected, its handles edit it

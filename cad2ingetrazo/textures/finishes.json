@@ -145,5 +145,68 @@
   "cat": "paint",
   "sw": 1.0,
   "sh": 1.0
+ },
+ {
+  "file": "acp_silver.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 silver metallic (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "acp_champagne.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 champagne gold (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "acp_charcoal.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 charcoal grey (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "acp_bronze.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 bronze (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "acp_white.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 gloss white (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "acp_black.jpg",
+  "name": "Aluminium cladding (ACP) \u2014 matt black (1220\u00d72440 panels)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "alu_woodgrain.jpg",
+  "name": "Aluminium cladding \u2014 wood-grain strips (300 mm)",
+  "cat": "aluminium",
+  "sw": 1.22,
+  "sh": 2.44
+ },
+ {
+  "file": "alu_louvre_silver.jpg",
+  "name": "Aluminium louvres / fins \u2014 silver (150 mm)",
+  "cat": "aluminium",
+  "sw": 1.2,
+  "sh": 2.4
+ },
+ {
+  "file": "alu_louvre_charcoal.jpg",
+  "name": "Aluminium louvres / fins \u2014 charcoal (150 mm)",
+  "cat": "aluminium",
+  "sw": 1.2,
+  "sh": 2.4
  }
 ]

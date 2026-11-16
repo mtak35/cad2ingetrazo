@@ -67,6 +67,14 @@ GROUPS = [
         "wall/tiled_stones.jpg", "wall/brown_stones.jpg",
         "stone/stone_ashlar.png", "wall/beige_bricks.jpg",
         "wall/red_bricks.jpg", "brick/brick_clay.png"]),
+    # 3.64.37 (his ask): aluminium composite panels for the elevations
+    ("Aluminium cladding (ACP) & louvres", [
+        "finish/acp_silver.jpg", "finish/acp_champagne.jpg",
+        "finish/acp_charcoal.jpg", "finish/acp_bronze.jpg",
+        "finish/acp_white.jpg", "finish/acp_black.jpg",
+        "finish/alu_woodgrain.jpg", "finish/alu_louvre_silver.jpg",
+        "finish/alu_louvre_charcoal.jpg", "misc/aluminium.png",
+        "metal/metal_brushed.png"]),
     ("Plaster & paint", [
         "finish/plaster_white.jpg", "finish/texture_paint.jpg",
         "wall/beige_tadelakt.jpg", "wall/gray_tadelakt.jpg",
