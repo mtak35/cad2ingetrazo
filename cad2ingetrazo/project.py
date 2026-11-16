@@ -6860,6 +6860,69 @@ def apply_elev_fin(doc) -> int:
     return n
 
 
+def _rail_finishes(doc, groups) -> None:
+    """3.64.39: a railing's solid part — its upstand, the low wall under
+    it, a solid railing-parapet (the masonry-coloured faces) — in the
+    finish picked for each face of it (its «l» / «r» finish), not its
+    bars or glass."""
+    from . import matlib as ML
+    from .engine import railings as RL
+    walls_ = {w["id"]: w for w in doc["arch"]["walls"]
+              if w.get("rail") and w.get("fin") and "a" in w}
+    if not walls_:
+        return
+    mas = tuple(round(x, 3) for x in RL.MASONRY[:3])
+
+    class _Sc:
+        pass
+    sc_ = _Sc()
+    sc_.groups = groups
+    att_of = {}
+    for g in all_groups(sc_):
+        t = tag_of(g) or {}
+        w = walls_.get(t.get("id")) if t.get("type") == "wall" else None
+        if w is None or t.get("part"):
+            continue
+        by_side = {}
+        for f_ in w.get("fin") or []:
+            s_ = f_.get("side")
+            if s_ in ("l", "r") and f_.get("mat") and s_ not in by_side:
+                k_ = f_["mat"]
+                if k_ not in att_of:
+                    try:
+                        att_of[k_] = ML.attrs_of(k_)
+                    except Exception:  # noqa: BLE001
+                        att_of[k_] = None
+                if att_of[k_]:
+                    by_side[s_] = att_of[k_]
+        if not by_side:
+            continue
+        a_, b_ = w["a"], w["b"]
+        L_ = math.dist(a_[:2], b_[:2]) or 1.0
+        nx_, ny_ = -(b_[1] - a_[1]) / L_, (b_[0] - a_[0]) / L_
+        M_ = getattr(g, "xform", None)
+        m_ = getattr(g, "mesh", None)
+        for f in (m_.faces if m_ is not None else []):
+            try:
+                c_ = f.attrs.get("color")
+                if c_ is None or tuple(round(float(x), 3)
+                                       for x in tuple(c_)[:3]) != mas:
+                    continue
+                n_ = f.normal()
+                if M_ is not None:
+                    from PySide6.QtGui import QVector3D as _V3
+                    n_ = M_.map(n_) - M_.map(_V3(0, 0, 0))
+                ln_ = max(n_.length(), 1e-9)
+                if abs(n_.z()) / ln_ > 0.3:
+                    continue
+                d_ = (n_.x() * nx_ + n_.y() * ny_) / ln_
+                s_ = "l" if d_ > 0.3 else "r" if d_ < -0.3 else None
+                if s_ in by_side:
+                    f.attrs.update(by_side[s_])
+            except Exception:  # noqa: BLE001
+                continue
+
+
 def _elev_columns(doc, groups) -> None:
     """3.64.35: the columns standing out on the elevations (a porch's, a
     verandah's — not inside a room) in the elevation finish too."""
@@ -6905,6 +6968,8 @@ def _elev_columns(doc, groups) -> None:
             w_ = walls_.get(t.get("id"))
             if w_ is None or "a" not in w_:
                 continue
+            if w_.get("rail"):       # 3.64.39: a railing — its solid part
+                continue             # done by its own finish; not its bars
             sides_ = [f_.get("side") for f_ in w_.get("fin") or []
                       if f_.get("band") == "elev" and not f_.get("clip")]
             a_, b_ = w_["a"], w_["b"]
@@ -14546,6 +14611,11 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project._elev_columns")
+    try:                             # 3.64.39: railings' solid parts
+        _rail_finishes(doc, new_groups)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._rail_finishes")
     try:                             # the rooms' / terraces' materials
         from . import matlib as ML
         ML.apply(new_groups, doc, tag_of,
