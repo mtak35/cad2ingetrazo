@@ -5763,7 +5763,18 @@ class Panel(QWidget):
         sel_w = [w for w in arch["walls"] if w.get("id") in wids]
         only_par = bool(sel_w) and all(parapet_(w) for w in sel_w)
         for w in arch["walls"]:
-            if w.get("id") not in wids or "a" not in w or w.get("rail"):
+            if w.get("id") not in wids or "a" not in w:
+                continue
+            if w.get("rail"):          # 3.64.38: a railing's solid part
+                if which != "in" and (w.get("rail") in ("solid",
+                                                        "wall_rail") or
+                                      float(w.get("curb_h") or 0.0) > 0.01):
+                    for s_ in ("l", "r"):      # (both its faces outside)
+                        faces[(w["id"], s_)] = w
+                continue
+            if parapet_(w) and which != "in":   # 3.64.38: an elevation's
+                for s_ in ("l", "r"):           # parapet — both its faces
+                    faces[(w["id"], s_)] = w
                 continue
             if parapet_(w) and not only_par:
                 continue           # a parapet painted only when picked alone

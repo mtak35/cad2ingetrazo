@@ -6839,8 +6839,17 @@ def apply_elev_fin(doc) -> int:
     ind = indoor_polys(doc)
     n = 0
     for w in doc["arch"]["walls"]:
-        if w.get("rail") or w.get("kind", "line") != "line" or \
-                w.get("type") == "curtain":
+        if w.get("kind", "line") != "line" or w.get("type") == "curtain" \
+                or "a" not in w:
+            continue
+        if w.get("rail"):            # 3.64.38: a railing's solid part —
+            if w.get("rail") in ("solid", "wall_rail") or float(
+                    w.get("curb_h") or 0.0) > 0.01:   # both its faces
+                for s_ in ("l", "r"):
+                    if not any(f_.get("side") == s_
+                               for f_ in w.get("fin") or []):
+                        FN.set_band(w, s_, mat, "elev", None)
+                        n += 1
             continue
         for s_, cl_ in outside_stretches(w, ind):
             if any(f_.get("side") == s_ and (cl_ is None or f_.get(

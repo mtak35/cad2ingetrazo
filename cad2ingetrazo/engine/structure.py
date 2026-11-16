@@ -874,6 +874,61 @@ def wall_with_openings(piece: dict, seg, ops: list[dict], z0: float,
     return faces
 
 
+def rail_finish(w: dict, faces: list) -> list:
+    """3.64.38: a railing's solid part (its upstand / low wall / solid
+    parapet — the masonry) in the finish picked for each face of it: the
+    upright faces on the wall's left side take its «l» finish, those on
+    the right its «r» one."""
+    from .. import matlib as ML
+    from . import railings as RL
+    by_side = {}
+    for f_ in w.get("fin") or []:
+        s_ = f_.get("side")
+        if s_ in ("l", "r") and f_.get("mat"):
+            by_side.setdefault(s_, f_["mat"])     # its first band's
+    att = {}
+    for s_, m_ in by_side.items():
+        try:
+            a_ = ML.attrs_of(m_)
+        except Exception:  # noqa: BLE001
+            a_ = None
+        if a_:
+            att[s_] = a_
+    if not att or "a" not in w:
+        return faces
+    ax, ay = w["a"][0], w["a"][1]
+    bx, by = w["b"][0], w["b"][1]
+    L = math.hypot(bx - ax, by - ay) or 1.0
+    nx, ny = -(by - ay) / L, (bx - ax) / L          # the left normal
+    mas = tuple(RL.MASONRY[:3])
+    out = []
+    for f in faces:
+        c = f.get("color")
+        lp = f.get("loop") or []
+        if c is None or tuple(c[:3]) != mas or len(lp) < 3:
+            out.append(f)
+            continue
+        # the face's normal (Newell)
+        qx = qy = qz = 0.0
+        for i in range(len(lp)):
+            x0, y0, z0 = lp[i]
+            x1, y1, z1 = lp[(i + 1) % len(lp)]
+            qx += (y0 - y1) * (z0 + z1)
+            qy += (z0 - z1) * (x0 + x1)
+            qz += (x0 - x1) * (y0 + y1)
+        m = math.sqrt(qx * qx + qy * qy + qz * qz) or 1.0
+        if abs(qz) / m > 0.3:                     # its top / foot
+            out.append(f)
+            continue
+        d = (qx * nx + qy * ny) / m
+        s_ = "l" if d > 0.3 else "r" if d < -0.3 else None
+        if s_ in att:
+            out.append(dict(f, attrs=att[s_]))
+        else:
+            out.append(f)
+    return out
+
+
 def niche_wall(pieces, seg, ops, nz, t, z0, b, top) -> list:
     """A wall with a niche in it, as two skins side by side: the back one
     (unbroken across the niche, the other openings through it) and the
@@ -2592,6 +2647,8 @@ def build(doc: dict, elevations) -> list[dict]:
                                               bool(w.get("np_b"))),
                                      run_on=(bool(w.get("cj_a")),
                                              bool(w.get("cj_b"))))
+                if w.get("fin"):                 # 3.64.38: its solid part
+                    faces = rail_finish(w, faces)    # (upstand, low wall)
             elif w.get("type") == "curtain":       # glass on a grid
                 seg = W.centre(w)
                 # standing on the finished floor (its doors on their
