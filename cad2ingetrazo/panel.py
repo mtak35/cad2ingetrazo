@@ -6,6 +6,7 @@ Every button is one Ctrl+Z."""
 from __future__ import annotations
 
 import math
+import re
 import os
 
 from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
@@ -2354,11 +2355,34 @@ class Panel(QWidget):
             "plinth band at the foot and a coping; a low wall with an MS "
             "grille over it; piers along the sides (every «Pier spacing») "
             "with a coping — caps on the pillars")
-        f.addRow("Wall design", self.bw_style)
+        f.addRow("Sides / back design", self.bw_style)
         self.bw_fin = QComboBox()
         for k_, (lab_, _c) in _SITE.WALL_FINISHES.items():
             self.bw_fin.addItem(lab_, k_)
-        f.addRow("Wall finish", self.bw_fin)
+        f.addRow("Sides / back finish", self.bw_fin)
+        # 3.64.34: the front wall its own design; the side / back walls
+        # optional
+        self.bw_fstyle = QComboBox()
+        self.bw_fstyle.addItem("Same as the sides", "")
+        for k_, lab_ in _SITE.WALL_STYLES:
+            self.bw_fstyle.addItem(lab_, k_)
+        self.bw_fstyle.setToolTip("The front boundary wall (the plot's "
+                                  "front, the side with the gate): its own "
+                                  "design")
+        f.addRow("Front wall design", self.bw_fstyle)
+        self.bw_ffin = QComboBox()
+        self.bw_ffin.addItem("Same as the sides", "")
+        for k_, (lab_, _c) in _SITE.WALL_FINISHES.items():
+            self.bw_ffin.addItem(lab_, k_)
+        f.addRow("Front wall finish", self.bw_ffin)
+        row = QHBoxLayout()
+        self.bw_sides = QCheckBox("Side walls")
+        self.bw_sides.setChecked(True)
+        self.bw_back = QCheckBox("Back wall")
+        self.bw_back.setChecked(True)
+        row.addWidget(self.bw_sides)
+        row.addWidget(self.bw_back)
+        f.addRow("Boundary walls on", row)
         row = QHBoxLayout()
         self.bw_gap = _spin(1.5, 12.0, 3.0)
         self.bw_gap.setToolTip("Piers: their spacing along the sides")
@@ -2386,6 +2410,16 @@ class Panel(QWidget):
         row.addWidget(self.gt_list, 1)
         row.addWidget(_btn("Remove", self._gate_remove))
         f.addRow(row)
+        row = QHBoxLayout()             # 3.64.34: a 4' side (wicket) gate
+        self.sg_where = QComboBox()
+        for k_, lab_ in (("fl", "Front, left end"), ("fr", "Front, right end"),
+                         ("sl", "Left side"), ("sr", "Right side")):
+            self.sg_where.addItem(lab_, k_)
+        row.addWidget(self.sg_where, 1)
+        row.addWidget(_btn("Add 4'-0\" side gate + columns",
+                           self._side_gate, "A 4'-0\" (1.22 m) single "
+                           "swing gate with a column each side"))
+        f.addRow("Side gate", row)
         f.addRow(_btn("Apply boundary wall", self._boundary, primary=True))
         self.lay.addWidget(box)
 
@@ -2489,8 +2523,50 @@ class Panel(QWidget):
                   style=self.bw_style.currentData() or "coping",
                   finish=self.bw_fin.currentData() or "plaster",
                   pier_gap=self.bw_gap.value(),
-                  solid_h=self.bw_solid.value())
+                  solid_h=self.bw_solid.value(),
+                  front_style=self.bw_fstyle.currentData() or "",
+                  front_finish=self.bw_ffin.currentData() or "",
+                  sides_on=self.bw_sides.isChecked(),
+                  back_on=self.bw_back.isChecked())
         return st
+
+    def _side_gate(self):
+        """3.64.34: a 4'-0" single swing gate with its two columns — at an
+        end of the front wall (clear of the main gate) or on a side."""
+        doc = self.doc()
+        plot = doc["arch"].get("plot")
+        if not plot:
+            self.flash("Make the plot first (part 4)")
+            return
+        from .engine import plotgeo
+        cn = plotgeo.clean(plot["corners"])
+        n = len(cn)
+        st = self._site_from_ui(doc)
+        st["wall"] = True
+        self.bw_on.setChecked(True)
+        fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
+        fs = fr[0] if fr else (st["gates"][0]["side"] if st["gates"] else 0)
+        where = self.sg_where.currentData() or "fl"
+        w = 1.2192
+        m = 0.6 + float(st.get("pillar", 0.35))
+        if where in ("fl", "fr"):
+            side = fs
+            L = math.dist(cn[side], cn[(side + 1) % n])
+            pos = m + w / 2 if where == "fl" else L - m - w / 2
+        else:
+            side = (fs + 1) % n if where == "sr" else (fs - 1) % n
+            L = math.dist(cn[side], cn[(side + 1) % n])
+            # near the front end of that side
+            pos = (m + w / 2) if where == "sr" else L - m - w / 2
+        for g in st["gates"]:            # clear of a gate there already
+            if g["side"] == side and abs(g["pos"] - pos) < (
+                    g["w"] + w) / 2 + 0.6:
+                self.flash("A gate is there already — pick the other end")
+                return
+        st["gates"].append({"side": side, "pos": round(pos, 3), "w": w,
+                            "kind": "single", "cols": True,
+                            "side_gate": True})
+        self.commit(doc, "4'-0\" side gate added, with its columns")
 
     def _boundary(self):
         doc = self.doc()
@@ -2529,8 +2605,15 @@ class Panel(QWidget):
         self.bw_h.setValue(st["h"])
         self.bw_t.setValue(st["t"])
         self.bw_pil.setChecked(st["pillars"])
+        for cb_, k_ in ((self.bw_sides, "sides_on"), (self.bw_back,
+                                                      "back_on")):
+            cb_.blockSignals(True)
+            cb_.setChecked(bool(st.get(k_, True)))
+            cb_.blockSignals(False)
         for cb_, k_, dv_ in ((self.bw_style, "style", "coping"),
-                             (self.bw_fin, "finish", "plaster")):
+                             (self.bw_fin, "finish", "plaster"),
+                             (self.bw_fstyle, "front_style", ""),
+                             (self.bw_ffin, "front_finish", "")):
             cb_.blockSignals(True)
             cb_.setCurrentIndex(max(cb_.findData(st.get(k_, dv_)), 0))
             cb_.blockSignals(False)
@@ -3024,14 +3107,43 @@ class Panel(QWidget):
                "void": "a plain opening"}[kind]
         self.commit(doc, f"The gap made {lab}")
 
+    #: 3.64.34: the plain openings — door high or window high, flat,
+    #: arched (semicircular) or semi-arched (segmental)
+    VOIDS = [("void", "Plain opening — doorway (door high)"),
+             ("void_arch", "Plain opening — doorway, arched"),
+             ("void_seg", "Plain opening — doorway, semi-arched"),
+             ("void_win", "Plain opening — window (on a sill)"),
+             ("void_win_arch", "Plain opening — window, arched"),
+             ("void_win_seg", "Plain opening — window, semi-arched")]
+
+    @staticmethod
+    def _spec_apply(rec, spec, st):
+        """A plain opening variant ``spec`` (VOIDS) on ``rec`` (a void)."""
+        if not str(spec).startswith("void"):
+            return rec
+        if "_win" in spec:
+            rec["sill"] = float(st.get("sill", 0.9))
+            rec["h"] = float(st.get("win_h", 1.2))
+        if spec.endswith("_arch") or spec.endswith("_seg"):
+            rec["head"] = "arch"
+            rec["arch"] = "semi" if spec.endswith("_arch") else "segmental"
+        else:
+            rec.pop("head", None)
+            rec.pop("arch", None)
+        return rec
+
     def _convert_ids(self, ids, kind):
         doc = self.doc()
         n = 0
+        spec = kind
+        kind = "void" if str(kind).startswith("void") else kind
         for oid in ids:
             rec = PJ.find_record(doc, "opening", oid)
-            if rec is None or rec.get("kind") == kind:
+            if rec is None or (rec.get("kind") == kind and spec == kind
+                               and kind != "void"):
                 continue
             new = PJ.opening_as(rec, kind, doc["settings"])
+            self._spec_apply(new, spec, doc["settings"])
             why = PJ.check_record(doc, "opening", dict(new, id=rec["id"]))
             if why:
                 self.flash(f"{rec.get('name')} not changed — {why}")
@@ -3505,6 +3617,60 @@ class Panel(QWidget):
         doc["arch"]["openings"] += M.new_openings(doc["arch"]["openings"],
                                                   [rec])
         self.commit(doc, f"{kind.title()} added")
+
+    def _add_in_wall(self, wid, spec):
+        """3.64.34: a door / window / plain opening put in wall ``wid`` —
+        where it was right-clicked when that point is on it, else in the
+        middle of its widest stretch free of openings."""
+        doc = self.doc()
+        st = doc["settings"]
+        w = PJ.find_record(doc, "wall", wid)
+        if w is None or "a" not in w:
+            self.flash("That wall is gone — right-click it again")
+            return
+        L = math.dist(w["a"][:2], w["b"][:2])
+        kind = "void" if str(spec).startswith("void") else spec
+        width = {"door": 0.9144, "window": 1.2192}.get(
+            kind, 1.2192 if "_win" in spec else 0.9144)
+        ops = sorted([(float(o["pos"]) - float(o["w"]) / 2,
+                       float(o["pos"]) + float(o["w"]) / 2)
+                      for o in doc["arch"]["openings"] if o["wall"] == wid])
+        want = getattr(self, "_ctx_pos", {}).get(wid)
+        free, s0 = [], 0.15
+        for a_, b_ in ops + [(L - 0.15, L)]:
+            if a_ - s0 > 0.0:
+                free.append((s0, a_ - 0.1))
+            s0 = max(s0, b_ + 0.1)
+        free = [f_ for f_ in free if f_[1] - f_[0] >= min(width, 0.6)]
+        if not free:
+            self.flash("No room left in that wall for another opening")
+            return
+        pos = None
+        if want is not None:
+            for f0, f1 in free:
+                if f0 <= want <= f1:
+                    width = min(width, f1 - f0)
+                    pos = min(max(want, f0 + width / 2), f1 - width / 2)
+                    break
+        if pos is None:
+            f0, f1 = max(free, key=lambda f_: f_[1] - f_[0])
+            width = min(width, f1 - f0)
+            pos = (f0 + f1) / 2
+        rec = {"kind": kind, "wall": wid, "pos": round(pos, 4),
+               "w": round(width, 4), "swing": "left"}
+        rec = PJ.opening_as(rec, kind, st)
+        rec["w"] = round(width, 4)
+        self._spec_apply(rec, spec, st)
+        why = PJ.check_record(doc, "opening", rec)
+        if why:
+            self.flash(f"Not added — {why}")
+            return
+        doc["arch"]["openings"] += M.new_openings(doc["arch"]["openings"],
+                                                  [rec])
+        lab = dict([("door", "Door"), ("window", "Window")] +
+                   self.VOIDS).get(spec, spec)
+        self.commit(doc, f"{lab} added in {w.get('name') or 'the wall'} "
+                         f"({width:.2f} m)")
 
     def _col_rebar(self, on):
         doc = self.doc()
@@ -5575,6 +5741,7 @@ class Panel(QWidget):
             return Point(m[0] - (b[1] - a[1]) / L * sg * d,
                          m[1] + (b[0] - a[0]) / L * sg * d)
         faces = {}
+        clips = {}
 
         def parapet_(w):           # 3.64.26: a roof / terrace parapet
             return float(w.get("base", 0.0) or 0.0) > 0.3 or str(
@@ -5615,19 +5782,25 @@ class Panel(QWidget):
                         w.get("type") == "curtain" or \
                         math.dist(w["a"], w["b"]) < 0.2:
                     continue
-                d = float(w["t"]) / 2 + 0.15
                 for lid, pg in polys:
                     if w["level"] != lid:
                         continue
-                    for s_, g_ in (("l", 1), ("r", -1)):
-                        if pg.contains(probe(w, g_, d)):
-                            faces[(w["id"], s_)] = w
+                    for s_ in ("l", "r"):     # 3.64.34: the room's stretch
+                        cl_ = FN.room_clip(w, s_, pg)
+                        if cl_:
+                            faces.setdefault((w["id"], s_), w)
+                            clips.setdefault((w["id"], s_), []).extend(cl_)
         for (wid, s_), w in faces.items():
+            cl_ = sorted(clips.get((wid, s_)) or [])
+            L_ = math.dist(w["a"], w["b"])
+            if cl_ and len(cl_) == 1 and cl_[0][0] <= 0.05 and \
+                    cl_[0][1] >= L_ - 0.05:
+                cl_ = None
             if mat is None and band is None:
                 w["fin"] = [f_ for f_ in w.get("fin") or []
                             if f_.get("side") != s_]
             else:
-                FN.set_band(w, s_, mat, band)
+                FN.set_band(w, s_, mat, band, cl_ or None)
         if mat:
             self.commit(doc, f"{FN.label(mat)} — {FN.BAND[band][0]}: "
                              f"{len(faces)} wall face(s)")
@@ -5667,16 +5840,17 @@ class Panel(QWidget):
             L2 = math.dist(a2, b2)
             if L2 < 0.2:
                 continue
-            m2 = ((a2[0] + b2[0]) / 2, (a2[1] + b2[1]) / 2)
-            d2 = float(o["t"]) / 2 + 0.15
-            for s2, g2 in (("l", 1), ("r", -1)):
-                q = Point(m2[0] - (b2[1] - a2[1]) / L2 * g2 * d2,
-                          m2[1] + (b2[0] - a2[0]) / L2 * g2 * d2)
-                if not poly.contains(q):
+            from . import finishes as FN_
+            for s2 in ("l", "r"):    # 3.64.34: the room's stretch only
+                cl_ = FN_.room_clip(o, s2, room["poly"])
+                if not cl_:
                     continue
-                o["fin"] = [f_ for f_ in o.get("fin") or []
-                            if f_.get("side") != s2] + \
-                    [dict(f_, side=s2) for f_ in src]
+                if len(cl_) == 1 and cl_[0][0] <= 0.05 and \
+                        cl_[0][1] >= L2 - 0.05:
+                    cl_ = None
+                for f_ in src:
+                    FN_.set_band(o, s2, f_["mat"], f_.get("band") or "full",
+                                 cl_)
                 n += 1
         self.commit(doc, f"{room.get('name') or 'Room'}: the finishes on "
                          f"{n} wall face(s)")
@@ -7528,44 +7702,72 @@ class Panel(QWidget):
         self.commit(doc, msg)
 
     def _paint_menu(self, menu) -> None:
-        """«Paint ▸ External elevations / Inside of the rooms ▸ band ▸ group
-        ▸ finish» — every outside wall face of the building (parapets'
-        too), or every room-side face (the rooms selected, else all)."""
+        """3.64.34 (his ask): two plain entries —
+        «Room inside — paint / wallpaper» (the selected rooms, else every
+        room; the faces into the room only, stopping at its corners) and
+        «External elevations — paint / cladding» (every face looking out
+        of its floor, top to bottom as built)."""
         from . import finishes as FN
         try:
             rids_ = [i for k, i in self._selected_all() if k == "room"]
         except Exception:  # noqa: BLE001
             rids_ = []
-        m_ = menu.addMenu("CAD2IngeTrazo · Paint / wall finish")
-        for where, lab in (("out", "External elevations (all outside "
-                            "wall faces)"),
-                           ("in", f"Inside of the {len(rids_)} selected "
-                            "room(s)" if rids_ else
-                            "Inside of all rooms (every room-side face)")):
-            mw = m_.addMenu(lab)
+        allg = FN.groups_menu()
+        if not allg:
+            return
 
-            def _fill(mb, band, where=where):
-                if mb.actions():
-                    return
-                for title, ks in FN.groups_menu():
-                    mg = mb.addMenu(title)
+        def pick(titles):
+            first = [g for g in allg if g[0] in titles]
+            rest = [g for g in allg if g[0] not in titles]
+            return first, rest
+
+        def fill(mb, where, band, titles):
+            if mb.actions():
+                return
+            first, rest = pick(titles)
+            for title, ks in first:
+                mg = mb.addMenu(title)
+                for k_, lab_ in ks:
+                    mg.addAction(lab_, lambda k=k_, b_=band, w_=where:
+                                 self._paint_faces(w_, k, b_, rids_))
+            if rest:
+                mo = mb.addMenu("Other finishes")
+                for title, ks in rest:
+                    mg = mo.addMenu(title)
                     for k_, lab_ in ks:
                         mg.addAction(lab_, lambda k=k_, b_=band, w_=where:
                                      self._paint_faces(w_, k, b_, rids_))
-            for band, blab, _z0, _z1 in FN.BANDS:
-                mb = mw.addMenu(blab)
-                mb.aboutToShow.connect(lambda mb=mb, b_=band, w_=where:
-                                       _fill(mb, b_, w_))
-            mw.addSeparator()
-            mw.addAction("Take the finishes off them",
-                         lambda w_=where: self._paint_faces(w_, None, None,
-                                                            rids_))
+        who = (f"the {len(rids_)} selected room(s)" if rids_
+               else "every room")
+        mi = menu.addMenu(f"CAD2IngeTrazo · Room inside — paint / wallpaper "
+                          f"({who})")
+        for band, blab, _z0, _z1 in FN.BANDS:
+            mb = mi.addMenu(blab)
+            mb.aboutToShow.connect(lambda mb=mb, b_=band: fill(
+                mb, "in", b_, ("Plaster & paint", "Wallpaper")))
+        mi.addSeparator()
+        mi.addAction("Take the finishes off the room walls",
+                     lambda: self._paint_faces("in", None, None, rids_))
+        me = menu.addMenu("CAD2IngeTrazo · External elevations — paint / "
+                          "cladding")
+        mb = me.addMenu("Whole elevation (outside faces, top to bottom)")
+        mb.aboutToShow.connect(lambda mb=mb: fill(
+            mb, "out", "elev", ("Plaster & paint", "Stone & brick")))
+        for band in ("dado", "skirt"):
+            mb2 = me.addMenu({"dado": "Lower part — dado (0 to 4'-0\")",
+                              "skirt": "Plinth band (4\")"}[band])
+            mb2.aboutToShow.connect(lambda mb=mb2, b_=band: fill(
+                mb, "out", b_, ("Stone & brick", "Plaster & paint")))
+        me.addSeparator()
+        me.addAction("Take the finishes off the elevations",
+                     lambda: self._paint_faces("out", None, None, rids_))
 
     def _paint_faces(self, where, mat, band, rids=None) -> None:
-        """3.64.33: ``where`` "out": every wall face looking out of its
-        floor's footprint (the elevations, the parapets' outer faces);
-        "in": every face looking into it (into the rooms ``rids`` when
-        given). A finish ``mat`` on ``band`` — or the finishes off."""
+        """3.64.34: ``where`` "out": every wall face looking out of its
+        floor's footprint (the elevations, parapets' outer faces); "in":
+        every face looking into a room (the rooms ``rids`` when given) —
+        each room's own stretch of the face (clip), so a wall running past
+        two rooms takes each room's finish only where it bounds it."""
         from shapely.geometry import Point
 
         from . import finishes as FN
@@ -7574,16 +7776,48 @@ class Panel(QWidget):
         doc = self.doc()
         arch = doc["arch"]
         feet, rpolys = {}, {}
-        if where == "in" and rids:
-            for lv in arch["levels"]:
-                for r in spaces.of_level(arch, lv["id"]):
+        indoor = {}
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        lids_ = [lv["id"] for lv in arch["levels"]]
+
+        def _cover(lid):
+            """the slabs over level ``lid`` (the floor above, its roof)"""
+            i_ = lids_.index(lid)
+            up_ = lids_[i_ + 1] if i_ + 1 < len(lids_) else None
+            gs_ = []
+            for e_ in arch["structure"]:
+                if e_["type"] != "slab" or not e_.get("corners"):
+                    continue
+                if e_["level"] == up_ or (e_["level"] == lid and (
+                        e_.get("roof") or e_.get("auto_roof"))):
+                    try:
+                        gs_.append(_Pg(e_["corners"]).buffer(0))
+                    except Exception:  # noqa: BLE001
+                        pass
+            return _uu(gs_) if gs_ else None
+        for lv in arch["levels"]:
+            cov_ = _cover(lv["id"])
+            for r in spaces.of_level(arch, lv["id"]):
+                if r.get("area", 0) < 1.0:
+                    continue
+                nm_ = str(r.get("name") or "")
+                open_ = cov_ is None or r["poly"].intersection(
+                    cov_).area < 0.5 * r["poly"].area   # open to the sky
+                if not open_ and not (PJ.OUTDOOR_WORDS.search(nm_) or re.search(
+                        r"TERRACE|BALCON|PORCH|VERAND|SIT\s*OUT|\bROOF\b|"
+                        r"PORTICO", nm_, re.I)):
+                    indoor.setdefault(lv["id"], []).append(r["poly"])
+                elif not rids:
+                    continue          # a terrace / porch: not a room inside
+                if rids:
                     try:
                         key = PJ.room_key(lv["id"], r)
                     except Exception:  # noqa: BLE001
                         key = None
-                    if key in rids or r.get("id") in rids:
-                        rpolys.setdefault(lv["id"], []).append(
-                            r["poly"].buffer(0.05))
+                    if key not in rids and r.get("id") not in rids:
+                        continue
+                rpolys.setdefault(lv["id"], []).append(r["poly"])
         n = 0
         for w in arch["walls"]:
             if "a" not in w or w.get("rail") or \
@@ -7594,40 +7828,50 @@ class Panel(QWidget):
             if L < 0.2:
                 continue
             lid = w["level"]
-            if lid not in feet:
-                try:
-                    feet[lid] = ST_._wall_footprint(arch, lid)
-                except Exception:  # noqa: BLE001
-                    feet[lid] = None
-            foot = feet[lid]
-            if foot is None:
-                continue
             parapet = float(w.get("base", 0.0) or 0.0) > 0.3 or str(
                 w.get("name", "")).startswith(PJ.PARAPET_NAMES +
                                               PJ.AUTO_RAIL)
+            if where == "in":
+                if parapet:
+                    continue
+                for s_ in ("l", "r"):
+                    clip = []
+                    for pg in rpolys.get(lid) or []:
+                        clip += FN.room_clip(w, s_, pg)
+                    if not clip:
+                        continue
+                    clip.sort()
+                    whole = len(clip) == 1 and clip[0][0] <= 0.05 and \
+                        clip[0][1] >= L - 0.05
+                    if mat is None:
+                        w["fin"] = [f_ for f_ in w.get("fin") or []
+                                    if f_.get("side") != s_ or
+                                    f_.get("band") == "elev"]
+                    else:
+                        FN.set_band(w, s_, mat, band,
+                                    None if whole else clip)
+                    n += 1
+                continue
+            # an elevation's face: no room (indoors) behind it — a face
+            # onto a terrace, a porch, a lobby or the garden is outside
+            ins_ = indoor.get(lid) or []
             m = ((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
             d = float(w["t"]) / 2 + 0.3
             for s_, g_ in (("l", 1), ("r", -1)):
                 q = Point(m[0] - (w["b"][1] - w["a"][1]) / L * g_ * d,
                           m[1] + (w["b"][0] - w["a"][0]) / L * g_ * d)
-                inside = foot.contains(q)
-                if where == "out":
-                    if inside:
-                        continue
-                else:
-                    if not inside or parapet:
-                        continue
-                    if rids and not any(pg.contains(q) for pg in
-                                        rpolys.get(lid) or []):
-                        continue
+                if any(pg.contains(q) for pg in ins_):
+                    continue
                 if mat is None:
                     w["fin"] = [f_ for f_ in w.get("fin") or []
                                 if f_.get("side") != s_]
                 else:
                     FN.set_band(w, s_, mat, band)
                 n += 1
-        what = "external elevations" if where == "out" else (
-            "the rooms selected" if rids else "the rooms' insides")
+            if not w.get("fin"):
+                w.pop("fin", None)
+        what = "the external elevations" if where == "out" else (
+            "the selected rooms" if rids else "the rooms' insides")
         if mat:
             self.commit(doc, f"{FN.label(mat)} — {FN.BAND[band][0]} on "
                              f"{what}: {n} wall face(s)")
@@ -7783,8 +8027,8 @@ class Panel(QWidget):
             mc = sub.addMenu("Convert to door / window…" if nop_ == 1 else
                              f"Convert the {nop_} openings to door / "
                              "window…")
-            for k_, lab_ in (("door", "Door"), ("window", "Window"),
-                             ("void", "Plain opening (no door / window)")):
+            for k_, lab_ in [("door", "Door"), ("window", "Window")] + \
+                    self.VOIDS:
                 a_ = mc.addAction(lab_, lambda k_=k_: self._convert_opening(
                     sel, k_))
                 a_.setCheckable(True)
@@ -7856,6 +8100,40 @@ class Panel(QWidget):
                 or [sel[1]]
             n = len(walls)
             what = f"{n} walls" if n > 1 else "the wall"
+            try:            # 3.64.34: a new door / window / opening in it
+                if rec.get("kind", "line") == "line" and \
+                        rec.get("type") != "curtain":
+                    self._ctx_pos = {}
+                    try:            # where on the wall it was right-clicked
+                        from PySide6.QtGui import QCursor
+                        pq_ = self.vp.mapFromGlobal(QCursor.pos())
+                        o_, d_ = self.vp._pixel_to_ray(float(pq_.x()),
+                                                       float(pq_.y()))
+                        a2_, b2_ = rec["a"], rec["b"]
+                        L2_ = math.dist(a2_[:2], b2_[:2])
+                        ux_, uy_ = (b2_[0] - a2_[0]) / L2_, \
+                            (b2_[1] - a2_[1]) / L2_
+                        nx_, ny_ = -uy_, ux_
+                        o_ = [o_.x(), o_.y(), o_.z()]
+                        d_ = [d_.x(), d_.y(), d_.z()]
+                        dn_ = d_[0] * nx_ + d_[1] * ny_
+                        if abs(dn_) > 1e-6:
+                            t_ = ((a2_[0] - o_[0]) * nx_ +
+                                  (a2_[1] - o_[1]) * ny_) / dn_
+                            px_, py_ = o_[0] + d_[0] * t_, o_[1] + d_[1] * t_
+                            s_ = (px_ - a2_[0]) * ux_ + (py_ - a2_[1]) * uy_
+                            if 0.0 < s_ < L2_:
+                                self._ctx_pos[sel[1]] = s_
+                    except Exception:  # noqa: BLE001
+                        pass
+                    am_ = sub.addMenu("Add a door / window / opening in "
+                                      "this wall")
+                    for k_, lab_ in [("door", "Door"), ("window", "Window")
+                                     ] + self.VOIDS:
+                        am_.addAction(lab_, lambda k_=k_, w_=sel[1]:
+                                      self._add_in_wall(w_, k_))
+            except Exception:  # noqa: BLE001
+                log_error("panel.context_menu add opening")
             try:            # 3.63: its doors / windows converted from here
                 ops_ = [o for o in doc["arch"]["openings"]
                         if o.get("wall") == sel[1]]
@@ -7865,9 +8143,8 @@ class Panel(QWidget):
                         lab0_ = f"{o_.get('name') or o_['kind']} " \
                             f"({o_['kind']}, {float(o_['w']):.2f} m)"
                         m1_ = om_.addMenu(lab0_)
-                        for k_, lab_ in (("door", "Door"),
-                                         ("window", "Window"),
-                                         ("void", "Plain opening")):
+                        for k_, lab_ in [("door", "Door"),
+                                         ("window", "Window")] + self.VOIDS:
                             a_ = m1_.addAction(
                                 lab_, lambda k_=k_, i_=o_["id"]:
                                 self._convert_opening(("opening", i_), k_,

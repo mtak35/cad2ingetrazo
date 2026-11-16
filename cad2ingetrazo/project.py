@@ -6588,6 +6588,85 @@ def ensure_roof(doc) -> str | None:
     return top if made else None
 
 
+def annex_roofs(doc) -> int:
+    """3.64.34 (his ask): a lower part of a floor that the floor above does
+    not cover (a guard room, an annex, a servant quarter) gets its own roof
+    slab, made again each time (named «Annex roof n»): its outline the outer
+    faces of its walls, the rooms under it — not an open court. Their
+    number."""
+    from shapely.geometry import Polygon as _Pg
+    from shapely.ops import unary_union as _uu
+    arch = doc["arch"]
+    st = doc["settings"]
+    arch["structure"] = [e for e in arch["structure"]
+                         if not (e["type"] == "slab" and e.get("auto_annex"))]
+    if not st.get("annex_roof", True):
+        return 0
+    ids = [lv["id"] for lv in arch["levels"]]
+    t = float(st.get("roof_t") or st.get("slab_t", 0.1016) or 0.1016)
+    made = []
+    for i, lid in enumerate(ids[:-1]):
+        up = ids[i + 1]
+        cov = []
+        for e in arch["structure"]:
+            if e["type"] != "slab" or not e.get("corners"):
+                continue
+            if e["level"] == up or (e["level"] == lid and (
+                    e.get("roof") or e.get("auto_roof"))):
+                try:
+                    cov.append(_Pg(e["corners"]).buffer(0))
+                except Exception:  # noqa: BLE001
+                    pass
+        if not cov:
+            continue                 # nothing above yet: not an annex
+        cover = _uu(cov)
+        walls = [w for w in arch["walls"] if w["level"] == lid
+                 and not w.get("rail") and W.why_not(w) is None
+                 and w.get("height", "level") == "level"]
+        if not walls:
+            continue
+        try:            # every block the walls close (the annex's own too)
+            fp_ = S._wall_footprint(arch, lid)
+            if fp_ is not None:        # (its corners closed: no notches)
+                fp_ = fp_.buffer(0.2, join_style=2).buffer(
+                    -0.2, join_style=2).simplify(0.01)
+            loops = [list(g.exterior.coords)[:-1]
+                     for g in getattr(fp_, "geoms", [fp_])
+                     if g.geom_type == "Polygon"] if fp_ is not None else []
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            rooms_ = [r["poly"] for r in spaces.of_level(arch, lid)
+                      if not OUTDOOR_WORDS.search(str(r.get("name") or ""))]
+            ru = _uu(rooms_) if rooms_ else None
+        except Exception:  # noqa: BLE001
+            ru = None
+        for o in loops:
+            try:
+                rest = _Pg(o).buffer(0).difference(cover.buffer(0.02))
+                rest = rest.buffer(-0.1, join_style=2).buffer(
+                    0.1, join_style=2)
+            except Exception:  # noqa: BLE001
+                continue
+            for g in getattr(rest, "geoms", [rest]):
+                if g.geom_type != "Polygon" or g.area < 2.0 or \
+                        g.buffer(-0.3).is_empty:
+                    continue
+                if ru is None or g.intersection(ru).area < 0.5 * g.area:
+                    continue             # an open court, not a room
+                made.append({"type": "slab", "level": lid, "roof": True,
+                             "auto_annex": True, "holes": [], "t": t,
+                             "offset": 0.0, "corners": [
+                                 [round(x, 4), round(y, 4)] for x, y in
+                                 S._ccw(list(g.exterior.coords)[:-1])]})
+    if made:
+        new = M.new_elements(arch["structure"], made)
+        for k, e in enumerate(new, 1):
+            e["name"] = f"Annex roof {k}"
+        arch["structure"] += new
+    return len(made)
+
+
 AUTO_RAIL = ("Roof edge railing", "Opening railing", "Roof edge parapet")
 
 
@@ -11453,7 +11532,27 @@ def entrance_zone(doc, lid):
     # the outside part the top step reaches, as far as the steps run (a
     # porch beside the lobby keeps its own lower level)
     hit = [p_.intersection(reach) for p_ in pcs if p_.intersects(tops)]
-    return unary_union(hit + [s_["zone"] for s_ in sets])
+    out = unary_union(hit + [s_["zone"] for s_ in sets])
+    try:            # 3.64.34: an L / U of steps closes its landing round —
+        # not out past the steps' corner along the porch beside it
+        rect = []
+        for s_ in sets:
+            st_ = unary_union([pg for pg, _r in s_.get("strips") or []])
+            if st_.is_empty:
+                continue
+            mr_ = st_.minimum_rotated_rectangle
+            xs_ = list(mr_.exterior.coords)
+            e1 = math.dist(xs_[0], xs_[1])
+            e2 = math.dist(xs_[1], xs_[2])
+            if min(e1, e2) > 1.2:           # a corner: two ways
+                rect.append(mr_.buffer(0.05, join_style=2))
+            else:
+                rect.append(None)
+        if rect and all(r_ is not None for r_ in rect):
+            out = out.intersection(unary_union(rect))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def _steps_apart(pcs) -> list:
@@ -11574,6 +11673,39 @@ def platform_parts(doc) -> dict:
     except Exception:  # noqa: BLE001
         peds = Polygon()
     ped_done = False
+    # 3.64.34 (his ask): the car porch at the landscape's level (its floor
+    # finish on top level with the lawn), not the floor's less the drop
+    porch_pts = []
+    if st.get("porch_at_ground", True):
+        porch_pts = [Point(t_["x"], t_["y"]) for t_ in doc.get("texts") or []
+                     if t_.get("level") == lid and re.search(
+                         r"CAR\s*PORCH|GARAGE|PARKING|\bPORCH\b",
+                         str(t_.get("text", "")).upper())
+                     and not re.search(r"ENTRANCE|LOBBY", str(
+                         t_.get("text", "")).upper())]
+    lh_ = float(st.get("landscape_h", 0.1524) or 0.0)
+    porch_zone = None
+    if porch_pts:
+        try:          # the cars' bays (the plan's), round them: the porch
+            pk_ = ((doc.get("parking") or {}).get(lid) or {})
+            rs_ = []
+            for c_ in (pk_.get("stalls") or []) + (pk_.get("cars") or []):
+                cx_, cy_ = c_["c"]
+                a_ = math.radians(float(c_.get("ang", 0.0)))
+                L2, W2 = float(c_["L"]) / 2, float(c_["W"]) / 2
+                ca, sa = math.cos(a_), math.sin(a_)
+                rs_.append(Polygon([(cx_ + ca * x_ - sa * y_,
+                                     cy_ + sa * x_ + ca * y_)
+                                    for x_, y_ in ((-L2, -W2), (L2, -W2),
+                                                   (L2, W2), (-L2, W2))]))
+            if rs_:
+                porch_zone = unary_union(rs_).buffer(
+                    0.9, join_style=2).minimum_rotated_rectangle
+            else:
+                porch_zone = unary_union([p_.buffer(3.0, join_style=2)
+                                          for p_ in porch_pts])
+        except Exception:  # noqa: BLE001
+            porch_zone = None
     for part, dz in ((inner, 0.0), (outer, drop)):
         if dz is drop and part is outer and not peds.is_empty:
             # (a porch the doors open onto is a floor, whatever its shape)
@@ -11618,14 +11750,38 @@ def platform_parts(doc) -> dict:
             if dz and zone is not None and pg.intersects(zone):
                 parts_ = [(pg.intersection(zone), 0.0),
                           (pg.difference(zone), dz)]
+            if part is outer and porch_zone is not None:   # 3.64.34: porch
+                p2_ = []
+                if zone is not None and len(parts_) == 1 and \
+                        pg.intersects(zone):       # the lobby kept apart
+                    parts_ = [(pg.intersection(zone), dz),
+                              (pg.difference(zone), dz)]
+                for q_, dz_ in parts_:
+                    for qq_ in getattr(q_, "geoms", [q_]):
+                        # the whole paved piece the cars stand on (out to
+                        # the lobby's steps): at the lawn's level
+                        if not (zone is not None and qq_.within(
+                                zone.buffer(0.05))) and \
+                                qq_.intersects(porch_zone) and \
+                                qq_.intersection(porch_zone).area > 4.0:
+                            p2_.append((qq_, "porch"))
+                        else:
+                            p2_.append((qq_, dz_))
+                parts_ = p2_
             for q_, dz_ in parts_:
                 for qg in getattr(q_, "geoms", [q_]):
                     if qg.geom_type != "Polygon" or qg.area < 0.05:
                         continue
                     c = qg.representative_point()
-                    top = elev + floor_offset_at(doc, lid, (c.x, c.y)) - dz_
+                    if dz_ == "porch":                    # the car porch
+                        top = zg + max(lh_ - fin, 0.02)
+                    else:
+                        top = elev + floor_offset_at(doc, lid,
+                                                     (c.x, c.y)) - dz_
                     if top - zg > 0.01:
                         out["pieces"].append((qg, top))
+                        if dz_ == "porch":
+                            out.setdefault("porch", []).append(qg)
     # the entrance steps' landing (the porch their top step bounds) where
     # no slab reaches it: the platform carried out to it, at the floor's
     # finished level (the porch floor the main door opens onto)
@@ -11653,6 +11809,9 @@ def platform_parts(doc) -> dict:
                 top = elev + floor_offset_at(doc, lid, (c.x, c.y)) + fin
                 if top - zg > 0.01:
                     out["pieces"].append((qg, top))
+                    # 3.64.34: the entrance floor gets its finish (the
+                    # steps' marble), not bare concrete
+                    out.setdefault("landings", []).append(qg)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.platform_parts landing")
@@ -11712,6 +11871,13 @@ def platform_parts(doc) -> dict:
                         (x1_ - dv_[0] * 0.4, y1_ - dv_[1] * 0.4),
                         (x0_ - dv_[0] * 0.4, y0_ - dv_[1] * 0.4)]))
                 fu_ = unary_union(feet_) if feet_ else None
+                # 3.64.34: steps landing on the car porch (at the lawn's
+                # level): down to it, the porch not raised to them
+                pz_ = [q_ for q_ in out.get("porch") or []
+                       if fu_ is not None and q_.intersects(fu_)]
+                if pz_:
+                    foot_z = zg + max(lh_ - fin, 0.02) + fin
+                    fu_ = fu_.difference(unary_union(pz_).buffer(0.01))
                 if fu_ is not None and foot_z > zg + 0.01:
                     for k2_, (pg2_, t2_) in enumerate(out["pieces"]):
                         if pg2_.intersects(fu_) and t2_ < surf - 0.05 and \
@@ -12004,7 +12170,10 @@ def _walkways(doc, out, lid, zg, fin, G, WP, R):
     wt = walk_top(doc)
     # the verandahs (the platform's parts outside the rooms): never under
     # the walkways
+    porch_ = out.get("porch") or []
     for k, (pg, top) in enumerate(out["pieces"]):
+        if any(pg is q_ for q_ in porch_):
+            continue              # 3.64.34: the car porch at the lawn's
         c = pg.representative_point()
         if not R.buffer(0.01).contains(c) and top + fin < wt - 0.005:
             out["pieces"][k] = (pg, wt - fin)
@@ -12104,12 +12273,26 @@ def _platform_groups(doc):
                        "level": lid}}
         return g
     faces = []
+    st = doc["settings"]
+    lands_ = parts.get("landings") or []
+    try:
+        from . import stairs as ST0_
+        lcol_ = ST0_.fin_colour(st.get("entrance_fin") or
+                                st.get("stair_fin", "marble"))
+    except Exception:  # noqa: BLE001
+        lcol_ = None
+    lcol_ = tuple(lcol_) if lcol_ else (0.92, 0.91, 0.88)
+    lft_ = 0.02
     for pg, top in parts["pieces"]:
+        if any(pg is q_ for q_ in lands_) and top - zg > lft_ + 0.01:
+            faces += _prism(pg, zg, top - lft_)       # 3.64.34: its finish
+            faces += [dict(fc, color=lcol_) for fc in
+                      _prism(pg, top - lft_, top)]
+            continue
         faces += _prism(pg, zg, top)
     if faces:
         out.append(grp("Foundation platform (fill, PCC)", faces,
                        "platform", 0))
-    st = doc["settings"]
     fin_on = st.get("finish_on", True)
     ft = float(st.get("stair_fin_t", 0.02) or 0.0) if fin_on else 0.0
     frt = float(st.get("stair_fin_rt", 0.015) or 0.0) if fin_on else 0.0
@@ -12302,7 +12485,9 @@ def _site_groups(doc):
     from .engine import plotgeo
     corners = plotgeo.clean(plot["corners"])
     z0 = plot_top(doc)
-    parts, sym = SITE_.build(corners, doc["site"], z0)
+    site_ = dict(doc["site"], _front=[      # 3.64.34: the plot's front
+        i for i, f_ in enumerate(plot.get("sb_front") or []) if f_])
+    parts, sym = SITE_.build(corners, site_, z0)
     low = arch["levels"][0]["id"]
     out = []
     blocks = {}                               # gate index -> [groups]
@@ -13707,6 +13892,11 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.ensure_roof")
+    try:                       # 3.64.34: the annexes' roofs
+        annex_roofs(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.annex_roofs")
     try:
         apply_man_shafts(doc)
     except Exception:  # noqa: BLE001

@@ -19,7 +19,11 @@ import math
 SITE_DEFAULT = {"wall": False, "h": 2.10, "t": 0.23, "pillars": True,
                 "style": "coping", "finish": "plaster", "pier_gap": 3.0,
                 "solid_h": 0.9,
-                "pillar": 0.35, "gates": []}
+                "pillar": 0.35, "gates": [],
+                # 3.64.34: the front its own design; the sides / back on or
+                # off ("" front style: as the rest)
+                "front_style": "", "front_finish": "", "sides_on": True,
+                "back_on": True}
 GRID_DEFAULT = {"on": False, "source": "columns", "xs": [], "ys": [],
                 "lines": [],
                 "ox": 0.0, "oy": 0.0, "ext": 2.2}
@@ -35,7 +39,16 @@ WALL_STYLES = [("plain", "Plain (plastered)"),
                ("coping", "With coping (cap on top)"),
                ("plinth", "Plinth band + coping"),
                ("grille", "Low wall + MS grille over it"),
-               ("piers", "Piers along it + coping")]
+               ("piers", "Piers along it + coping"),
+               # 3.64.34: more front designs
+               ("stone_piers", "Stone-clad piers + plastered panels"),
+               ("wood_screen", "Low wall + timber slat screen"),
+               ("glass_top", "Low wall + glass panels between posts"),
+               ("pipe", "Low wall + horizontal steel pipes"),
+               ("ss_top", "Low wall + stainless steel balusters")]
+#: the designs that are a low wall with something over it: its kind
+OVER_KINDS = {"grille": "ms_grill", "wood_screen": "wood",
+              "glass_top": "glass_post", "pipe": "pipe", "ss_top": "ss_bars"}
 WALL_FINISHES = {"plaster": ("Plaster, cream", (0.86, 0.83, 0.76)),
                  "white": ("Plaster, white", (0.93, 0.93, 0.91)),
                  "brick": ("Exposed brick", (0.66, 0.36, 0.27)),
@@ -58,9 +71,13 @@ def load_site(raw) -> dict:
                     out[k] = round(min(max(float(raw[k]), lo), hi), 3)
             except (TypeError, ValueError):
                 pass
-        for k in ("wall", "pillars"):
+        for k in ("wall", "pillars", "sides_on", "back_on"):
             if k in raw:
                 out[k] = bool(raw[k])
+        if raw.get("front_style") in dict(WALL_STYLES):
+            out["front_style"] = raw["front_style"]
+        if raw.get("front_finish") in WALL_FINISHES:
+            out["front_finish"] = raw["front_finish"]
         for k, lo, hi in (("h", 0.3, 6.0), ("t", 0.05, 1.0),
                           ("pillar", 0.1, 1.5)):
             try:
@@ -73,7 +90,9 @@ def load_site(raw) -> dict:
                     "side": int(g["side"]), "pos": float(g["pos"]),
                     "w": min(max(float(g["w"]), 0.6), 15.0),
                     "kind": g.get("kind") if g.get("kind") in
-                    ("single", "double", "sliding") else "double"})
+                    ("single", "double", "sliding") else "double",
+                    **({"cols": True} if g.get("cols") else {}),
+                    **({"side_gate": True} if g.get("side_gate") else {})})
             except (KeyError, TypeError, ValueError):
                 continue
     return out
@@ -163,66 +182,129 @@ def build(corners, site, z0):
             quad, frame = gate_box(corners, g, t)
             gates.append((g, frame))
             ring = ring.difference(Polygon(quad))
-    style = site.get("style", "plain")
-    col = WALL_FINISHES.get(site.get("finish", "plaster"),
-                            ("", WALL_COLOR))[1]
-    cap_t = 0.075 if style != "plain" else 0.0
-    solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
-                      if style == "grille" else h - cap_t)
-    pieces = list(getattr(ring, "geoms", [ring]))
+    # 3.64.34: the sides by group — the front (its gates / the plot's
+    # front) with its own design, the sides and the back (each on or off)
+    n_ = len(corners)
+    front = set(site.get("_front") or []) | {g["side"] for g in
+                                             site["gates"]}
+    if not front:
+        front = {0}
+    back = set()
+    try:
+        fm = [((corners[i][0] + corners[(i + 1) % n_][0]) / 2,
+               (corners[i][1] + corners[(i + 1) % n_][1]) / 2)
+              for i in sorted(front)]
+        far = max((i for i in range(n_) if i not in front),
+                  key=lambda i: min(math.dist(
+                      ((corners[i][0] + corners[(i + 1) % n_][0]) / 2,
+                       (corners[i][1] + corners[(i + 1) % n_][1]) / 2), m)
+                      for m in fm))
+        back = {far}
+    except ValueError:
+        back = set()
+    sides = set(range(n_)) - front - back
+    on = set(front)
+    if site.get("sides_on", True):
+        on |= sides
+    if site.get("back_on", True):
+        on |= back
 
-    def piece_of(pc):
-        return {"outer": _ccw(list(pc.exterior.coords)[:-1]),
-                "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
-                          for r in pc.interiors]}
-    for k, pc in enumerate(pieces):
-        if pc.is_empty or pc.area < 1e-4:
+    def strip(ids):
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+        if not ids:
+            return None
+        return unary_union([LineString([corners[i], corners[(i + 1) % n_]])
+                            .buffer(t + 0.02, cap_style=3) for i in ids])
+    groups_ = []
+    fst = site.get("front_style") or site.get("style", "plain")
+    ffi = site.get("front_finish") or site.get("finish", "plaster")
+    groups_.append((sorted(front), fst, ffi))
+    rest_ = sorted(on - front)
+    if rest_:
+        groups_.append((rest_, site.get("style", "plain"),
+                        site.get("finish", "plaster")))
+    done_ = None
+    pier_sides = {}
+    k_all = 0
+    for ids_, style, fin_ in groups_:
+        band_ = strip(ids_)
+        if band_ is None:
             continue
-        zb = z0
-        if style == "plinth":            # a darker band at the foot
-            out.append((f"Boundary wall {k + 1} plinth", "boundary",
-                        W.solid(piece_of(pc.buffer(0.015, join_style=2)
-                                         .intersection(plot)),
-                                z0, z0 + 0.45), BAND_COLOR))
-            zb = z0 + 0.45
-        out.append((f"Boundary wall {k + 1}", "boundary",
-                    W.solid(piece_of(pc), zb, solid_top), col))
-        if cap_t:                         # the coping, over both faces
-            cp = pc.buffer(0.04, join_style=2)
-            out.append((f"Boundary wall {k + 1} coping", "boundary",
-                        W.solid(piece_of(cp), solid_top, solid_top + cap_t),
-                        CAP_COLOR))
-    if style == "grille":                 # MS bars over the low wall
-        from .engine import railings as RL
-        mid = plot.buffer(-t / 2, join_style=2)
-        line = mid.exterior if not mid.is_empty else None
-        if line is not None:
-            cut = line
-            for g, (p0, p1, u, nv) in gates:
-                cut = cut.difference(Polygon(gate_box(corners, g, t)[0])
-                                     .buffer(0.05))
-            for k, ln in enumerate(getattr(cut, "geoms", [cut])):
-                cs = list(ln.coords)
-                if len(cs) < 2:
-                    continue
-                path = [(q[0], q[1], solid_top + cap_t) for q in cs]
-                fs = RL.faces(path, max(h - (solid_top + cap_t - z0), 0.3),
-                              "ms_grill", t=0.03)
-                out.append((f"Boundary grille {k + 1}", "boundary", fs,
-                            GATE_COLOR))
-    if site.get("pillars"):
+        ring_g = ring.intersection(band_)
+        if done_ is not None:
+            ring_g = ring_g.difference(done_)
+        done_ = band_ if done_ is None else done_.union(band_)
+        col = WALL_FINISHES.get(fin_, ("", WALL_COLOR))[1]
+        over = OVER_KINDS.get(style)
+        cap_t = 0.075 if style != "plain" else 0.0
+        solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
+                          if over else h - cap_t)
+        for pc in getattr(ring_g, "geoms", [ring_g]):
+            if pc.is_empty or pc.geom_type != "Polygon" or pc.area < 1e-4:
+                continue
+            k_all += 1
+            zb = z0
+            if style == "plinth":            # a darker band at the foot
+                out.append((f"Boundary wall {k_all} plinth", "boundary",
+                            W.solid(_piece(pc.buffer(0.015, join_style=2)
+                                           .intersection(plot)),
+                                    z0, z0 + 0.45), BAND_COLOR))
+                zb = z0 + 0.45
+            out.append((f"Boundary wall {k_all}", "boundary",
+                        W.solid(_piece(pc), zb, solid_top), col))
+            if cap_t:                         # the coping, over both faces
+                cp = pc.buffer(0.04, join_style=2)
+                out.append((f"Boundary wall {k_all} coping", "boundary",
+                            W.solid(_piece(cp), solid_top,
+                                    solid_top + cap_t), CAP_COLOR))
+        if over:                     # bars / slats / glass over the wall
+            from .engine import railings as RL
+            mid = plot.buffer(-t / 2, join_style=2)
+            line = mid.exterior.intersection(band_) if not mid.is_empty \
+                else None
+            if line is not None and not line.is_empty:
+                cut = line
+                for g, (p0, p1, u, nv) in gates:
+                    cut = cut.difference(Polygon(gate_box(corners, g, t)[0])
+                                         .buffer(0.05))
+                try:
+                    from shapely.ops import linemerge
+                    cut = linemerge(cut) if cut.geom_type == \
+                        "MultiLineString" else cut
+                except Exception:  # noqa: BLE001
+                    pass
+                for k, ln in enumerate(getattr(cut, "geoms", [cut])):
+                    if ln.geom_type != "LineString":
+                        continue
+                    cs = list(ln.coords)
+                    if len(cs) < 2:
+                        continue
+                    path = [(q[0], q[1], solid_top + cap_t) for q in cs]
+                    fs = RL.faces(path, max(h - (solid_top + cap_t - z0),
+                                            0.3), over,
+                                  t=0.03 if over == "ms_grill" else 0.05)
+                    out.append((f"Boundary {dict(WALL_STYLES)[style]} "
+                                f"{k + 1}", "boundary", fs, GATE_COLOR))
+        if style in ("piers", "stone_piers"):
+            for i in ids_:
+                pier_sides[i] = style
+    pil_ = bool(site.get("pillars"))
+    if pil_ or any(g.get("cols") for g in site["gates"]):
         s = float(site["pillar"])
         spots = []
         n = len(corners)
-        for i in range(n):                       # the corners, inside
+        for i in range(n if pil_ else 0):       # the corners, inside
+            if i not in on and (i - 1) % n not in on:
+                continue                 # no wall either side of it
             b, c = corners[i], corners[(i + 1) % n]
             p = inner.exterior.interpolate(inner.exterior.project(
                 _pt(b))) if not inner.is_empty else None
             mid = ((b[0] + p.x) / 2, (b[1] + p.y) / 2) if p else b
             spots.append((mid, _angle(b, c)))
-        if style == "piers":            # piers along the sides too
+        if pier_sides and pil_:         # piers along the sides too
             gap_ = float(site.get("pier_gap", 3.0))
-            for i in range(n):
+            for i in sorted(pier_sides):
                 b, c = corners[i], corners[(i + 1) % n]
                 L = math.dist(b, c)
                 k_ = int(L // gap_)
@@ -240,6 +322,8 @@ def build(corners, site, z0):
         n_c = len(spots)
         gi_of = {}
         for gi_, (g, (p0, p1, u, nv)) in enumerate(gates):   # the jambs
+            if not pil_ and not g.get("cols"):
+                continue
             for p in (p0, p1):
                 q = (p[0] + nv[0] * t / 2 - u[0] * s / 2 * (1 if p is p0
                                                             else -1),
@@ -251,7 +335,8 @@ def build(corners, site, z0):
             sq = _square(c, s, ang)
             fs_ = W.solid({"outer": _ccw(sq), "holes": []}, z0,
                           z0 + h + 0.15)
-            if style != "plain":          # a cap on each pillar
+            if site.get("style", "plain") != "plain" or \
+                    site.get("front_style"):   # a cap on each pillar
                 fs_ = fs_ + W.solid({"outer": _ccw(_square(c, s + 0.08,
                                                            ang)),
                                      "holes": []}, z0 + h + 0.15,
@@ -260,7 +345,9 @@ def build(corners, site, z0):
                 out.append((f"Gate pillar {k - n_c + 1}", "gatepillar", fs_,
                             PILLAR_COLOR, gi_of[k]))
             else:
-                out.append((f"Pillar {k + 1}", "pillar", fs_, PILLAR_COLOR))
+                out.append((f"Pillar {k + 1}", "pillar", fs_,
+                            WALL_FINISHES["stone"][1] if "stone_piers" in
+                            pier_sides.values() else PILLAR_COLOR))
     for k, (g, (p0, p1, u, nv)) in enumerate(gates):
         wv = math.dist(p0, p1)
         mid_d = t / 2
@@ -302,6 +389,12 @@ def build(corners, site, z0):
                         sym.append((prev, p))
                     prev = p
     return out, sym
+
+
+def _piece(pc):
+    return {"outer": _ccw(list(pc.exterior.coords)[:-1]),
+            "holes": [list(reversed(_ccw(list(r.coords)[:-1])))
+                      for r in pc.interiors]}
 
 
 def _pt(p):

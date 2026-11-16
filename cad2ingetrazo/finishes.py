@@ -26,8 +26,12 @@ BANDS = [("full", "Floor to ceiling", 0.0, 0.0),
          ("upper", "Above the dado (4'-0\" to ceiling)", 1.2192, 0.0),
          ("skirt", "Skirting — 4\" high", 0.0, 0.1016)]
 BAND = {k: (lab, z0, z1) for k, lab, z0, z1 in BANDS}
+#: 3.64.33: an elevation's paint — the outside face top to bottom, as the
+#: wall is built (over the slab's edge, up to the slab's top)
+BAND["elev"] = ("Whole outside face (elevation)", 0.0, 0.0)
 #: how far each band stands off the wall's face (tile + bed)
-THICK = {"full": 0.012, "dado": 0.015, "upper": 0.010, "skirt": 0.020}
+THICK = {"full": 0.012, "dado": 0.015, "upper": 0.010, "skirt": 0.020,
+         "elev": 0.012}
 
 #: the finish menu: (title, [material keys]) — the keys that exist only
 GROUPS = [
@@ -157,17 +161,94 @@ def label(key) -> str:
     return it["name"] if it else str(key or "").split("/")[-1]
 
 
-def set_band(w, side, mat, band) -> None:
+_ZR = {}
+
+
+def wall_z_range(arch, w):
+    """3.64.33: (bottom, top) of wall ``w`` as the model builds it — down
+    over its slab's edge, up to the slab over it (an outside wall)."""
+    from .engine import structure as S
+    key = id(arch)
+    if key not in _ZR or _ZR[key][0] is not arch:
+        _ZR.clear()
+        from .engine import model as M_
+        _ZR[key] = (arch, S.levels_info(arch, M_.elevations), {})
+    _a, info, per = _ZR[key]
+    lid = w["level"]
+    li = info[lid]
+    if lid not in per:
+        try:
+            ec = S._edge_ctx(arch, lid)
+        except Exception:  # noqa: BLE001
+            ec = None
+        per[lid] = (S._above_bottoms(arch, info, lid), ec)
+    above_, ec = per[lid]
+    pw = S._plastered(w, S.PLASTER(arch))
+    b = li["z0"] + float(w.get("base", 0.0) or 0.0) - S._down(arch, pw, li)
+    b -= S._down_over_edge(pw, ec)
+    top = S._wall_top(pw, li["under"], above_) \
+        if w.get("height", "level") == "level" \
+        else li["z0"] + float(w["height"])
+    return b, top
+
+
+def _overlap(c1, c2) -> bool:
+    """Two clips (None: the whole face) share a stretch of the face."""
+    if not c1 or not c2:
+        return True
+    return any(min(a1, b1) - max(a0, b0) > 0.02
+               for a0, a1 in c1 for b0, b1 in c2)
+
+
+def room_clip(w, side, poly, min_len=0.15) -> list:
+    """3.64.34: the stretch(es) [[s0, s1]] (along the wall from «a») of
+    face ``side`` of wall ``w`` that look into room ``poly`` — a finish
+    given to a room stops at the room's corners, as its floor does."""
+    from shapely.geometry import LineString
+    a, b = w["a"], w["b"]
+    L = math.dist(a[:2], b[:2])
+    if L < 1e-6:
+        return []
+    u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+    sg = 1 if side == "l" else -1
+    off = float(w.get("t", 0.2)) / 2 + 0.05
+    nx, ny = -u[1] * sg * off, u[0] * sg * off
+    ln = LineString([(a[0] + nx, a[1] + ny), (b[0] + nx, b[1] + ny)])
+    g = ln.intersection(poly.buffer(0.03))
+    out = []
+    for part in getattr(g, "geoms", [g]):
+        if part.is_empty or part.geom_type != "LineString" or \
+                part.length < min_len:
+            continue
+        ss = [(x - a[0] - nx) * u[0] + (y - a[1] - ny) * u[1]
+              for x, y in part.coords]
+        out.append([round(max(min(ss), -0.5), 4),
+                    round(min(max(ss), L + 0.5), 4)])
+    out.sort()
+    merged = []
+    for c in out:
+        if merged and c[0] <= merged[-1][1] + 0.05:
+            merged[-1][1] = max(merged[-1][1], c[1])
+        else:
+            merged.append(c)
+    return merged
+
+
+def set_band(w, side, mat, band, clip=None) -> None:
     """The finish ``mat`` on the wall's face ``side`` over ``band``; a
     floor-to-ceiling finish takes the place of the dado / upper ones (and
     they of it); ``mat`` None takes the band off (band None: the face's
-    every finish)."""
+    every finish). ``clip`` (3.64.34): only on these stretches of the face
+    (a room's) — another room's finish on the same face stays."""
     fins = [f for f in w.get("fin") or [] if f.get("side") != side or (
-        band is not None and not _clash(f.get("band"), band))]
+        band is not None and not _clash(f.get("band"), band)) or
+        not _overlap(f.get("clip"), clip)]
     if mat and band in BAND:
         _l, z0, z1 = BAND[band]
-        fins.append({"side": side, "mat": mat, "band": band,
-                     "z0": z0, "z1": z1})
+        e_ = {"side": side, "mat": mat, "band": band, "z0": z0, "z1": z1}
+        if clip:
+            e_["clip"] = [list(c) for c in clip]
+        fins.append(e_)
     if fins:
         w["fin"] = fins
     else:
@@ -175,7 +256,7 @@ def set_band(w, side, mat, band) -> None:
 
 
 def _clash(a, b) -> bool:
-    if a == b:
+    if a == b or "elev" in (a, b):
         return True
     return {a, b} in ({"full", "dado"}, {"full", "upper"})
 
@@ -308,6 +389,7 @@ def groups(doc) -> list:
     from .engine import walls as W
     from .host import KEY, level_layer
     arch = doc["arch"]
+    _ZR.clear()
     ws = [w for w in arch["walls"] if w.get("fin")
           and w.get("kind", "line") == "line" and "a" in w
           and not w.get("rail") and w.get("type") != "curtain"]
@@ -356,21 +438,37 @@ def groups(doc) -> list:
             else:      # (3.64.26: «height» is the wall's top over the
                 ztop = z_of[lid] + float(w["height"])   # floor, as built)
             zbase_ = z_of[lid] + float(w.get("base", 0.0) or 0.0)
+            zr_ = None
+            if any(f_.get("band") == "elev" for f_ in w["fin"]):
+                try:                  # the wall as built, bottom to top
+                    zr_ = wall_z_range(arch, w)
+                except Exception:  # noqa: BLE001
+                    zr_ = None
             for f_ in w["fin"]:
                 sg = 1 if f_.get("side") == "l" else -1
                 s0, s1 = _face_span(w, sg, L, plans_of[lid])
                 side_pt = (mid[0] + n[0] * sg * (t / 2 + 0.3),
                            mid[1] + n[1] * sg * (t / 2 + 0.3))
                 za = max(zf + float(f_.get("z0") or 0.0), zbase_)
-                if float(f_.get("z1") or 0.0) > 0:
+                if f_.get("band") == "elev":
+                    za, zb = zr_ if zr_ else (zbase_, ztop)
+                elif float(f_.get("z1") or 0.0) > 0:
                     zb = zf + float(f_["z1"])
                 else:
                     ch = WC._ceiling_h(doc, lid, rooms, side_pt)
                     zb = z_of[lid] + fin + ch if ch else ztop
-                zb = min(zb, ztop)
+                if f_.get("band") != "elev":
+                    zb = min(zb, ztop)
                 if zb - za < 0.03:
                     continue
                 R = box(s0, za, s1, zb)
+                if f_.get("clip"):          # 3.64.34: a room's stretch
+                    from shapely.ops import unary_union as _uu
+                    R = R.intersection(_uu([box(float(c0), za - 1,
+                                                float(c1), zb + 1)
+                                            for c0, c1 in f_["clip"]]))
+                    if R.is_empty or R.area < 1e-4:
+                        continue
                 for o in ops_of.get(w["id"], []):
                     p_ = float(o.get("pos", 0.0))
                     ww = float(o.get("w", 0.9))

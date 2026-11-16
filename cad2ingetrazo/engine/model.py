@@ -330,10 +330,15 @@ def _walls(raw, level_ids: set) -> list[dict]:
                                       20.0),
                             "z1": min(max(float(f_.get("z1") or 0.0), 0.0),
                                       20.0)})
+                        cl_ = [[float(c[0]), float(c[1])] for c in
+                               f_.get("clip") or [] if len(c) == 2 and
+                               float(c[1]) > float(c[0])]
+                        if cl_:              # 3.64.34: a room's stretch
+                            fins[-1]["clip"] = cl_[:8]
                 except (TypeError, ValueError, AttributeError):
                     continue
             if fins:
-                rec["fin"] = fins[:12]
+                rec["fin"] = fins[:24]
             if w.get("jog"):
                 rec["jog"] = True
             if w.get("cwin"):                # a leg of a corner window
@@ -535,7 +540,7 @@ def _structure(raw, level_ids: set) -> list[dict]:
                 # a part sunk / raised by hand; the roof slab on the top
                 # floor; a slab not built (the ground floor's, slabs on top)
                 for k_ in ("user", "roof", "skip", "top", "grade", "auto_roof",
-                           "note"):
+                           "note", "auto_annex"):
                     if e.get(k_):
                         rec[k_] = True
                 if e.get("room"):          # sunk / raised for this room

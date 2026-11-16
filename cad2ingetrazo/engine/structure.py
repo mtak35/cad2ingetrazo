@@ -2129,7 +2129,7 @@ def _wall_footprint(doc, lid):
         return None
     body = unary_union([LineString([tuple(w["a"][:2]), tuple(w["b"][:2])])
                         .buffer(float(w.get("t", 0.2)) / 2 + 0.03,
-                                cap_style=2, join_style=2) for w in ws])
+                                cap_style=3, join_style=2) for w in ws])
     return unary_union([Polygon(g.exterior) for g in
                         getattr(body, "geoms", [body])
                         if g.geom_type == "Polygon"])
