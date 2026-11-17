@@ -687,3 +687,203 @@ def effective_side(ref) -> str:
         except Exception:  # noqa: BLE001
             _EFF[key] = "auto"
     return _EFF[key]
+
+
+# ---- 3.64.50: the sides named on the model --------------------------------------
+MARK_NAME = "C2I side mark"
+
+
+def side_roles(doc) -> dict:
+    """{side: "Front" / "Back" / "Left" / "Right"} — as seen standing at the
+    front (where the cars drive in; else the main door's side)."""
+    from . import elevread as EV
+    try:
+        from . import lookstyle as LS
+        fr, _w, _o = LS.front_side(doc)
+    except Exception:  # noqa: BLE001
+        fr = None
+    out = {}
+    if fr is None:
+        return out
+    # standing in front, looking at the house (along -fr): the right hand
+    rt = (-fr[1], fr[0])
+    for D, (f, _r) in EV.DIRS.items():
+        o = (-f[0], -f[1])                    # the side's outward way
+        d = o[0] * fr[0] + o[1] * fr[1]
+        if d > 0.7:
+            out[D] = "Front"
+        elif d < -0.7:
+            out[D] = "Back"
+        else:
+            out[D] = "Right" if o[0] * rt[0] + o[1] * rt[1] > 0 else "Left"
+    return out
+
+
+def side_label(doc, D) -> str:
+    r = side_roles(doc).get(D)
+    base = SIDE_LABELS.get(D, D)
+    return f"{base} ({r})" if r else base
+
+
+def _mark_img(text):
+    """The words of a side mark, with an arrow pointing at the house."""
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPen,
+                               QPolygonF)
+    W, H = 1400, 360
+    img = QImage(W, H, QImage.Format_ARGB32)
+    img.fill(QColor(0, 0, 0, 0))
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setBrush(QColor(255, 255, 255, 235))
+    p.setPen(QPen(QColor(200, 40, 40), 10))
+    p.drawRoundedRect(QRectF(10, 10, W - 20, H - 20), 40, 40)
+    # the arrow: pointing up the picture (towards the house)
+    p.setBrush(QColor(200, 40, 40))
+    p.setPen(Qt.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(110, 60), QPointF(190, 200),
+                             QPointF(140, 200), QPointF(140, 300),
+                             QPointF(80, 300), QPointF(80, 200),
+                             QPointF(30, 200)]))
+    from PySide6.QtGui import QFontMetrics
+    f = QFont("Arial", 1)
+    f.setBold(True)
+    px = 130
+    while px > 40:                      # the words fit the box
+        f.setPixelSize(px)
+        if QFontMetrics(f).horizontalAdvance(text) <= W - 270:
+            break
+        px -= 6
+    p.setFont(f)
+    p.setPen(QColor(30, 30, 30))
+    p.drawText(QRectF(220, 20, W - 240, H - 40),
+               Qt.AlignVCenter | Qt.AlignLeft, text)
+    p.end()
+    return img
+
+
+def hide_marks(scene) -> int:
+    planes = getattr(scene, "image_planes", None)
+    if planes is None:
+        return 0
+    keep = [p for p in planes if not str(getattr(p, "name", "") or "")
+            .startswith(MARK_NAME)]
+    n = len(planes) - len(keep)
+    planes[:] = keep
+    if n:
+        scene.version += 1
+    return n
+
+
+def show_marks(doc, scene, gap=2.0) -> int:
+    """Each side named on the ground beside it — «NORTH ELEVATION ·
+    FRONT» with an arrow at the house — readable standing on that side
+    (and in the plan). How many."""
+    from PySide6.QtGui import QVector3D
+    from . import elevread as EV
+    hide_marks(scene)
+    try:
+        from core.image_plane import ImagePlane
+        from core.layers import Layer
+    except Exception:  # noqa: BLE001
+        return 0
+    arch = doc["arch"]
+    xs = [v for w in arch["walls"] if "a" in w
+          for v in (w["a"][0], w["b"][0])]
+    ys = [v for w in arch["walls"] if "a" in w
+          for v in (w["a"][1], w["b"][1])]
+    if not xs:
+        return 0
+    from . import project as PJ
+    el = PJ.elevations(arch)
+    g = next((i for i, lv in enumerate(arch["levels"])
+              if lv["kind"] == "ground"), 0)
+    z = min(el[g], 0.0) + 0.03
+    roles = side_roles(doc)
+    n = 0
+    for D, (f, r) in EV.DIRS.items():
+        us = [x * r[0] + y * r[1] for x in (min(xs), max(xs))
+              for y in (min(ys), max(ys))]
+        ds = [x * f[0] + y * f[1] for x in (min(xs), max(xs))
+              for y in (min(ys), max(ys))]
+        uc = (min(us) + max(us)) / 2
+        dfront = min(ds) - gap               # out from the house that way
+        text = f"{D.upper()} ELEVATION" + (f" · {roles[D].upper()}"
+                                           if D in roles else "")
+        img = _mark_img(text)
+        Wm = min(9.0, max(4.5, (max(us) - min(us)) * 0.6))
+        Hm = Wm * img.height() / img.width()
+        # bottom-left corner: on the far edge (away from the house),
+        # the picture's «up» towards the house
+        u0 = uc - Wm / 2
+        d0 = dfront - Hm
+        org = QVector3D(u0 * r[0] + d0 * f[0], u0 * r[1] + d0 * f[1], z)
+        uu = QVector3D(r[0] * Wm, r[1] * Wm, 0.0)
+        vv = QVector3D(f[0] * Hm, f[1] * Hm, 0.0)
+        path = _cached_png(img, "c2i_mark_" + D)
+        im = ImagePlane(path, org, uu, vv, aspect=Hm / Wm,
+                        name=f"{MARK_NAME} — {D}", opacity=1.0,
+                        layer=REF_LAYER, locked=True)
+        if scene.layer(REF_LAYER) is None:
+            scene.layers.append(Layer(REF_LAYER))
+        scene.image_planes.append(im)
+        n += 1
+    if n:
+        scene.version += 1
+    return n
+
+
+def side_map(doc, size=270):
+    """A small plan of the ground floor with its four sides named (for
+    the window): QImage."""
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, \
+        QPolygonF
+    img = QImage(size, size, QImage.Format_ARGB32)
+    img.fill(QColor(255, 255, 255))
+    arch = doc["arch"]
+    g = next((lv["id"] for lv in arch["levels"] if lv["kind"] == "ground"),
+             None)
+    try:
+        from . import lookstyle as LS
+        poly, _ws = LS._outline(arch, g)
+    except Exception:  # noqa: BLE001
+        poly = None
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    f = QFont("Arial", 1)
+    f.setPixelSize(13)
+    f.setBold(True)
+    p.setFont(f)
+    if poly is not None:
+        if poly.geom_type != "Polygon":
+            poly = max(poly.geoms, key=lambda q: q.area)
+        x0, y0, x1, y1 = poly.bounds
+        k = (size - 150) / max(x1 - x0, y1 - y0, 1e-6)
+        ox = (size - (x1 - x0) * k) / 2
+        oy = (size - (y1 - y0) * k) / 2
+
+        def T(x, y):
+            return QPointF(ox + (x - x0) * k, size - (oy + (y - y0) * k))
+        p.setBrush(QColor(225, 220, 205))
+        p.setPen(QPen(QColor(60, 60, 60), 2))
+        p.drawPolygon(QPolygonF([T(x, y) for x, y in
+                                 list(poly.exterior.coords)[:-1]]))
+    roles = side_roles(doc)
+    p.setPen(QColor(190, 30, 30))
+    for D, (rect, al) in {
+            "north": (QRectF(0, 4, size, 40), Qt.AlignHCenter | Qt.AlignTop),
+            "south": (QRectF(0, size - 44, size, 40),
+                      Qt.AlignHCenter | Qt.AlignBottom),
+            "west": (QRectF(2, 0, 90, size), Qt.AlignVCenter | Qt.AlignLeft),
+            "east": (QRectF(size - 92, 0, 90, size),
+                     Qt.AlignVCenter | Qt.AlignRight)}.items():
+        t = D.upper() + ("\n" + roles[D] if D in roles else "")
+        p.drawText(rect, al | Qt.TextWordWrap, t)
+    # the north arrow
+    p.setBrush(QColor(30, 30, 30))
+    p.setPen(Qt.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(size - 22, 8), QPointF(size - 30, 30),
+                             QPointF(size - 14, 30)]))
+    p.end()
+    return img

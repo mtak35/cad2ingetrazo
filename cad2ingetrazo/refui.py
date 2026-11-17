@@ -84,7 +84,24 @@ class RefElevDialog(QDialog):
         for c_, w_ in ((1, 200), (2, 60), (3, 60), (4, 60)):
             hh.setSectionResizeMode(c_, QHeaderView.Interactive)
             hh.resizeSection(c_, w_)
-        lay.addWidget(self.tab, 1)
+        mid = QHBoxLayout()
+        mid.addWidget(self.tab, 1)
+        side = QVBoxLayout()
+        self.map = QLabel()
+        self.map.setToolTip("The ground floor seen from above: which side "
+                            "is north, south, east, west — and the front "
+                            "(where the cars drive in)")
+        side.addWidget(self.map)
+        self.marks = QCheckBox("Name the sides on the model")
+        self.marks.setToolTip("«NORTH ELEVATION · FRONT» … laid on the "
+                              "ground beside each side, with an arrow at "
+                              "the house (in 3D and in the plans)")
+        self.marks.setChecked(True)
+        self.marks.toggled.connect(lambda _c=False: self._marks())
+        side.addWidget(self.marks)
+        side.addStretch(1)
+        mid.addLayout(side)
+        lay.addLayout(mid, 1)
         row = QHBoxLayout()
         for text, fn, tip in (
                 ("Add…", self._add, "Pick elevation pictures, PDFs or "
@@ -106,8 +123,10 @@ class RefElevDialog(QDialog):
         close.clicked.connect(self.close)
         row.addWidget(close)
         lay.addLayout(row)
-        self.resize(980, 380)
+        self.resize(1250, 520)
         self._load()
+        self._refresh_map()
+        self._marks()
 
     # ---- rows ----------------------------------------------------------------
     def _doc(self):
@@ -127,7 +146,7 @@ class RefElevDialog(QDialog):
         self.tab.setCellWidget(i, 0, lab)
         cb = QComboBox()
         for k in RE.SIDES:
-            cb.addItem(RE.SIDE_LABELS[k], k)
+            cb.addItem(RE.side_label(self._doc(), k), k)
         cb.setCurrentIndex(max(RE.SIDES.index(r.get("side", "auto"))
                                if r.get("side") in RE.SIDES else 0, 0))
         self.tab.setCellWidget(i, 1, cb)
@@ -168,6 +187,24 @@ class RefElevDialog(QDialog):
         doc["ref_elev"] = self._rows()
         self.panel.commit(doc, msg)
         return doc
+
+    def _refresh_map(self):
+        try:
+            self.map.setPixmap(QPixmap.fromImage(RE.side_map(self._doc())))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("refui.side_map")
+
+    def _marks(self):
+        try:
+            if self.marks.isChecked():
+                RE.show_marks(self._doc(), self.panel.vp.scene)
+            else:
+                RE.hide_marks(self.panel.vp.scene)
+            self.panel.vp.update()
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("refui.marks")
 
     # ---- actions -------------------------------------------------------------
     def _add(self):
