@@ -533,6 +533,11 @@ def follow_all(doc, panel=None) -> list:
     sides left."""
     out = []
     refs = [r for r in doc.get("ref_elev") or [] if r.get("follow", True)]
+    if not any(r.get("side") == "perspective" for r in refs):
+        doc["look"] = {}             # 3.64.46: no perspective: no look
+        doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]
+                                    if not (e["type"] == "roof"
+                                            and e.get("look"))]
     refs.sort(key=lambda r: r.get("side") == "auto")
     used = set()
     for r in refs:

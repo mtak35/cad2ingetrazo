@@ -213,6 +213,11 @@ class RefElevDialog(QDialog):
                         else "")
                      + (f" · {rep['rails']} iron railings" if rep.get("rails")
                         else "")
+                     + (f" · {rep['columns']} classical columns"
+                        if rep.get("columns") else "")
+                     + (" · cornices, floor bands, quoins, window "
+                        "surrounds, lanterns" if rep.get("look") ==
+                        "mediterranean" else "")
                      + f" · colours: {rep.get('colours', '')}")
             elif rep.get("skipped"):
                 m = "Shown only — open it with «Open picture»"

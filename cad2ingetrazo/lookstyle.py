@@ -229,7 +229,16 @@ def apply(doc, ref, src=None) -> dict:
     mats["wall"] = {"name": "Plaster, as the picture", "color": col(pal["wall"])}
     if style == "modern":
         rep["colours"] = "walls"
+        doc["look"] = {"style": "modern"}
         return rep
+    # 3.64.46: the trims' colours (made at every rebuild: ornament.py)
+    stone = tuple(max(0.0, c * 0.80) for c in pal["wall"])
+    trim = tuple(0.5 * c + 0.5 * 0.97 for c in pal["trim"])  # lighter
+    doc["look"] = {"style": "mediterranean", "trim": col(trim),
+                   "stone": col(stone), "metal": col(pal["metal"]),
+                   "wall": col(pal["wall"])}
+    from . import ornament as OR_
+    rep["columns"] = OR_.classical_columns(doc)
     mats["roof"] = {"name": "Clay tiles, as the picture",
                     "color": col(pal["roof"])}
     mats["site"] = {"name": "Boundary wall, as the picture",

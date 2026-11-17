@@ -215,7 +215,7 @@ def empty() -> dict:
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
-            "fixture_lib": {}, "escalators": [], "ref_elev": []}
+            "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}}
 
 
 def load(raw) -> dict:
@@ -262,6 +262,10 @@ def load(raw) -> dict:
                       if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
                        if k in ids and isinstance(v, list)}
+    # 3.64.46: a perspective's look (its trims made at every rebuild)
+    lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
+    doc["look"] = {k: v for k, v in lk_.items()
+                   if k in ("style", "trim", "stone", "metal", "wall")}
     # 3.64.44: the reference elevations / perspectives (image, PDF, CAD)
     doc["ref_elev"] = []
     for r_ in raw.get("ref_elev") or []:
@@ -14742,6 +14746,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.domes groups")
+    try:                       # 3.64.46: a perspective's classical trims
+        from . import ornament as OR_
+        new_groups += OR_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ornament groups")
     try:
         from . import lowparts as LP
         new_groups += LP.groups(doc)
