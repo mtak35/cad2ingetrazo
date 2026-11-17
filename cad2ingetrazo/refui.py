@@ -64,7 +64,11 @@ class RefElevDialog(QDialog):
             "every opening's sill and head as drawn — and again at every "
             "«Update from CAD», so all sides keep to them. <b>Show</b> stands "
             "each elevation beside its side of the model, half see-through, "
-            "to compare. Perspectives open in their own window.<br>"
+            "to compare. A <b>perspective</b> (a photo or render of the "
+            "house wanted) gives its <b>look</b>: Follow takes its colours "
+            "and its style — clay-tile hip roofs, arched windows, iron "
+            "railings when it shows them — onto the model, sizes kept; "
+            "«Open picture» keeps it open beside the model.<br>"
             "Clean elevations work best (lines on white, no shadows). "
             "Set the side when «Auto» picks the wrong one; set the storey "
             "heights in «Floor height» — a picture has no level notes.")
@@ -198,6 +202,18 @@ class RefElevDialog(QDialog):
         for name, rep in out:
             if rep.get("error"):
                 m = "Not followed — " + rep["error"]
+            elif rep.get("look"):
+                from .lookstyle import STYLES
+                m = (f"Look applied: {STYLES.get(rep['look'], rep['look'])}"
+                     + (f" · {rep['roofs']} tiled hip roofs"
+                        if rep.get("roofs") else "")
+                     + (f" · {rep['arched']} arched" if rep.get("arched")
+                        else "")
+                     + (f" · {rep['grilles']} grilles" if rep.get("grilles")
+                        else "")
+                     + (f" · {rep['rails']} iron railings" if rep.get("rails")
+                        else "")
+                     + f" · colours: {rep.get('colours', '')}")
             elif rep.get("skipped"):
                 m = "Shown only — open it with «Open picture»"
             else:

@@ -28,7 +28,7 @@ import os
 SIDES = ("auto", "north", "south", "east", "west", "perspective")
 SIDE_LABELS = {"auto": "Auto (the side it matches)", "north": "North side",
                "south": "South side", "east": "East side",
-               "west": "West side", "perspective": "Perspective (view only)"}
+               "west": "West side", "perspective": "Perspective (its look)"}
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 REF_LAYER = "C2I reference elevations"
 REF_NAME = "C2I reference"
@@ -431,8 +431,9 @@ def follow(doc, ref, src=None, used=()) -> dict:
     from . import elevread as EV
     from . import project as PJ
     arch = doc["arch"]
-    if ref.get("side") == "perspective":
-        return {"skipped": "perspective (shown only)"}
+    if ref.get("side") == "perspective":       # 3.64.45: its look
+        from . import lookstyle
+        return lookstyle.apply(doc, ref, src)
     if src is None:
         src = source(ref["file"], int(ref.get("page", 1) or 1))
     sides = [ref["side"]] if ref.get("side") in EV.DIRS else \
