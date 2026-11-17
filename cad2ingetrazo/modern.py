@@ -332,18 +332,20 @@ def tops(doc) -> list:
     return out
 
 
-def _fascias(doc, dark, light, slab_edges) -> list:
-    """The fascias (dark, at each volume's top) and slab edges (light):
-    one mitred solid per height, so their corners join."""
+def ring_parts(doc, d_roof, d_edge=EDGE_D, roof_only=False,
+               slab_edges=True) -> list:
+    """The bands round the volumes' tops, d out from their faces: one
+    mitred plan shape per volume and height, so the corners join —
+    [(shape, z_top, kind)]."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     arch, levels, el, order, g, polys = _ctx(doc)
     regs = _regions(doc)
     groups = {}
     for i, p, q, u, n, L, zt, kind in tops(doc):
-        if kind == "terrace" and not slab_edges:
+        if kind == "terrace" and (roof_only or not slab_edges):
             continue
-        d = FASCIA_D if kind == "roof" else EDGE_D
+        d = d_roof if kind == "roof" else d_edge
         R = d + 0.35        # across: the band and a margin
         E = d + 0.02         # along: just the mitred corner, no stub
         zone = Polygon([(p[0] - u[0] * E, p[1] - u[1] * E),
@@ -359,7 +361,7 @@ def _fascias(doc, dark, light, slab_edges) -> list:
     for (i, kind, zt), zones in sorted(groups.items(),
                                        key=lambda kv: -kv[0][2]):
         poly = regs[i]
-        d = FASCIA_D if kind == "roof" else EDGE_D
+        d = d_roof if kind == "roof" else d_edge
         band = poly.buffer(d, join_style=2, mitre_limit=4.0).difference(
             poly.buffer(-0.01, join_style=2))
         # what stands above it is not its top
@@ -373,8 +375,20 @@ def _fascias(doc, dark, light, slab_edges) -> list:
         if part.is_empty:
             continue
         taken[i] = part if taken.get(i) is None else taken[i].union(part)
+        out.append((part, zt, kind))
+    return out
+
+
+def _fascias(doc, dark, light, slab_edges) -> list:
+    """The fascias (dark, at each volume's top) and slab edges (light):
+    one mitred solid per height, so their corners join."""
+    look = doc.get("look") or {}
+    FD = float(look.get("fascia_d", FASCIA_D) or FASCIA_D)
+    FH = float(look.get("fascia_h", FASCIA_H) or FASCIA_H)
+    out = []
+    for part, zt, kind in ring_parts(doc, FD, slab_edges=slab_edges):
         if kind == "roof":
-            out += _solid(part, zt - FASCIA_H, zt + 0.05, dark)
+            out += _solid(part, zt - FH, zt + 0.05, dark)
         else:
             out += _solid(part, zt - EDGE_H + 0.10, zt + 0.10, light)
     return out

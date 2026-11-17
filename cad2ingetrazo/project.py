@@ -14686,10 +14686,15 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.annex_roofs")
-    if (doc.get("look") or {}).get("style") == "mediterranean":
-        try:                   # 3.64.47: the annexes under clay tiles too
+    lk_ = doc.get("look") or {}
+    if lk_.get("style") == "mediterranean" or (
+            lk_.get("roof") in ("hip", "gable") and lk_.get("annex_roof")):
+        try:                   # 3.64.47: the annexes under tiles too
             from . import lookstyle as LS_
-            LS_.annex_roofs(doc)
+            LS_.annex_roofs(doc, float(lk_.get("roof_slope", LS_.SLOPE)),
+                            float(lk_.get("roof_eave", LS_.EAVE)) * 0.75,
+                            kind=lk_.get("roof") if lk_.get("roof") in (
+                                "hip", "gable") else "hip")
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.look annex_roofs")
@@ -15722,6 +15727,13 @@ def _apply_materials(groups, mats):
             for f in g.mesh.faces:
                 c = f.attrs.get("color")
                 if c is None or t == "wall":
+                    f.attrs["color"] = tuple(m["color"][:3])
+        elif t == "roof" and m.get("color"):     # 3.64.55: the tiles' own
+            from .engine.structure import ROOF_COLOR as RC_
+            for f in g.mesh.faces:
+                c = f.attrs.get("color")
+                if c is not None and all(abs(float(c[k]) - RC_[k]) < 0.02
+                                         for k in range(3)):
                     f.attrs["color"] = tuple(m["color"][:3])
 
 

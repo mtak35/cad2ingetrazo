@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog,
 from . import lookstyle as LS
 
 ROOFS = [("asdrawn", "As drawn (flat roof, parapets)"),
-         ("hip", "Clay-tile hip roofs over every block")]
+         ("hip", "Tiled hip roofs over every block"),
+         ("gable", "Tiled gable roofs over every block (steep: Tudor, "
+          "Cape Cod)")]
 HEADS = [("asdrawn", "As drawn"), ("arch", "Arched (semicircle)"),
          ("flat", "Flat")]
 FRAMES = [("asdrawn", "As drawn"), ("upvc", "uPVC, white"),
@@ -60,10 +62,27 @@ CHECKS = [("Mouldings", [("plinth", "Stone plinth round the ground floor"),
               ("incline_panel", "Inclined cladding panel on a front corner "
                "(raked, above the roof)"),
               ("entry_clad", "Main door's bay clad full height, slab "
-               "canopy")])]
+               "canopy")]),
+          ("Style elements", [
+              ("pediment", "Classical: pediments (main door, upper "
+               "windows)"),
+              ("deco_fins", "Art Deco: vertical fins up the front, stepped "
+               "above the roof"),
+              ("deco_bands", "Art Deco: three speed bands under the roof"),
+              ("deco_crown", "Art Deco: stepped crown and sunrays over the "
+               "entrance"),
+              ("window_boxes", "Brutalist: deep concrete boxes round the "
+               "windows"),
+              ("half_timber", "Tudor: half-timbering on the upper floors"),
+              ("gf_clad", "Brick ground floor (Tudor, traditional)"),
+              ("shutters", "Cape Cod: shutters by every window"),
+              ("siding", "Cape Cod: clapboard siding"),
+              ("eave_brackets", "Italianate: paired brackets under the "
+               "eaves")])]
 COLOURS = [("wall", "Walls"), ("trim", "Mouldings / trims"),
            ("stone", "Stone (plinth, quoins, door cladding)"),
            ("clad", "Cladding panels"), ("roof_c", "Roof tiles"),
+           ("accent", "Accent (timber, shutters, Deco metal)"),
            ("metal", "Metal (railings, lanterns)")]
 
 
@@ -110,6 +129,10 @@ class ElevationDesigner(QDialog):
             self.style.addItem(label, k)
         self.style.activated.connect(lambda _i: self._load_preset())
         f0.addRow("Style", self.style)
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #8a94a3;")
+        f0.addRow(self.note)
         self.front = _combo(FRONTS)
         self.front.setToolTip("The side the front details go on (the "
                               "arcades, the porch roof, the canopy, the "
@@ -122,7 +145,7 @@ class ElevationDesigner(QDialog):
         self.roof = _combo(ROOFS)
         f1.addRow("Roof", self.roof)
         self.slope = QDoubleSpinBox()
-        self.slope.setRange(10.0, 45.0)
+        self.slope.setRange(10.0, 60.0)
         self.slope.setSuffix(" °")
         f1.addRow("Slope", self.slope)
         self.eave = QDoubleSpinBox()
@@ -132,6 +155,16 @@ class ElevationDesigner(QDialog):
         f1.addRow("Eaves out", self.eave)
         self.annex = QCheckBox("Single-storey blocks under tiles too")
         f1.addRow(self.annex)
+        self.fd = QDoubleSpinBox()
+        self.fd.setRange(0.02, 1.2)
+        self.fd.setSingleStep(0.05)
+        self.fd.setSuffix(" m")
+        f1.addRow("Flat roof's fascia out", self.fd)
+        self.fh = QDoubleSpinBox()
+        self.fh.setRange(0.08, 1.5)
+        self.fh.setSingleStep(0.05)
+        self.fh.setSuffix(" m")
+        f1.addRow("… its depth", self.fh)
         grid.addWidget(g1, 0, 1)
         # windows, railings, columns
         g2 = QGroupBox("Windows, railings, columns")
@@ -217,6 +250,9 @@ class ElevationDesigner(QDialog):
         self.slope.setValue(float(k.get("roof_slope", LS.SLOPE)))
         self.eave.setValue(float(k.get("roof_eave", LS.EAVE)))
         self.annex.setChecked(bool(k.get("annex_roof", True)))
+        self.fd.setValue(float(k.get("fascia_d", 0.30) or 0.30))
+        self.fh.setValue(float(k.get("fascia_h", 0.55) or 0.55))
+        self.note.setText(LS.STYLE_NOTES.get(k.get("style"), ""))
         _set(self.head, k.get("win_head", "arch"))
         _set(self.frame, k.get("win_frame", "upvc"))
         _set(self.wstyle, k.get("win_style", "asdrawn"))
@@ -240,6 +276,8 @@ class ElevationDesigner(QDialog):
              "roof_slope": round(self.slope.value(), 2),
              "roof_eave": round(self.eave.value(), 3),
              "annex_roof": self.annex.isChecked(),
+             "fascia_d": round(self.fd.value(), 3),
+             "fascia_h": round(self.fh.value(), 3),
              "win_head": self.head.currentData(),
              "win_frame": self.frame.currentData(),
              "win_style": self.wstyle.currentData(),

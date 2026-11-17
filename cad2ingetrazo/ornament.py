@@ -329,6 +329,12 @@ def faces(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("ornament._front_extras")
+    try:                         # 3.64.55: the styles' own elements
+        from . import stylekit as SK
+        out += SK.faces(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stylekit.faces")
     try:                         # 3.64.53: the modern massing
         from . import modern as MD
         out += MD.faces(doc)

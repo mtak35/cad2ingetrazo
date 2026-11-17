@@ -191,7 +191,7 @@ def _outline(arch, lid):
     return unary_union(shells), ws
 
 
-def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE) -> int:
+def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     """Clay-tile hip roofs over the level's blocks: its outline split in
     rectangles (in the building's own frame), one hip roof each. The
     level's own «look» roofs are made again. How many."""
@@ -218,7 +218,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE) -> int:
             dx, dy = x - c.x, y - c.y
             cs.append([round(c.x + dx * math.cos(ang) - dy * math.sin(ang), 4),
                        round(c.y + dx * math.sin(ang) + dy * math.cos(ang), 4)])
-        rec = {"type": "roof", "level": lid, "kind": "hip", "corners": cs,
+        rec = {"type": "roof", "level": lid, "kind": kind, "corners": cs,
                "slope": slope, "overhang": eave, "t": 0.15, "ridge": "long",
                "parapet": 0.0, "pt": 0.15, "tiles": True, "look": True}
         if S.why_not(rec):
@@ -250,17 +250,31 @@ KIT_DEFAULT = {
     # 3.64.53: the modern massing (modern.py)
     "slab_edges": False, "frame_box": False, "incline_panel": False,
     "entry_clad": False, "clad": [0.80, 0.80, 0.78],
+    # 3.64.55: the styles' own elements (stylekit.py)
+    "pediment": False, "deco_fins": False, "deco_bands": False,
+    "deco_crown": False, "window_boxes": False, "half_timber": False,
+    "gf_clad": False, "shutters": False, "siding": False,
+    "eave_brackets": False,
+    "fascia_d": 0.30, "fascia_h": 0.55, "accent": [0.24, 0.16, 0.10],
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
-#: the presets the designer offers
+#: the presets the designer offers (the world's major elevation styles)
 PRESETS = {
-    "mediterranean": ("Mediterranean / Spanish villa", {}),
-    "classical": ("Classical (flat roof, cornices, columns)", {
+    "classical": ("Classical (symmetry, cornices, columns, pediment)", {
         "roof": "asdrawn", "win_head": "flat", "gf_grille": False,
         "door_arch": True, "arcades": False, "rail": "asdrawn",
         "columns": "corinthian", "porch_canopy": False, "medallions": True,
+        "pediment": True,
         "wall": [0.93, 0.91, 0.86], "trim": [0.98, 0.97, 0.94],
         "stone": [0.80, 0.77, 0.71]}),
+    "neoclassical": ("Neoclassical (portico pediment, Ionic order, "
+                     "restrained)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "wood",
+        "win_style": "colonial", "rail": "ss_bars", "columns": "ionic",
+        "plinth": True, "bands": True, "cornice": True, "surrounds": True,
+        "pediment": True, "lanterns": True, "light_style": "lantern",
+        "wall": [0.96, 0.95, 0.92], "trim": [1.0, 1.0, 0.98],
+        "stone": [0.84, 0.82, 0.78], "gate_color": "black"}),
     "modern": ("Modern (clean box, glass railings, black frames)", {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
         "rail": "glass", "columns": "asdrawn", "win_style": "modern_grid",
@@ -269,6 +283,15 @@ PRESETS = {
         "wall": [0.92, 0.92, 0.90], "trim": [0.30, 0.30, 0.32],
         "stone": [0.45, 0.45, 0.47], "metal": [0.12, 0.12, 0.13],
         "gate_color": "charcoal"}),
+    "minimalist": ("Minimalist (white box, large glass, no ornament)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "rail": "glass", "columns": "square_smooth",
+        "win_style": "side_lights", "light_style": "sconce",
+        "slab_edges": True, "fascia": True, "fascia_d": 0.04,
+        "fascia_h": 0.12,
+        "wall": [0.97, 0.97, 0.96], "trim": [0.88, 0.88, 0.87],
+        "stone": [0.80, 0.80, 0.78], "metal": [0.12, 0.12, 0.13],
+        "gate_color": "charcoal"}),
     "contemporary": ("Contemporary (bands, stone plinth, glass)", {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
         "rail": "glass_post", "columns": "asdrawn", "plinth": True,
@@ -276,6 +299,79 @@ PRESETS = {
         "light_style": "sconce", "lanterns": True, "fascia": True,
         "wall": [0.86, 0.84, 0.80], "trim": [0.35, 0.33, 0.31],
         "stone": [0.50, 0.46, 0.42]}),
+    "artdeco": ("Art Deco (vertical fins, stepped crown, speed bands)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "steel",
+        "win_style": "grid", "rail": "ss_bars", "columns": "square_smooth",
+        "plinth": True, "deco_fins": True, "deco_bands": True,
+        "deco_crown": True, "lanterns": True, "light_style": "sconce",
+        "wall": [0.93, 0.89, 0.80], "trim": [0.27, 0.50, 0.48],
+        "stone": [0.72, 0.66, 0.58], "accent": [0.80, 0.64, 0.30],
+        "metal": [0.20, 0.20, 0.20], "gate_color": "black"}),
+    "brutalist": ("Brutalist (raw concrete, heavy masses, deep window "
+                  "boxes)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "rail": "solid", "columns": "square_smooth", "window_boxes": True,
+        "fascia": True, "fascia_d": 0.60, "fascia_h": 1.00,
+        "slab_edges": True,
+        "wall": [0.63, 0.63, 0.61], "trim": [0.55, 0.55, 0.53],
+        "stone": [0.50, 0.50, 0.48], "accent": [0.55, 0.55, 0.53],
+        "metal": [0.15, 0.15, 0.15], "gate_color": "charcoal"}),
+    "tudor": ("Traditional — Tudor (half-timbering, steep gables, "
+              "brick)", {
+        **OFF, "roof": "gable", "roof_slope": 40.0, "roof_eave": 0.40,
+        "annex_roof": True, "win_head": "flat", "win_frame": "wood",
+        "win_style": "diamond", "rail": "wood", "columns": "asdrawn",
+        "half_timber": True, "gf_clad": True, "lanterns": True,
+        "light_style": "lantern",
+        "wall": [0.95, 0.93, 0.86], "trim": [0.90, 0.88, 0.82],
+        "stone": [0.58, 0.28, 0.20], "roof_c": [0.30, 0.30, 0.33],
+        "accent": [0.22, 0.15, 0.10], "gate_color": "black"}),
+    "capecod": ("Traditional — Cape Cod (steep roof, shutters, "
+                "clapboard)", {
+        **OFF, "roof": "gable", "roof_slope": 35.0, "roof_eave": 0.30,
+        "annex_roof": True, "win_head": "flat", "win_frame": "upvc",
+        "win_style": "colonial", "rail": "wood", "columns": "square_smooth",
+        "shutters": True, "siding": True, "surrounds": True,
+        "lanterns": True, "light_style": "lantern",
+        "wall": [0.72, 0.77, 0.82], "trim": [0.98, 0.98, 0.97],
+        "stone": [0.70, 0.68, 0.66], "roof_c": [0.36, 0.34, 0.33],
+        "accent": [0.14, 0.20, 0.32], "gate_color": "white"}),
+    "italianate": ("Traditional — Italianate (low hip, wide eaves, "
+                   "brackets)", {
+        **OFF, "roof": "hip", "roof_slope": 18.0, "roof_eave": 0.90,
+        "annex_roof": True, "win_head": "arch", "win_frame": "wood",
+        "win_style": "double_hung", "rail": "ss_bars", "columns": "tuscan",
+        "eave_brackets": True, "surrounds": True, "quoins": True,
+        "bands": True, "plinth": True, "lanterns": True,
+        "light_style": "lantern",
+        "wall": [0.86, 0.74, 0.56], "trim": [0.95, 0.92, 0.84],
+        "stone": [0.80, 0.72, 0.60], "roof_c": [0.70, 0.38, 0.26],
+        "accent": [0.95, 0.92, 0.84], "gate_color": "black"}),
+    "mediterranean": ("Traditional — Mediterranean / Spanish villa", {}),
+}
+#: a line on what each style is, under the designer's choice
+STYLE_NOTES = {
+    "classical": "Symmetry, columns, pediments, Greek / Roman proportions.",
+    "neoclassical": "A pedimented portico on Ionic columns, plain walls, "
+                    "a cornice and floor bands.",
+    "modern": "Flat roofs, a deep dark fascia, big glass, glass railings, "
+              "a dark frame and clad corner on the front.",
+    "minimalist": "A white box: flat lines, large glass panes, nothing "
+                  "added.",
+    "contemporary": "Bands, a stone plinth, side-lit windows, glass "
+                    "railings.",
+    "artdeco": "Vertical emphasis: fins up the front, a stepped crown over "
+               "the entrance, speed bands under the roof, metal accents.",
+    "brutalist": "Raw concrete masses: a heavy fascia, deep boxed "
+                 "windows, solid parapets.",
+    "tudor": "Half-timbered upper floors on a brick ground floor, steep "
+             "slate gables, leaded (diamond) windows.",
+    "capecod": "Steep gables, clapboard siding, shutters by every window, "
+               "white trims.",
+    "italianate": "A low hip roof with wide eaves on paired brackets, "
+                  "tall arched windows with hoods, quoins.",
+    "mediterranean": "Clay-tile hip roofs, arches and arcades, wrought "
+                     "iron, mouldings, lanterns.",
 }
 SIDE_DIR = {"north": (0.0, 1.0), "south": (0.0, -1.0), "east": (1.0, 0.0),
             "west": (-1.0, 0.0)}
@@ -351,8 +447,8 @@ def apply_kit(doc, kit) -> dict:
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
     # 1. the roofs
     arch["structure"] = [e for e in arch["structure"] if not is_look_roof(e)]
-    if k["roof"] == "hip":
-        mats["roof"] = {"name": "Clay tiles, as designed",
+    if k["roof"] in ("hip", "gable"):
+        mats["roof"] = {"name": "Roof tiles, as designed",
                         "color": list(k["roof_c"])}
         rep["colours"] += ", roof tiles"
         top = ids[-1]
@@ -370,13 +466,13 @@ def apply_kit(doc, kit) -> dict:
                                            or w.get("rail")))]
             rep["parapets_off"] = n0 - len(arch["walls"])
         n = hip_roofs(doc, under, float(k["roof_slope"]),
-                      float(k["roof_eave"]))
+                      float(k["roof_eave"]), kind=k["roof"])
         if roof_lv:
             n += hip_roofs(doc, roof_lv, float(k["roof_slope"]),
-                           float(k["roof_eave"]))
+                           float(k["roof_eave"]), kind=k["roof"])
         if k["annex_roof"]:
             n += annex_roofs(doc, float(k["roof_slope"]),
-                             float(k["roof_eave"]) * 0.75)
+                             float(k["roof_eave"]) * 0.75, kind=k["roof"])
         rep["roofs"] = n
         doc["settings"]["roof_parapet"] = False
     # 2. windows and doors (outside ones)
@@ -594,7 +690,7 @@ def front_arcades(doc, outer, gid, bay=1.1, pier=0.24) -> int:
     return n
 
 
-def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75) -> int:
+def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75, kind="hip") -> int:
     """A clay-tile hip roof over each single-storey annex (a guard room,
     a porch block: a slab marked as a roof on a lower floor): over its
     rectangle. How many."""
@@ -617,7 +713,7 @@ def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75) -> int:
             continue
         cs = [[round(x, 4), round(y, 4)]
               for x, y in list(r.exterior.coords)[:4]]
-        rec = {"type": "roof", "level": e["level"], "kind": "hip",
+        rec = {"type": "roof", "level": e["level"], "kind": kind,
                "corners": cs, "slope": slope, "overhang": eave, "t": 0.15,
                "ridge": "long", "parapet": 0.0, "pt": 0.15, "tiles": True,
                "look": True, "annex": True}
