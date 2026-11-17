@@ -339,6 +339,24 @@ def bridge(arch, lid, pl, is_door, is_win, is_wall, st,
             deeper = t > float(h[0]["t"]) + 0.03
             if hit is None and deeper:
                 h[0]["t"] = round(min(t, 0.46) * 200) / 200
+            elif hit is None and 0.3 <= L <= 1.0 and \
+                    st.get("vents_over_walls", True):
+                # 3.64.40: a small window drawn over a wall the plan
+                # draws whole (a bath's / kitchen's ventilator): a high
+                # window there
+                w_, pos_, wd_ = h
+                Lw_ = math.dist(w_["a"], w_["b"])
+                wd_ = min(wd_, Lw_ - 0.1)
+                if wd_ >= 0.3:
+                    pos_ = min(max(pos_, wd_ / 2 + 0.05), Lw_ - wd_ / 2 -
+                               0.05)
+                    o_ = _op("window", w_["id"], pos_, wd_, 1, st)
+                    hv_ = float(st.get("vent_h", 0.4572))
+                    o_.update(h=hv_, sill=max(float(st.get(
+                        "vent_head", 2.1336)) - hv_, 0.6), vent=True)
+                    new_o.append(o_)
+                    rep["vents"] = rep.get("vents", 0) + 1
+                return
             elif hit is None or hit.get("kind") != "void" or hit.get("hl"):
                 return
         if h is None and kind == "window":
@@ -413,7 +431,21 @@ def bridge(arch, lid, pl, is_door, is_win, is_wall, st,
     for a, b, n in door_symbols(pl, is_door):
         t = _near_t(walls, (a, b), 0.115)
         add(a, b, "door", t, n)
-    for p, q, depth in window_bands(pl, is_win, is_line):
+    bands_ = list(window_bands(pl, is_win, is_line))
+    # 3.64.40: a glazed façade drawn as a row of window units, frame to
+    # frame, with no wall line under it (only its ends meet a wall or a
+    # column): one wall along the whole row, a window for each unit — not
+    # each unit rejected for standing between other units
+    done_ = set()
+    try:
+        done_ = _glazed_rows(bands_, walls + new_w, solids, arch, lid, st,
+                             new_w, new_o, rep)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("bridges glazed rows")
+    for i_, (p, q, depth) in enumerate(bands_):
+        if i_ in done_:
+            continue
         t = min(max(depth + 0.02, 0.115), 0.46)
         add(p, q, "window", t)
     arch["walls"] += new_w
@@ -438,6 +470,101 @@ def bridge(arch, lid, pl, is_door, is_win, is_wall, st,
         arch["structure"] += M.new_elements(arch["structure"], recs)
         rep["piers"] = len(recs)
     return rep
+
+
+def _glazed_rows(bands, walls, solids, arch, lid, st, new_w, new_o,
+                 rep) -> set:
+    """Rows of window bands on one line, end to end (gaps under ~0.35 m:
+    the mullions / frames between units), no wall under them and both ends
+    of the row at a solid: a wall along the row, each band its window.
+    The indices of the bands so placed."""
+    from shapely.geometry import LineString, Point
+
+    from .engine import model as M
+    if solids is None or len(bands) < 2:
+        return set()
+    info = []
+    for p, q, d in bands:
+        u = _u(p, q)
+        if u[0] < -1e-9 or (abs(u[0]) < 1e-9 and u[1] < 0):
+            p, q, u = q, p, (-u[0], -u[1])
+        info.append((tuple(p), tuple(q), d, u))
+    # group: same direction, same line (across offset), touching
+    par = list(range(len(info)))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    for i, (p, q, d, u) in enumerate(info):
+        n = (-u[1], u[0])
+        for j in range(i + 1, len(info)):
+            p2, q2, d2, u2 = info[j]
+            if abs(u[0] * u2[0] + u[1] * u2[1]) < 0.999:
+                continue
+            off = (p2[0] - p[0]) * n[0] + (p2[1] - p[1]) * n[1]
+            if abs(off) > 0.05:
+                continue
+            a0 = 0.0
+            a1 = (q[0] - p[0]) * u[0] + (q[1] - p[1]) * u[1]
+            b0 = (p2[0] - p[0]) * u[0] + (p2[1] - p[1]) * u[1]
+            b1 = (q2[0] - p[0]) * u[0] + (q2[1] - p[1]) * u[1]
+            gap = max(b0, a0) - min(b1, a1)          # > 0: apart
+            if gap <= 0.35:
+                par[find(i)] = find(j)
+    groups = {}
+    for i in range(len(info)):
+        groups.setdefault(find(i), []).append(i)
+    done = set()
+    hosts = [LineString([w["a"], w["b"]]).buffer(float(w["t"]) / 2 + 0.02,
+                                                   cap_style=2)
+             for w in walls if math.dist(w["a"], w["b"]) > 1e-6]
+    for idx in groups.values():
+        if len(idx) < 2:
+            continue
+        p0, _q0, _d0, u = info[idx[0]]
+        ss = []
+        for i in idx:
+            p, q, d, _u2 = info[i]
+            ss.append(((p[0] - p0[0]) * u[0] + (p[1] - p0[1]) * u[1],
+                       (q[0] - p0[0]) * u[0] + (q[1] - p0[1]) * u[1], i))
+        s0 = min(a for a, _b, _i in ss)
+        s1 = max(b for _a, b, _i in ss)
+        P0 = (p0[0] + u[0] * s0, p0[1] + u[1] * s0)
+        P1 = (p0[0] + u[0] * s1, p0[1] + u[1] * s1)
+        if s1 - s0 < 1.0:
+            continue
+        row = LineString([P0, P1])
+        # a wall the plan draws there already: not a façade of glass
+        if any(row.intersection(h_).length > 0.5 * row.length
+               for h_ in hosts):
+            continue
+        if not (solids.contains(Point(P0)) and solids.contains(Point(P1))):
+            continue
+        t = min(max(max(info[i][2] for i in idx) + 0.02, 0.115), 0.46)
+        ext = 0.12
+        a = (round(P0[0] - u[0] * ext, 4), round(P0[1] - u[1] * ext, 4))
+        b = (round(P1[0] + u[0] * ext, 4), round(P1[1] + u[1] * ext, 4))
+        rec = {"kind": "line", "a": list(a), "b": list(b),
+               "t": round(t * 200) / 200, "align": "centre", "side": 1,
+               "height": "level", "base": 0.0, "level": lid,
+               "bridge": "window", "glazed_row": True}
+        w = M.new_walls(arch["walls"] + new_w, [rec])[0]
+        new_w.append(w)
+        rep["bridges"] += 1
+        L = math.dist(a, b)
+        for a_, b_, i in sorted(ss):
+            wd = b_ - a_
+            pos = (a_ + b_) / 2 - s0 + ext
+            if wd < 0.3:
+                continue
+            pos = min(max(pos, wd / 2 + 0.02), L - wd / 2 - 0.02)
+            new_o.append(_op("window", w["id"], pos, wd, 1, st))
+            rep["windows"] += 1
+            done.add(i)
+        rep["glazed_rows"] = rep.get("glazed_rows", 0) + 1
+    return done
 
 
 def _op(kind, wid, pos, w, leaves, st):

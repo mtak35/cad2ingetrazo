@@ -5386,6 +5386,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             for o in nw + br.pop("typed", []):
                 door_rule(o)
                 opening_types(o, st)
+                if o.pop("vent", False):     # 3.64.40: a ventilator:
+                    o["head"] = "flat"       # a plain high window
+                    o.pop("arch", None)
+                    o["style"] = "top-hung"
             arch["openings"] += M.new_openings(arch["openings"], nw)
             rep["bridged"] = br
             made = [w for w in arch["walls"] if w["level"] == lid
