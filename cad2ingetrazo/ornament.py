@@ -273,9 +273,6 @@ def faces(doc) -> list:
                 zc -= h_ * 0.55
         if on("quoins") and look.get("quoins", True):
             fs += _quoins(p, z0, z1, stone)
-        if look.get("fascia") and i == built[-1] and \
-                levels[i]["id"] not in roofed:      # 3.64.52: a roof fascia
-            fs += _ring(p, z1 - 0.05, z1 + 0.40, 0.30, trim)
         out.append((f"Look trims · {levels[i]['name']}", fs))
     # window and door surrounds, lanterns by the main door
     ws = {w["id"]: w for w in arch["walls"]}
@@ -332,6 +329,12 @@ def faces(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("ornament._front_extras")
+    try:                         # 3.64.53: the modern massing
+        from . import modern as MD
+        out += MD.faces(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("modern.faces")
     try:                         # 3.64.47: the front's main door
         from . import lookstyle as LS2
         _fr, fw, fo = LS2.front_side(doc, outer)

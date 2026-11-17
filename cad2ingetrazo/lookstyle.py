@@ -75,8 +75,15 @@ def palette(img) -> dict:
     dark = ~green & mid & (lum < 80) & (sat < 0.20)
     warm = ~sky & ~green & ~tile & mid & (lum > 80) & (lum < 175) & \
         (r > b + 18) & (sat > 0.12) & (sat < 0.55)
+    # 3.64.53: its light grey cladding (stone panels)
+    clad = ~sky & ~green & mid & (lum > 130) & (lum < 205) & (sat < 0.06)
     out_n = {"light": med(light, None), "dark": med(dark, None),
-             "warm": med(warm, None)}
+             "warm": med(warm, None), "clad": med(clad, None)}
+    try:                       # 3.64.53: raked (inclined) edges in it
+        from .modern import has_inclines
+        out_n["incline"] = has_inclines(img)
+    except Exception:  # noqa: BLE001
+        out_n["incline"] = False
     out = {"wall": med(wall, (0.88, 0.84, 0.76)),
            "roof": med(tile, (0.66, 0.30, 0.22)),
            "metal": med(metal, (0.12, 0.11, 0.10)),
@@ -240,6 +247,9 @@ KIT_DEFAULT = {
     "metal": [0.10, 0.10, 0.10], "gate_color": "black",
     # 3.64.52: the windows' design, the lights' kind, a roof fascia
     "win_style": "asdrawn", "light_style": "lantern", "fascia": False,
+    # 3.64.53: the modern massing (modern.py)
+    "slab_edges": False, "frame_box": False, "incline_panel": False,
+    "entry_clad": False, "clad": [0.80, 0.80, 0.78],
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers
@@ -255,6 +265,7 @@ PRESETS = {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
         "rail": "glass", "columns": "asdrawn", "win_style": "modern_grid",
         "light_style": "sconce", "lanterns": True, "fascia": True,
+        "slab_edges": True, "frame_box": True, "entry_clad": True,
         "wall": [0.92, 0.92, 0.90], "trim": [0.30, 0.30, 0.32],
         "stone": [0.45, 0.45, 0.47], "metal": [0.12, 0.12, 0.13],
         "gate_color": "charcoal"}),
@@ -287,7 +298,8 @@ def kit_from_picture(pal, style=None) -> dict:
                  trim=col(pal.get("dark") or (0.25, 0.25, 0.27)),
                  stone=col(pal.get("warm") or (0.62, 0.52, 0.40)),
                  metal=col(pal.get("dark") or (0.1, 0.1, 0.1)),
-                 plinth=True, bands=True)
+                 clad=col(pal.get("clad") or (0.72, 0.72, 0.70)),
+                 incline_panel=bool(pal.get("incline")))
         return k
     k = preset("mediterranean")
     col = (lambda c: [round(float(v), 3) for v in c])

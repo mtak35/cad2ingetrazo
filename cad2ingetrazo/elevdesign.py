@@ -52,9 +52,18 @@ CHECKS = [("Mouldings", [("plinth", "Stone plinth round the ground floor"),
                "car porch"),
               ("entrance_canopy", "Tiled canopy over the main door"),
               ("medallions", "Medallions on blank upper walls"),
-              ("lanterns", "Wall lanterns (main door, windows)")])]
+              ("lanterns", "Wall lanterns (main door, windows)")]),
+          ("Modern massing", [
+              ("slab_edges", "Thick light slab edges on the terraces"),
+              ("frame_box", "Projecting dark frame round the front's upper "
+               "bay (down-lights)"),
+              ("incline_panel", "Inclined cladding panel on a front corner "
+               "(raked, above the roof)"),
+              ("entry_clad", "Main door's bay clad full height, slab "
+               "canopy")])]
 COLOURS = [("wall", "Walls"), ("trim", "Mouldings / trims"),
-           ("stone", "Stone (plinth, quoins)"), ("roof_c", "Roof tiles"),
+           ("stone", "Stone (plinth, quoins, door cladding)"),
+           ("clad", "Cladding panels"), ("roof_c", "Roof tiles"),
            ("metal", "Metal (railings, lanterns)")]
 
 
