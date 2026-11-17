@@ -611,7 +611,7 @@ def _structure(raw, level_ids: set) -> list[dict]:
                            parapet=min(max(float(e.get("parapet", 0.0)),
                                            0.0), 3.0),
                            pt=min(max(float(e.get("pt", 0.15)), 0.05), 1.0))
-                for k_ in ("from_cad", "tiles"):    # 3.64.40: read off
+                for k_ in ("from_cad", "tiles", "apex"):  # 3.64.40: read
                     if e.get(k_):                   # the roof plan
                         rec[k_] = True
                 ocs_ = []                   # 3.64.42: a gable's round

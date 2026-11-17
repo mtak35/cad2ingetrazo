@@ -13495,8 +13495,15 @@ def pitched_roofs_from_cad(doc, lid) -> dict:
                  rect.exterior.buffer(0.05).intersection(ln).length <
                  0.9 * ln.length]
         diag = 0
+        full = 0                   # 3.64.43: hips corner to corner: one apex
+        dg_ = math.hypot(e0, e1)
         ridge_dir = None
         for ln in inner:
+            p_, q_ = ln.coords[0], ln.coords[-1]
+            if ln.length > 0.9 * dg_ and any(
+                    math.dist(p_, c_) < 0.3 for c_ in cs) and any(
+                    math.dist(q_, c_) < 0.3 for c_ in cs):
+                full += 1
             p_, q_ = ln.coords[0], ln.coords[-1]
             if any(math.dist(p_, c_) < 0.25 or math.dist(q_, c_) < 0.25
                    for c_ in cs) and ln.length > 0.3 * min(e0, e1):
@@ -13536,6 +13543,8 @@ def pitched_roofs_from_cad(doc, lid) -> dict:
                "slope": slope, "overhang": 0.0, "t": 0.15,
                "ridge": ridge, "parapet": 0.0, "pt": 0.15,
                "from_cad": True, "tiles": True}
+        if kind == "hip" and full >= 2 and long_ > short_ + 0.05:
+            rec["apex"] = True      # a pyramid: the hips meet at one point
         if S.why_not(rec):
             continue
         recs.append(rec)
@@ -13556,6 +13565,65 @@ def new_roof_level(doc, height=3.0) -> str:
     new["name"] = "Roof"
     arch["levels"] = M.fix_levels(arch["levels"])
     return new["id"]
+
+
+def clip_roof_slabs(doc, lid, reach=0.16) -> int:
+    """3.64.43: a roof plan's slab traced round the section marks, grid
+    bubbles and leaders drawn beside it (thin spikes past the building):
+    cut back to the floor below's outline (its outer walls), ``reach``
+    past it (the drawn 6" projection), and the pitched roofs over it. How
+    many slabs changed."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    order = [lv["id"] for lv in arch["levels"]]
+    if lid not in order or order.index(lid) == 0:
+        return 0
+    lo = order[order.index(lid) - 1]
+    ws = [w for w in arch["walls"] if w["level"] == lo and "a" in w
+          and not w.get("rail") and w.get("kind", "line") == "line"]
+    if len(ws) < 3:
+        return 0
+    body = unary_union([LineString([w["a"][:2], w["b"][:2]]).buffer(
+        float(w["t"]) / 2 + 0.02, cap_style=2) for w in ws])
+    shells = [Polygon(p.exterior) for p in getattr(body, "geoms", [body])
+              if p.geom_type == "Polygon" and p.area > 1.0]
+    if not shells:
+        return 0
+    # (and the floor's own slab: a terrace with only a railing round it)
+    floor_ = []
+    for e in arch["structure"]:
+        if e["type"] == "slab" and e["level"] == lo and not e.get("grade") \
+                and len(e.get("corners") or []) >= 3:
+            try:
+                floor_.append(Polygon(e["corners"]).buffer(0))
+            except Exception:  # noqa: BLE001
+                pass
+    foot = unary_union(shells + floor_).buffer(reach, join_style=2)
+    roofs = [Polygon(e["corners"]).buffer(0) for e in arch["structure"]
+             if e["type"] == "roof" and e["level"] == lo
+             and len(e.get("corners") or []) >= 3]
+    keep = unary_union([foot] + roofs)
+    n = 0
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid or e.get("grade") or \
+                len(e.get("corners") or []) < 3:
+            continue
+        try:
+            sp = Polygon(e["corners"]).buffer(0)
+            cut = sp.intersection(keep)
+        except Exception:  # noqa: BLE001
+            continue
+        if cut.is_empty or sp.area - cut.area < 0.05:
+            continue
+        g = max(getattr(cut, "geoms", [cut]), key=lambda q: q.area)
+        if g.geom_type != "Polygon" or g.area < 0.5 * sp.area:
+            continue
+        g = g.simplify(0.01)
+        e["corners"] = [[round(x, 4), round(y, 4)]
+                        for x, y in list(g.exterior.coords)[:-1]]
+        n += 1
+    return n
 
 
 def roof_from_cad(doc, lid, parapet_h=1.0) -> dict:
@@ -13605,6 +13673,11 @@ def roof_from_cad(doc, lid, parapet_h=1.0) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.pitched_roofs_from_cad")
+    try:                 # 3.64.43: the roof slab kept over the building
+        out["clipped"] = clip_roof_slabs(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.clip_roof_slabs")
     # the floor under it: its own roof slab only where the roof plan does
     # not cover it (this level's slab is the roof there) — «Lower roof n»
     below = [lv["id"] for lv in arch["levels"]]

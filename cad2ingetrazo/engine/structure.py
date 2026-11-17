@@ -2200,6 +2200,8 @@ def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
     Ao, Bo = A + o, B + o
     ze, zr = base - o * tan, base + B * tan
     r1, r2 = (-(A - B), 0.0), ((A - B), 0.0)
+    if r.get("apex"):          # 3.64.43: a pyramid — the hips meet at one
+        r1 = r2 = (0.0, 0.0)   # point (the long sides steeper)
     sw, se, ne, nw = (-Ao, -Bo), (Ao, -Bo), (Ao, Bo), (-Ao, Bo)
     eaves = (sw, se, ne, nw)
     faces = []

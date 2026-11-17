@@ -36,6 +36,8 @@ CUT_OWN = re.compile(r"\bVOID\b|\bVOIDS\b|CUT[\s\-]*OUT|DOUBLE\s*HEIGHT|"
 CUT_UP = re.compile(r"\bDUCTS?\b|\bSHAFTS?\b|\bO\s?\.?\s?T\s?\.?\s?S\b|"
                     r"OPEN\s*TO\s*SKY|LIGHT\s*WELL|SKY\s*WELL|"
                     r"\bP\.?\s?D\b\.?|PLUMBING\s*DUCT|SERVICE\s*DUCT", re.I)
+NOTE_LAYER = re.compile(r"ANNO|\bDIM|^DIM|GRID|TEXT|SECTION|LEVEL|DEFPOINT|"
+                        r"HATCH|LEADER|TITLE", re.I)
 GLASS_LAYER = re.compile(r"GLASS|GLAZ|SHOWER|SCREEN|PARTITION.?GL", re.I)
 CLAD_LAYER = re.compile(r"CLAD|\bACP\b|ALUCO|ALU.?COMP|ALUMIN|FACADE.?PAN|"
                         r"A\.C\.P", re.I)
@@ -184,7 +186,14 @@ def _outline_at(pl, rooms, x, y, wall_like=None):
                 best is None or g.area < best.area):
             best = g
     near = []
+    lay_ = pl.get("layers") or []
     for s in pl["segs"]:
+        try:                     # 3.64.43: a section / grid / dimension
+            ln_ = lay_[s[4]] if isinstance(s[4], int) else s[4]   # line
+        except (IndexError, TypeError):  # is no edge of the opening
+            ln_ = ""
+        if NOTE_LAYER.search(str(ln_ or "")):
+            continue
         a, b = (s[0], s[1]), (s[2], s[3])
         if min(a[0], b[0]) > x + 8 or max(a[0], b[0]) < x - 8 or \
                 min(a[1], b[1]) > y + 8 or max(a[1], b[1]) < y - 8:
@@ -246,8 +255,8 @@ def cut_targets(doc, m, slabs) -> list:
 
     def add(ss):
         for s in ss:
-            if id(s) not in seen and not s.get("grade") and \
-                    not s.get("zone"):
+            # 3.64.43: a noted part of the floor (a zone) opened too
+            if id(s) not in seen and not s.get("grade"):
                 seen.add(id(s))
                 out.append(s)
     if m.get("own", True) and z0 > lowest + 1e-6:
