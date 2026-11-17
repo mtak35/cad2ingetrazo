@@ -14685,6 +14685,13 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.annex_roofs")
+    if (doc.get("look") or {}).get("style") == "mediterranean":
+        try:                   # 3.64.47: the annexes under clay tiles too
+            from . import lookstyle as LS_
+            LS_.annex_roofs(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.look annex_roofs")
     try:
         apply_man_shafts(doc)
     except Exception:  # noqa: BLE001

@@ -181,7 +181,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE) -> int:
     from .engine import structure as S
     arch = doc["arch"]
     arch["structure"] = [e for e in arch["structure"] if not (
-        e["type"] == "roof" and e.get("look") and e["level"] == lid)]
+        is_look_roof(e) and not e.get("annex") and e["level"] == lid)]
     poly, ws = _outline(arch, lid)
     if poly is None:
         return 0
@@ -270,6 +270,7 @@ def apply(doc, ref, src=None) -> dict:
     n = hip_roofs(doc, under)
     if roof_lv:
         n += hip_roofs(doc, roof_lv)
+    n += annex_roofs(doc)
     rep["roofs"] = n
     doc["settings"]["roof_parapet"] = False
     # 2. windows and doors
@@ -302,7 +303,9 @@ def apply(doc, ref, src=None) -> dict:
                 n_arch += 1
     rep["arched"] = n_arch
     rep["grilles"] = n_gr
-    # 3. the railings and the gate: wrought iron
+    # 3. the front: its wide upper windows as arcades of arched windows
+    rep["arcades"] = front_arcades(doc, outer, gid)
+    # 4. the railings and the gate: wrought iron
     n_r = 0
     for w in arch["walls"]:
         if w.get("rail") and w.get("rail") not in ("ms_grill",):
@@ -332,3 +335,182 @@ def _outer_walls(arch) -> set:
                     <= float(w["t"]) / 2 + 0.1:
                 out.add(w["id"])
     return out
+
+
+def front_side(doc, outer=None):
+    """The building's front: the outward direction (unit (x, y)), and
+    the main door's wall and opening there. The front faces the way the
+    cars drive in (the car porch's cars, along their length, towards the
+    nearer edge of the building); without cars, the side of the widest
+    outside door of the ground floor. (None, None, None)."""
+    from .engine import walls as W
+    arch = doc["arch"]
+    levels = arch["levels"]
+    g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
+    gid = levels[g]["id"]
+    outer = outer if outer is not None else _outer_walls(arch)
+    ws = {w["id"]: w for w in arch["walls"]}
+    poly, _ws = _outline(arch, gid)
+    if poly is None:
+        return None, None, None
+    fr = None
+    cars = []
+    for pk in (doc.get("parking") or {}).values():
+        cars += [c for c in (pk or {}).get("cars") or [] if c.get("c")]
+    if cars:
+        xs = [v for w in arch["walls"] if "a" in w
+              for v in (w["a"][0], w["b"][0])]
+        ys = [v for w in arch["walls"] if "a" in w
+              for v in (w["a"][1], w["b"][1])]
+        c = cars[0]
+        an = math.radians(float(c.get("ang", 0.0)))
+        ax = (math.cos(an), math.sin(an))
+        best = None
+        for sg in (1, -1):
+            d_ = (ax[0] * sg, ax[1] * sg)
+            # how far the car is from the building's edge that way
+            tx = ((max(xs) - c["c"][0]) / d_[0] if d_[0] > 1e-6 else
+                  (min(xs) - c["c"][0]) / d_[0] if d_[0] < -1e-6 else 1e9)
+            ty = ((max(ys) - c["c"][1]) / d_[1] if d_[1] > 1e-6 else
+                  (min(ys) - c["c"][1]) / d_[1] if d_[1] < -1e-6 else 1e9)
+            far = min(tx, ty)
+            if best is None or far < best[0]:
+                best = (far, d_)
+        fr = best[1]
+    pick = None
+    for o in arch["openings"]:
+        w = ws.get(o["wall"])
+        if w is None or w["id"] not in outer or w["level"] != gid or \
+                o["kind"] != "door":
+            continue
+        sd = _wall_out(w, o, poly)
+        if sd is None:
+            continue
+        if fr is not None and sd[0] * fr[0] + sd[1] * fr[1] < 0.8:
+            continue
+        if pick is None or float(o["w"]) > float(pick[2]["w"]):
+            pick = (sd, w, o)
+    if pick is None:
+        return fr, None, None
+    if fr is None:
+        if float(pick[2]["w"]) < 0.9:
+            return None, None, None
+        fr = pick[0]
+    return fr, pick[1], pick[2]
+
+
+def _wall_out(w, o, poly):
+    """The outward direction of an opening's wall (away from the
+    outline)."""
+    from shapely.geometry import Point
+    from .engine import walls as W
+    seg = W.centre(w)
+    if seg.kind != "line":
+        return None
+    nl = (-seg.u[1], seg.u[0])
+    c = seg.at(float(o["pos"]) / max(seg.L, 1e-9))
+    t = float(w["t"])
+    probe = (c[0] + nl[0] * (t / 2 + 0.25), c[1] + nl[1] * (t / 2 + 0.25))
+    return (-nl[0], -nl[1]) if poly.buffer(-0.05).contains(Point(probe)) \
+        else nl
+
+
+def front_arcades(doc, outer, gid, bay=1.1, pier=0.24) -> int:
+    """The front's wide upper-floor windows (1.6 m and more) made arcades:
+    a row of arched windows between slim piers (their colonettes drawn by
+    ornament.py) — the perspective's arched loggia. How many."""
+    from .engine import model as M
+    from .engine import walls as W
+    arch = doc["arch"]
+    fr, _w, _o = front_side(doc, outer)
+    if fr is None:
+        return 0
+    ws = {w["id"]: w for w in arch["walls"]}
+    new, gone, n = [], set(), 0
+    for o in arch["openings"]:
+        w = ws.get(o["wall"])
+        if w is None or w["id"] not in outer or w["level"] == gid or \
+                o["kind"] != "window" or float(o["w"]) < 1.6 or \
+                o.get("arcade"):
+            continue
+        seg = W.centre(w)
+        if seg.kind != "line":
+            continue
+        nl = (-seg.u[1], seg.u[0])
+        if abs(nl[0] * fr[0] + nl[1] * fr[1]) < 0.85:
+            continue                       # not on the front
+        Wd = float(o["w"])
+        k = max(2, int(round((Wd + pier) / (bay + pier))))
+        uw = (Wd - (k - 1) * pier) / k
+        if uw < 0.55:
+            continue
+        tag = o["id"][:8]
+        x0 = float(o["pos"]) - Wd / 2
+        lv = next((x for x in arch["levels"] if x["id"] == w["level"]), {})
+        room = float(lv.get("height", 3.0)) - float(o.get("sill", 0.0) or
+                                                     0.0) - 0.3
+        h = min(max(float(o["h"]), uw / 2 + 1.2), room)
+        for i in range(k):
+            rec = {kk: v for kk, v in o.items() if kk not in ("id", "name")}
+            rec.update(pos=round(x0 + uw / 2 + i * (uw + pier), 4),
+                       w=round(uw, 4), h=round(h, 4), head="arch",
+                       arch="semi", arcade=tag, frame="upvc")
+            new.append(rec)
+        gone.add(o["id"])
+        n += 1
+    if gone:
+        arch["openings"] = [o for o in arch["openings"]
+                            if o["id"] not in gone]
+        arch["openings"] += M.new_openings(arch["openings"], new)
+    return n
+
+
+def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75) -> int:
+    """A clay-tile hip roof over each single-storey annex (a guard room,
+    a porch block: a slab marked as a roof on a lower floor): over its
+    rectangle. How many."""
+    from shapely.geometry import Polygon
+    from .engine import model as M
+    from .engine import structure as S
+    arch = doc["arch"]
+    recs = []
+    for e in arch["structure"]:
+        if e["type"] != "slab" or not e.get("roof") or \
+                len(e.get("corners") or []) < 3:
+            continue
+        try:
+            p = Polygon(e["corners"]).buffer(0)
+            r = p.minimum_rotated_rectangle
+        except Exception:  # noqa: BLE001
+            continue
+        if r.geom_type != "Polygon" or p.area < 0.8 * r.area or \
+                p.area < 2.0:
+            continue
+        cs = [[round(x, 4), round(y, 4)]
+              for x, y in list(r.exterior.coords)[:4]]
+        rec = {"type": "roof", "level": e["level"], "kind": "hip",
+               "corners": cs, "slope": slope, "overhang": eave, "t": 0.15,
+               "ridge": "long", "parapet": 0.0, "pt": 0.15, "tiles": True,
+               "look": True, "annex": True}
+        if not S.why_not(rec):
+            recs.append(rec)
+    arch["structure"] = [x for x in arch["structure"]
+                         if not (is_look_roof(x) and (x.get("annex") or abs(
+                             float(x.get("overhang", 0)) - eave) < 1e-3))]
+    if recs:
+        arch["structure"] += M.new_elements(arch["structure"], recs)
+    return len(recs)
+
+
+def is_look_roof(e) -> bool:
+    """A roof the look made (also one saved before 3.64.47, when the
+    «look» mark was not kept: tiled, not read off the CAD, at the look's
+    slope and eaves)."""
+    if e.get("type") != "roof":
+        return False
+    if e.get("look"):
+        return True
+    return bool(e.get("tiles")) and not e.get("from_cad") and \
+        e.get("kind") == "hip" and abs(float(e.get("slope", 0)) - SLOPE) \
+        < 1e-3 and min(abs(float(e.get("overhang", 0)) - EAVE),
+                       abs(float(e.get("overhang", 0)) - EAVE * 0.75)) < 1e-3

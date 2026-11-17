@@ -229,8 +229,9 @@ def faces(doc) -> list:
         p = _outline(arch, levels[i]["id"])
         if p is not None:
             polys[i] = p
+    from .lookstyle import is_look_roof
     roofed = {e["level"] for e in arch["structure"]
-              if e["type"] == "roof" and e.get("look")}
+              if is_look_roof(e) and not e.get("annex")}
     for i, p in polys.items():
         z0 = el[i]
         z1 = z0 + float(levels[i]["height"])
@@ -273,6 +274,30 @@ def faces(doc) -> list:
                 main = (w, o)
     for i, fs in by_lv.items():
         out.append((f"Look surrounds · {levels[i]['name']}", fs))
+    # 3.64.47: the arcades' colonettes, the main door's tiled canopy
+    try:
+        fs = _colonettes(arch, ws, idx, el, polys, trim)
+        if fs:
+            out.append(("Look arcade colonettes", fs))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("ornament._colonettes")
+    if main is not None and not _covered(arch, main[0], main[1], polys[g],
+                                         el, g):
+        try:
+            fs = _canopy(main[0], main[1], el[g], polys[g], trim)
+            if fs:
+                out.append(("Look entrance canopy", fs))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("ornament._canopy")
+    try:                         # 3.64.47: the front's main door
+        from . import lookstyle as LS2
+        _fr, fw, fo = LS2.front_side(doc, outer)
+        if fw is not None:
+            main = (fw, fo)
+    except Exception:  # noqa: BLE001
+        pass
     if main is not None:
         from shapely.geometry import Point
         from .engine import walls as W
@@ -340,3 +365,140 @@ def classical_columns(doc) -> int:
             c["astyle"] = "ionic"
             n += 1
     return n
+
+
+def _side(w, o, poly):
+    """(seg, u, nl, sg, face) of an opening's wall: sg = +1 when its
+    outside is on nl's side."""
+    from shapely.geometry import Point
+    from .engine import walls as W
+    seg = W.centre(w)
+    if seg.kind != "line":
+        return None
+    t = float(w["t"])
+    u = seg.u
+    nl = (-u[1], u[0])
+    c = seg.at(float(o["pos"]) / max(seg.L, 1e-9))
+    probe = (c[0] + nl[0] * (t / 2 + 0.25), c[1] + nl[1] * (t / 2 + 0.25))
+    sg = -1.0 if poly.buffer(-0.05).contains(Point(probe)) else 1.0
+    return seg, u, nl, sg, t / 2
+
+
+def _colonettes(arch, ws, idx, el, polys, trim) -> list:
+    """A slim column (base, round shaft, capital) in each pier of an
+    arcade, standing proud of the wall's face."""
+    from .engine import walls as W
+    groups_ = {}
+    for o in arch["openings"]:
+        if o.get("arcade") and o["wall"] in ws:
+            groups_.setdefault((o["wall"], o["arcade"]), []).append(o)
+    out = []
+    for (wid, _tag), ops in groups_.items():
+        w = ws[wid]
+        i = idx.get(w["level"])
+        if i not in polys or len(ops) < 2:
+            continue
+        ops.sort(key=lambda o: float(o["pos"]))
+        sd = _side(w, ops[0], polys[i])
+        if sd is None:
+            continue
+        seg, u, nl, sg, face = sd
+        z0 = el[i]
+        piers = [(float(a["pos"]) + float(a["w"]) / 2 +
+                  float(b["pos"]) - float(b["w"]) / 2) / 2
+                 for a, b in zip(ops, ops[1:])]
+        # and the two ends
+        piers = [float(ops[0]["pos"]) - float(ops[0]["w"]) / 2 - 0.12] + \
+            piers + [float(ops[-1]["pos"]) + float(ops[-1]["w"]) / 2 + 0.12]
+        o0 = ops[0]
+        zs = z0 + float(o0.get("sill", 0.0) or 0.0)
+        zspr = zs + float(o0["h"]) - float(o0["w"]) / 2
+        r = 0.075
+        for s_ in piers:
+            c = seg.at(s_ / max(seg.L, 1e-9))
+            cc = (c[0] + nl[0] * sg * (face + r + 0.01),
+                  c[1] + nl[1] * sg * (face + r + 0.01))
+            ring = [(cc[0] + r * math.cos(2 * math.pi * k / 12),
+                     cc[1] + r * math.sin(2 * math.pi * k / 12))
+                    for k in range(12)]
+            for f in W.solid({"outer": ring, "holes": []}, zs + 0.12,
+                             zspr - 0.14):
+                d = dict(f) if isinstance(f, dict) else {"loop": f,
+                                                         "holes": []}
+                d["color"] = trim
+                out.append(d)
+            cb = (c[0], c[1])
+            a0, a1 = (face, face + 2 * r + 0.04) if sg > 0 else \
+                (-face - 2 * r - 0.04, -face)
+            out += _box(seg.p0, u, nl, s_ - r - 0.03, s_ + r + 0.03, a0, a1,
+                        zs, zs + 0.12, trim)                  # its base
+            out += _box(seg.p0, u, nl, s_ - r - 0.05, s_ + r + 0.05, a0,
+                        a1 + (0.02 if sg > 0 else 0.0), zspr - 0.14, zspr,
+                        trim)                                 # its capital
+            del cb
+        # one sill along the whole arcade
+        b0, b1 = (face, face + SILL_D) if sg > 0 else (-face - SILL_D, -face)
+        if zs > z0 + 0.1:
+            out += _box(seg.p0, u, nl, piers[0] - 0.15, piers[-1] + 0.15,
+                        b0, b1, zs - SILL_H, zs, trim)
+    return out
+
+
+def _canopy(w, o, z0, poly, trim) -> list:
+    """A small clay-tile hip roof over the main door on two stone
+    corbels — the perspective's entrance canopy."""
+    from .engine import structure as S
+    sd = _side(w, o, poly)
+    if sd is None:
+        return []
+    seg, u, nl, sg, face = sd
+    half = float(o["w"]) / 2 + 0.55
+    depth = 1.05
+    s0 = float(o["pos"]) - half
+    s1 = float(o["pos"]) + half
+    base = z0 + float(o.get("sill", 0.0) or 0.0) + float(o["h"]) + 0.42
+
+    def P(s_, a_):
+        a_ = a_ * sg
+        return [round(seg.p0[0] + u[0] * s_ + nl[0] * a_, 4),
+                round(seg.p0[1] + u[1] * s_ + nl[1] * a_, 4)]
+    corners = [P(s0, face), P(s1, face), P(s1, face + depth),
+               P(s0, face + depth)]
+    r = {"type": "roof", "kind": "hip", "corners": corners, "slope": 25.0,
+         "overhang": 0.08, "t": 0.10, "ridge": "long"}
+    out = []
+    for f in S.roof_faces(r, base):
+        d = dict(f) if isinstance(f, dict) else {"loop": f, "holes": []}
+        out.append(d)
+    # its fascia / soffit board and two corbels under its front corners
+    a0, a1 = (face, face + depth) if sg > 0 else (-face - depth, -face)
+    out += _box(seg.p0, u, nl, s0, s1, a0, a1, base - 0.12, base, trim)
+    c0, c1 = (face, face + 0.40) if sg > 0 else (-face - 0.40, -face)
+    for s_ in (s0 + 0.12, s1 - 0.12):
+        out += _box(seg.p0, u, nl, s_ - 0.09, s_ + 0.09, c0, c1,
+                    base - 0.45, base - 0.12, trim)
+    return out
+
+
+def _covered(arch, w, o, poly, el, g) -> bool:
+    """The door stands under a floor or slab above (a veranda, a porch):
+    no canopy of its own."""
+    from shapely.geometry import Point, Polygon
+    sd = _side(w, o, poly)
+    if sd is None:
+        return True
+    seg, u, nl, sg, face = sd
+    c = seg.at(float(o["pos"]) / max(seg.L, 1e-9))
+    p = Point(c[0] + nl[0] * sg * (face + 0.6), c[1] + nl[1] * sg *
+              (face + 0.6))
+    ids = {lv["id"] for i, lv in enumerate(arch["levels"])
+           if el[i] > el[g] + 0.5}
+    for e in arch["structure"]:
+        if e["type"] == "slab" and (e["level"] in ids or (
+                e["level"] == arch["levels"][g]["id"] and e.get("roof"))):
+            try:
+                if Polygon(e["corners"]).buffer(0).contains(p):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False

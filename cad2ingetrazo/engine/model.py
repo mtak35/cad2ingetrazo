@@ -611,7 +611,7 @@ def _structure(raw, level_ids: set) -> list[dict]:
                            parapet=min(max(float(e.get("parapet", 0.0)),
                                            0.0), 3.0),
                            pt=min(max(float(e.get("pt", 0.15)), 0.05), 1.0))
-                for k_ in ("from_cad", "tiles", "apex"):  # 3.64.40: read
+                for k_ in ("from_cad", "tiles", "apex", "look", "annex"):  # 3.64.40: read
                     if e.get(k_):                   # the roof plan
                         rec[k_] = True
                 ocs_ = []                   # 3.64.42: a gable's round
@@ -730,6 +730,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["shade_d"] = min(max(sd_, 0.1), 2.0)
         if o.get("hl"):              # the plan's hidden lines read for it
             rec["hl"] = 1
+        if o.get("arcade"):          # 3.64.47: one of an arcade's arches
+            rec["arcade"] = str(o["arcade"])[:12]
         if o.get("grille") in ("cnc", "jali", "ms", "cnc_square",
                                "cnc_round", "cnc_hex", "cnc_star",
                                "cnc_lattice"):   # a grille in it

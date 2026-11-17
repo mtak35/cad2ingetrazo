@@ -535,9 +535,9 @@ def follow_all(doc, panel=None) -> list:
     refs = [r for r in doc.get("ref_elev") or [] if r.get("follow", True)]
     if not any(r.get("side") == "perspective" for r in refs):
         doc["look"] = {}             # 3.64.46: no perspective: no look
+        from .lookstyle import is_look_roof
         doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]
-                                    if not (e["type"] == "roof"
-                                            and e.get("look"))]
+                                    if not is_look_roof(e)]
     refs.sort(key=lambda r: r.get("side") == "auto")
     used = set()
     for r in refs:
