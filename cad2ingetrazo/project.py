@@ -1796,8 +1796,9 @@ def walls_at_columns(arch, lid) -> dict:
            and not w.get("rail") and w.get("kind", "line") == "line"
            and W.why_not(w) is None]
     a0 = {w["id"]: tuple(w["a"]) for w in ws_}
-    try:
-        out["joined"] = join_wall_ends(ws_, reach=0.30)
+    try:                 # (3.64.40: a door / window's own wall — a bridge
+        out["joined"] = join_wall_ends(          # sized to it — kept)
+            [w for w in ws_ if not w.get("bridge")], reach=0.30)
     except Exception:  # noqa: BLE001
         pass
     # a wall end left inside a column (drawn into it, or carried there by
@@ -13408,6 +13409,141 @@ def import_roof_part(doc, path, region, parapet_h=1.0, lid=None) -> dict:
     return rep
 
 
+PITCH_WORDS = re.compile(r"KHAPRA?IL|\bTILES?\b|\bSLOPE|\bSLOPING|PITCH|"
+                         r"SHINGLE|CLAY\s*TILE|ROOF\s*TILE", re.I)
+
+
+def _feet_level(txt: str):
+    """«LEVEL.+27'-10''» → 27.833 (feet), or None."""
+    m = re.search(r"([+-]?)\s*(\d+)\s*'\s*-?\s*(\d+(?:\.\d+)?)?", txt)
+    if not m or not re.search(r"LEV|LVL|\bEL\b|F\.?F\.?L|T\.?O\.?S",
+                              txt, re.I):
+        return None
+    v = int(m.group(2)) + float(m.group(3) or 0) / 12.0
+    return -v if m.group(1) == "-" else v
+
+
+def pitched_roofs_from_cad(doc, lid) -> dict:
+    """3.64.40: the pitched roofs a roof plan draws — an outline on the wall
+    layers with «KHAPRAIL TILES» / «SLOPE» written in it, its ridge drawn
+    across (a gable) or its hips drawn corner to corner (a hip) — made
+    roofs: on the walls of the floor below, sloped from the level notes in
+    them (ridge level over the roof's floor level) else 25°. A flat roof
+    slab of the roof plan stays (the ceiling). {"gable", "hip"}."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import polygonize, unary_union
+    out = {"gable": 0, "hip": 0}
+    arch = doc["arch"]
+    pl, P = _placed_plan(doc, lid)
+    if not pl:
+        return out
+    lay = pl["layers"]
+    texts = [t for t in pl.get("texts") or []]
+    marks = [Point(t["x"], t["y"]) for t in texts
+             if PITCH_WORDS.search(str(t.get("text", "")))]
+    if not marks:
+        return out
+    lines = [LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+             for s_ in pl["segs"] if _match(lay[s_[4]], P["walls"]) and
+             math.dist((s_[0], s_[1]), (s_[2], s_[3])) > 0.3]
+    if not lines:
+        return out
+    faces = [g for g in polygonize(unary_union(lines)) if g.area > 0.5]
+    # the faces a «tiles / slope» note stands in, merged where they touch
+    # (the ridge / the hips split the outline into faces)
+    hit = [f for f in faces if any(f.contains(m) for m in marks)]
+    if not hit:
+        return out
+    order = [lv["id"] for lv in arch["levels"]]
+    i = order.index(lid)
+    if i == 0:
+        return out
+    below = order[i - 1]
+    elev = elevations(arch)
+    floor_ft = elev[i] / 0.3048
+    groups = []
+    for f in hit:
+        for g in groups:
+            if g["u"].buffer(0.02).intersects(f):
+                g["u"] = unary_union([g["u"], f])
+                break
+        else:
+            groups.append({"u": f})
+    # also the faces between the marked ones (a hip's 4th triangle with no
+    # note in it): a face sharing an edge with a group, inside its box
+    for g in groups:
+        box_ = g["u"].minimum_rotated_rectangle
+        for f in faces:
+            if f.within(box_.buffer(0.05)) and not f.within(
+                    g["u"].buffer(0.01)):
+                g["u"] = unary_union([g["u"], f])
+    arch["structure"] = [e for e in arch["structure"] if not (
+        e["type"] == "roof" and e.get("from_cad") and e["level"] == below)]
+    recs = []
+    for g in groups:
+        u_ = g["u"].buffer(0.01).buffer(-0.01)
+        if u_.geom_type != "Polygon" or u_.area < 4.0:
+            continue
+        rect = u_.minimum_rotated_rectangle
+        if u_.area < 0.92 * rect.area:
+            continue                       # not a rectangle: left alone
+        cs = list(rect.exterior.coords)[:4]
+        e0 = math.dist(cs[0], cs[1])
+        e1 = math.dist(cs[1], cs[2])
+        inner = [ln for ln in lines if ln.within(rect.buffer(0.05)) and
+                 rect.exterior.buffer(0.05).intersection(ln).length <
+                 0.9 * ln.length]
+        diag = 0
+        ridge_dir = None
+        for ln in inner:
+            p_, q_ = ln.coords[0], ln.coords[-1]
+            if any(math.dist(p_, c_) < 0.25 or math.dist(q_, c_) < 0.25
+                   for c_ in cs) and ln.length > 0.3 * min(e0, e1):
+                v_ = (q_[0] - p_[0], q_[1] - p_[1])
+                ex_ = (cs[1][0] - cs[0][0], cs[1][1] - cs[0][1])
+                c_ = abs(v_[0] * ex_[0] + v_[1] * ex_[1]) / (
+                    ln.length * e0 + 1e-9)
+                if 0.2 < c_ < 0.95:
+                    diag += 1
+                    continue
+            # a ridge: parallel to a side, through the middle, most of it
+            for (pa, pb), L_ in (((cs[0], cs[1]), e0), ((cs[1], cs[2]), e1)):
+                v_ = (pb[0] - pa[0], pb[1] - pa[1])
+                lv_ = (ln.coords[-1][0] - ln.coords[0][0],
+                       ln.coords[-1][1] - ln.coords[0][1])
+                if abs(v_[0] * lv_[1] - v_[1] * lv_[0]) < 0.05 * L_ * \
+                        ln.length and ln.length > 0.7 * L_:
+                    ridge_dir = L_
+        kind = "hip" if diag >= 2 else "gable"
+        long_, short_ = max(e0, e1), min(e0, e1)
+        # its slope: the highest level note in it over the floor's level
+        lvls = [_feet_level(str(t.get("text", ""))) for t in texts
+                if rect.buffer(0.3).contains(Point(t["x"], t["y"]))]
+        lvls = [v for v in lvls if v is not None]
+        slope = 25.0
+        if lvls and max(lvls) - floor_ft > 0.5:
+            rise = (max(lvls) - floor_ft) * 0.3048
+            run = short_ / 2
+            slope = round(min(max(math.degrees(math.atan2(rise, run)),
+                                  10.0), 55.0), 1)
+        ridge = "long"
+        if kind == "gable" and ridge_dir is not None and \
+                abs(ridge_dir - short_) < 1e-6 and short_ < long_ - 1e-6:
+            ridge = "short"
+        rec = {"type": "roof", "level": below, "kind": kind,
+               "corners": [[round(x, 4), round(y, 4)] for x, y in cs],
+               "slope": slope, "overhang": 0.0, "t": 0.15,
+               "ridge": ridge, "parapet": 0.0, "pt": 0.15,
+               "from_cad": True, "tiles": True}
+        if S.why_not(rec):
+            continue
+        recs.append(rec)
+        out[kind] += 1
+    if recs:
+        arch["structure"] += M.new_elements(arch["structure"], recs)
+    return out
+
+
 def new_roof_level(doc, height=3.0) -> str:
     """3.64.28: an empty «Roof» level over the top floor (its plan read
     from the CAD next): its id."""
@@ -13463,6 +13599,11 @@ def roof_from_cad(doc, lid, parapet_h=1.0) -> dict:
             out["parapets"] += 1
         else:
             out["inner"] += 1
+    try:                 # 3.64.40: its pitched (tiled) roofs, as drawn
+        out.update(pitched_roofs_from_cad(doc, lid))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.pitched_roofs_from_cad")
     # the floor under it: its own roof slab only where the roof plan does
     # not cover it (this level's slab is the roof there) — «Lower roof n»
     below = [lv["id"] for lv in arch["levels"]]
