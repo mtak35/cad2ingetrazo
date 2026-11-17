@@ -24,7 +24,7 @@ import math
 
 STYLES = {"auto": "Auto (from the picture)",
           "mediterranean": "Mediterranean / Spanish villa",
-          "modern": "Modern (colours only)"}
+          "modern": "Modern (glass, black frames, sconces)"}
 EAVE = 0.6096                     # 2'-0" eaves
 SLOPE = 22.0
 MIN_SIDE = 1.0                    # a block narrower than this: no roof of its own
@@ -69,10 +69,18 @@ def palette(img) -> dict:
         if mask.sum() < 50:
             return dflt
         return tuple(float(v) / 255 for v in np.median(px[mask], axis=0))
+    # 3.64.52: a modern house's neutrals — its light walls, its dark
+    # bands / frames, its warm cladding
+    light = ~sky & ~green & mid & (lum > 175) & (sat < 0.10)
+    dark = ~green & mid & (lum < 80) & (sat < 0.20)
+    warm = ~sky & ~green & ~tile & mid & (lum > 80) & (lum < 175) & \
+        (r > b + 18) & (sat > 0.12) & (sat < 0.55)
+    out_n = {"light": med(light, None), "dark": med(dark, None),
+             "warm": med(warm, None)}
     out = {"wall": med(wall, (0.88, 0.84, 0.76)),
            "roof": med(tile, (0.66, 0.30, 0.22)),
            "metal": med(metal, (0.12, 0.11, 0.10)),
-           "tile_share": share}
+           "tile_share": share, **out_n}
     # the trims: lighter than the walls, as warm
     wl = np.array(out["wall"]) * 255
     trim = wall & (lum > 0.3 * wl[0] + 0.59 * wl[1] + 0.11 * wl[2] + 12)
@@ -230,6 +238,8 @@ KIT_DEFAULT = {
     "wall": [0.88, 0.84, 0.74], "trim": [0.95, 0.93, 0.88],
     "stone": [0.72, 0.66, 0.58], "roof_c": [0.78, 0.38, 0.24],
     "metal": [0.10, 0.10, 0.10], "gate_color": "black",
+    # 3.64.52: the windows' design, the lights' kind, a roof fascia
+    "win_style": "asdrawn", "light_style": "lantern", "fascia": False,
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers
@@ -243,14 +253,16 @@ PRESETS = {
         "stone": [0.80, 0.77, 0.71]}),
     "modern": ("Modern (clean box, glass railings, black frames)", {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
-        "rail": "glass_post", "columns": "asdrawn",
+        "rail": "glass", "columns": "asdrawn", "win_style": "modern_grid",
+        "light_style": "sconce", "lanterns": True, "fascia": True,
         "wall": [0.92, 0.92, 0.90], "trim": [0.30, 0.30, 0.32],
         "stone": [0.45, 0.45, 0.47], "metal": [0.12, 0.12, 0.13],
         "gate_color": "charcoal"}),
     "contemporary": ("Contemporary (bands, stone plinth, glass)", {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
         "rail": "glass_post", "columns": "asdrawn", "plinth": True,
-        "bands": True, "surrounds": True,
+        "bands": True, "surrounds": True, "win_style": "side_lights",
+        "light_style": "sconce", "lanterns": True, "fascia": True,
         "wall": [0.86, 0.84, 0.80], "trim": [0.35, 0.33, 0.31],
         "stone": [0.50, 0.46, 0.42]}),
 }
@@ -265,9 +277,17 @@ def preset(name) -> dict:
 def kit_from_picture(pal, style=None) -> dict:
     """A kit from a perspective: its style's preset, in its colours."""
     style = style or detect(pal)
+    col = (lambda c: [round(float(v), 3) for v in c])
     if style == "modern":
+        # 3.64.52: a modern house: light walls, dark bands and fascia,
+        # its warm cladding as the plinth / stone, black grid windows,
+        # glass railings, wall sconces
         k = preset("modern")
-        k["wall"] = [round(float(v), 3) for v in pal["wall"]]
+        k.update(wall=col(pal.get("light") or pal["wall"]),
+                 trim=col(pal.get("dark") or (0.25, 0.25, 0.27)),
+                 stone=col(pal.get("warm") or (0.62, 0.52, 0.40)),
+                 metal=col(pal.get("dark") or (0.1, 0.1, 0.1)),
+                 plinth=True, bands=True)
         return k
     k = preset("mediterranean")
     col = (lambda c: [round(float(v), 3) for v in c])
@@ -361,6 +381,9 @@ def apply_kit(doc, kit) -> dict:
         if o["kind"] == "window":
             if k["win_frame"] != "asdrawn":
                 o["frame"] = k["win_frame"]
+            if k.get("win_style", "asdrawn") != "asdrawn" and \
+                    not o.get("vent"):
+                o["style"] = k["win_style"]
             if w["level"] != gid and 0.6 <= wd <= 3.0 and \
                     float(o["h"]) >= 0.9:
                 if k["win_head"] == "arch" and o.get("head") != "arch":

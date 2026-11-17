@@ -672,7 +672,13 @@ def is_photo(img) -> bool:
     mx, mn = a.max(axis=2), a.min(axis=2)
     paper = (mn > 225)
     sat = (mx - mn) > 40
-    return paper.mean() < 0.45 and sat.mean() > 0.15
+    if paper.mean() < 0.45 and sat.mean() > 0.15:
+        return True
+    # (a render under a white sky: many colours all the same — a drawing
+    # has a handful)
+    q = (a // 16).reshape(-1, 3)
+    n_col = len(np.unique(q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2]))
+    return n_col > 450
 
 
 def effective_side(ref) -> str:

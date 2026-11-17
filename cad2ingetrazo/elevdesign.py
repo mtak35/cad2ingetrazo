@@ -38,6 +38,7 @@ FRONTS = [("auto", "Auto (where the cars drive in)"), ("north", "North"),
 CHECKS = [("Mouldings", [("plinth", "Stone plinth round the ground floor"),
                          ("bands", "Floor bands (string courses)"),
                          ("cornice", "Cornice under the eaves"),
+                         ("fascia", "Thick fascia band round a flat roof"),
                          ("quoins", "Quoins on the corners"),
                          ("surrounds", "Window and door surrounds "
                           "(hoods, sills, keystones)")]),
@@ -130,6 +131,12 @@ class ElevationDesigner(QDialog):
         f2.addRow("Upper windows' heads", self.head)
         self.frame = _combo(FRAMES)
         f2.addRow("Window frames", self.frame)
+        from .engine.windesign import DESIGNS as WDS
+        self.wstyle = _combo([("asdrawn", "As drawn")] + list(WDS))
+        f2.addRow("Window design", self.wstyle)
+        self.light = _combo([("lantern", "Classical lanterns"),
+                             ("sconce", "Modern up / down sconces")])
+        f2.addRow("Wall lights", self.light)
         self.rail = _combo(RAILS)
         f2.addRow("Railings", self.rail)
         self.columns = _combo(COLUMNS)
@@ -203,11 +210,13 @@ class ElevationDesigner(QDialog):
         self.annex.setChecked(bool(k.get("annex_roof", True)))
         _set(self.head, k.get("win_head", "arch"))
         _set(self.frame, k.get("win_frame", "upvc"))
+        _set(self.wstyle, k.get("win_style", "asdrawn"))
+        _set(self.light, k.get("light_style", "lantern"))
         _set(self.rail, k.get("rail", "ms_grill"))
         _set(self.columns, k.get("columns", "ionic"))
         _set(self.gate, k.get("gate_color", "black"))
         for key, ch in self.checks.items():
-            ch.setChecked(bool(k.get(key, True)))
+            ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         for key, (b, _c) in self.cols.items():
             c = list(k.get(key) or LS.KIT_DEFAULT[key])
             self.cols[key] = (b, c)
@@ -224,6 +233,8 @@ class ElevationDesigner(QDialog):
              "annex_roof": self.annex.isChecked(),
              "win_head": self.head.currentData(),
              "win_frame": self.frame.currentData(),
+             "win_style": self.wstyle.currentData(),
+             "light_style": self.light.currentData(),
              "rail": self.rail.currentData(),
              "columns": self.columns.currentData(),
              "gate_color": self.gate.currentData(),

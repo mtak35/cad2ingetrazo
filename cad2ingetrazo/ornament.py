@@ -190,7 +190,30 @@ def _prism(p0, u, nl, quad, a0, a1, col) -> list:
     return out
 
 
-def _lantern(p, u, nl, sg, face, z, metal) -> list:
+def _sconce(p, u, nl, sg, face, z, metal) -> list:
+    """A modern wall light: a slim black cylinder casting up and down
+    (its two warm glows)."""
+    from .engine import walls as W
+    q = (p[0] + nl[0] * sg * (face + 0.07), p[1] + nl[1] * sg * (face + 0.07))
+    ring = [(q[0] + 0.05 * math.cos(2 * math.pi * k / 10),
+             q[1] + 0.05 * math.sin(2 * math.pi * k / 10)) for k in range(10)]
+    out = []
+    for f in W.solid({"outer": ring, "holes": []}, z, z + 0.28):
+        d = dict(f) if isinstance(f, dict) else {"loop": f, "holes": []}
+        d["color"] = _c4(metal)
+        out.append(d)
+    glow = (1.0, 0.86, 0.55, 1.0)
+    for z0, z1 in ((z + 0.28, z + 0.30), (z - 0.02, z)):
+        for f in W.solid({"outer": ring, "holes": []}, z0, z1):
+            d = dict(f) if isinstance(f, dict) else {"loop": f, "holes": []}
+            d["color"] = glow
+            out.append(d)
+    return out
+
+
+def _lantern(p, u, nl, sg, face, z, metal, kind="lantern") -> list:
+    if kind == "sconce":
+        return _sconce(p, u, nl, sg, face, z + 0.1, metal)
     from . import siteorn as SO
     q = (p[0] + nl[0] * sg * (face + 0.18), p[1] + nl[1] * sg * (face + 0.18))
     out = _box(p, u, nl, -0.03, 0.03,
@@ -248,8 +271,11 @@ def faces(doc) -> list:
             for h_, d_ in CORNICE:
                 fs += _ring(p, zc - h_, zc, d_, trim)
                 zc -= h_ * 0.55
-        if on("quoins"):
+        if on("quoins") and look.get("quoins", True):
             fs += _quoins(p, z0, z1, stone)
+        if look.get("fascia") and i == built[-1] and \
+                levels[i]["id"] not in roofed:      # 3.64.52: a roof fascia
+            fs += _ring(p, z1 - 0.05, z1 + 0.40, 0.30, trim)
         out.append((f"Look trims · {levels[i]['name']}", fs))
     # window and door surrounds, lanterns by the main door
     ws = {w["id"]: w for w in arch["walls"]}
@@ -331,7 +357,8 @@ def faces(doc) -> list:
             for s_ in (-1, 1):
                 d_ = float(o["w"]) / 2 + 0.45
                 p = (c[0] + u[0] * s_ * d_, c[1] + u[1] * s_ * d_)
-                fs += _lantern(p, u, nl, sg, t / 2, el[g] + 2.1, metal)
+                fs += _lantern(p, u, nl, sg, t / 2, el[g] + 2.1, metal,
+                                look.get("light_style", "lantern"))
             out.append(("Look lanterns · main door", fs))
     return out
 
@@ -637,6 +664,12 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
         zf = el[i]
         h = float(levels[i]["height"])
         ops = ops_by.get(w["id"], [])
+        if not ops and seg.L >= 1.6 and look.get("lanterns", True) and \
+                look.get("light_style") == "sconce":
+            for s_ in (seg.L / 2 - 0.6, seg.L / 2, seg.L / 2 + 0.6):
+                p = seg.at(s_ / seg.L)
+                out += _sconce(p, seg.u, nl, sg, face, zf + h * 0.62,
+                               metal)
         if not ops and i != g and seg.L >= 1.6 and \
                 look.get("medallions", True):
             sc = seg.L / 2
@@ -656,5 +689,6 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
                 if 0.2 < s_ < seg.L - 0.2:
                     p = seg.at(s_ / seg.L)
                     out += _lantern(p, seg.u, nl, sg, face, zt - 0.75,
-                                    metal)
+                                    metal, look.get("light_style",
+                                                    "lantern"))
     return out

@@ -229,6 +229,12 @@ class RefElevDialog(QDialog):
     def _follow(self):
         doc = self._doc()
         doc["ref_elev"] = self._rows()
+        # 3.64.52: following a perspective now: its look replaces a design
+        # made by hand (the designer can take it back from the picture)
+        if any(r.get("follow", True) and RE.effective_side(r) ==
+               "perspective" for r in doc["ref_elev"]) and \
+                (doc.get("look") or {}).get("manual"):
+            doc["look"]["manual"] = False
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             out = RE.follow_all(doc)
@@ -248,7 +254,7 @@ class RefElevDialog(QDialog):
                         else "")
                      + (f" · {rep['grilles']} grilles" if rep.get("grilles")
                         else "")
-                     + (f" · {rep['rails']} iron railings" if rep.get("rails")
+                     + (f" · {rep['rails']} railings" if rep.get("rails")
                         else "")
                      + (f" · {rep['columns']} classical columns"
                         if rep.get("columns") else "")
