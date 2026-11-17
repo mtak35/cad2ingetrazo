@@ -264,9 +264,9 @@ def load(raw) -> dict:
                        if k in ids and isinstance(v, list)}
     # 3.64.46: a perspective's look (its trims made at every rebuild)
     lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
+    from .lookstyle import KIT_DEFAULT as KD_
     doc["look"] = {k: v for k, v in lk_.items()
-                   if k in ("style", "trim", "stone", "metal", "wall",
-                            "roof")}
+                   if k in KD_ or k in ("roof", "manual")}
     # 3.64.44: the reference elevations / perspectives (image, PDF, CAD)
     doc["ref_elev"] = []
     for r_ in raw.get("ref_elev") or []:
@@ -15788,7 +15788,8 @@ def update_from_cad(doc, as_cad=False) -> list:
             from .host import log_error
             log_error("project.update_from_cad elevations")
             out.append(("Elevations", {"error": str(e)}))
-    if any(r_.get("follow", True) for r_ in doc.get("ref_elev") or []):
+    if any(r_.get("follow", True) for r_ in doc.get("ref_elev") or []) or \
+            (doc.get("look") or {}).get("manual"):
         try:                  # 3.64.44: the reference elevations followed
             from . import refelev
             for n_, r_ in refelev.follow_all(doc):

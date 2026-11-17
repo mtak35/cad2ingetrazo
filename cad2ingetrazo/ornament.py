@@ -207,8 +207,9 @@ def _lantern(p, u, nl, sg, face, z, metal) -> list:
 def faces(doc) -> list:
     """Every trim of the look: [(name, faces)]."""
     look = doc.get("look") or {}
-    if look.get("style") != "mediterranean":
+    if not look or look.get("style") in (None, "", "none"):
         return []
+    on = (lambda k_: bool(look.get(k_, True)))   # 3.64.51: each its own
     from . import project as PJ
     arch = doc["arch"]
     levels = arch["levels"]
@@ -236,18 +237,19 @@ def faces(doc) -> list:
         z0 = el[i]
         z1 = z0 + float(levels[i]["height"])
         fs = []
-        if i == g:                                   # the plinth
+        if i == g and on("plinth"):                  # the plinth
             fs += _ring(p, z0 - 0.35, z0 + PLINTH_H - 0.35, PLINTH_D, stone)
         nxt = [j for j in order if el[j] > z0 + 0.5]
-        if nxt and nxt[0] in polys:                  # a floor band over it
+        if nxt and nxt[0] in polys and on("bands"):  # a floor band over it
             zb = el[nxt[0]]
             fs += _ring(p, zb - 0.10, zb - 0.10 + STRING_H, STRING_D, trim)
-        if levels[i]["id"] in roofed:                # the eaves' cornice
+        if levels[i]["id"] in roofed and on("cornice"):  # the eaves' cornice
             zc = z1
             for h_, d_ in CORNICE:
                 fs += _ring(p, zc - h_, zc, d_, trim)
                 zc -= h_ * 0.55
-        fs += _quoins(p, z0, z1, stone)
+        if on("quoins"):
+            fs += _quoins(p, z0, z1, stone)
         out.append((f"Look trims · {levels[i]['name']}", fs))
     # window and door surrounds, lanterns by the main door
     ws = {w["id"]: w for w in arch["walls"]}
@@ -263,6 +265,11 @@ def faces(doc) -> list:
             continue
         i = idx.get(w["level"])
         if i not in polys:
+            continue
+        if not on("surrounds"):
+            if o["kind"] == "door" and i == g and float(o["w"]) >= 0.9 \
+                    and (main is None or float(o["w"]) > float(main[1]["w"])):
+                main = (w, o)
             continue
         if o["kind"] == "window" and float(o["w"]) >= 0.5:
             by_lv.setdefault(i, []).extend(
@@ -282,8 +289,8 @@ def faces(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("ornament._colonettes")
-    if main is not None and not _covered(arch, main[0], main[1], polys[g],
-                                         el, g):
+    if main is not None and on("entrance_canopy") and not _covered(
+            arch, main[0], main[1], polys[g], el, g):
         try:
             fs = _canopy(main[0], main[1], el[g], polys[g], trim)
             if fs:
@@ -306,7 +313,7 @@ def faces(doc) -> list:
             main = (fw, fo)
     except Exception:  # noqa: BLE001
         pass
-    if main is not None:
+    if main is not None and on("lanterns"):
         from shapely.geometry import Point
         from .engine import walls as W
         w, o = main
@@ -348,9 +355,9 @@ def groups(doc) -> list:
     return out
 
 
-def classical_columns(doc) -> int:
+def classical_columns(doc, order="ionic") -> int:
     """The outside free-standing columns (a porch's, a veranda's) drawn
-    classical: architectural, Ionic. How many."""
+    classical: architectural, of the order given. How many."""
     from shapely.geometry import LineString, Point
     from shapely.ops import unary_union
     arch = doc["arch"]
@@ -368,9 +375,9 @@ def classical_columns(doc) -> int:
         u_ = U.get(c["level"])
         if u_ is not None and u_.contains(Point(c["x"], c["y"])):
             continue                       # in a wall: structural
-        if c.get("astyle") != "ionic":
+        if c.get("astyle") != order:
             c["role"] = "architectural"
-            c["astyle"] = "ionic"
+            c["astyle"] = order
             n += 1
     return n
 
@@ -532,7 +539,8 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
         return []
     levels = arch["levels"]
     gid = levels[g]["id"]
-    roof_c = _c4(look.get("roof") or (0.75, 0.40, 0.28))
+    roof_c = _c4(look.get("roof_c") or (look.get("roof") if isinstance(
+        look.get("roof"), list) else None) or (0.75, 0.40, 0.28))
     out = []
     # the ground floor's walls (to know what stands under a terrace)
     lo_walls = [LineString([w["a"][:2], w["b"][:2]]).buffer(
@@ -554,7 +562,7 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
         sg = 1.0 if nl[0] * fr[0] + nl[1] * fr[1] > 0 else -1.0
         zf = el[i]
         # corbels under the slab's edge, every 1.2 m
-        k = max(2, int(seg.L / 1.2) + 1)
+        k = max(2, int(seg.L / 1.2) + 1) if look.get("corbels", True) else 0
         for j in range(k):
             s_ = 0.25 + (seg.L - 0.5) * j / (k - 1)
             a0, a1 = (-0.45, 0.0) if sg > 0 else (0.0, 0.45)
@@ -567,7 +575,7 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
         # over the car porch (nothing under it): a tile pent roof along it
         mid = seg.at(0.5)
         under = any(p_.contains(Point(mid)) for p_ in lo_walls)
-        if not under:
+        if not under and look.get("porch_canopy", True):
             d_ = 0.85
             z_hi, z_lo = zf + 0.35, zf - 0.20
             a_in, a_out = 0.0, d_
@@ -629,7 +637,8 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
         zf = el[i]
         h = float(levels[i]["height"])
         ops = ops_by.get(w["id"], [])
-        if not ops and i != g and seg.L >= 1.6:
+        if not ops and i != g and seg.L >= 1.6 and \
+                look.get("medallions", True):
             sc = seg.L / 2
             zc = zf + h * 0.55
             out += _disc(seg.p0, seg.u, nl, sc, zc, 0.46, a0, a1, trim)
@@ -639,7 +648,7 @@ def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
             out += _disc(seg.p0, seg.u, nl, sc, zc, 0.26, b0, b1, stone)
         for o in ops:
             if o["kind"] != "window" or float(o["w"]) < 1.0 or \
-                    o.get("arcade"):
+                    o.get("arcade") or not look.get("lanterns", True):
                 continue
             zt = zf + float(o.get("sill", 0.0) or 0.0) + float(o["h"])
             for s_ in (float(o["pos"]) - float(o["w"]) / 2 - 0.42,

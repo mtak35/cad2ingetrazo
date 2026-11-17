@@ -533,7 +533,12 @@ def follow_all(doc, panel=None) -> list:
     sides left."""
     out = []
     refs = [r for r in doc.get("ref_elev") or [] if r.get("follow", True)]
-    if not any(effective_side(r) == "perspective" for r in refs):
+    if (doc.get("look") or {}).get("manual"):
+        # 3.64.51: the elevations designed by hand: the design again
+        from .lookstyle import apply_kit
+        out.append(("Elevation design", apply_kit(doc, doc["look"])))
+        refs = [r for r in refs if effective_side(r) != "perspective"]
+    elif not any(effective_side(r) == "perspective" for r in refs):
         doc["look"] = {}             # 3.64.46: no perspective: no look
         from .lookstyle import is_look_roof
         doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]

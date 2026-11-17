@@ -1459,6 +1459,12 @@ class Panel(QWidget):
             "of the building (and perspectives): the model's windows and "
             "doors follow them at every «Update from CAD», and they stand "
             "beside the model to compare"))
+        f.addRow("Elevation design", _btn(
+            "Design the elevations…", self._elev_design,
+            "3.64.51: design every side yourself — a style to start from, "
+            "then roofs, window heads and frames, grilles, arcades, "
+            "railings, columns, mouldings, front details and colours, each "
+            "its own choice; made again at every «Update from CAD»"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -1787,6 +1793,19 @@ class Panel(QWidget):
         if self.i_munits.currentData() != "auto":
             self._apply_units()
             self.commit(self.doc(), "Units changed")
+
+    def _elev_design(self):
+        from .elevdesign import ElevationDesigner
+        dlg = getattr(self, "_design_dlg", None)
+        try:
+            if dlg is None or not dlg.isVisible():
+                dlg = ElevationDesigner(self)
+                self._design_dlg = dlg
+            dlg.show()
+            dlg.raise_()
+        except RuntimeError:
+            self._design_dlg = ElevationDesigner(self)
+            self._design_dlg.show()
 
     def _ref_elev(self):
         from .refui import RefElevDialog

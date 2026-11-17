@@ -216,69 +216,138 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE) -> int:
 
 
 # ---- the kit ---------------------------------------------------------------------
+# ---- 3.64.51: the elevation kit — every element its own choice -------------------
+#: the kit's choices and what they default to (the Mediterranean villa)
+KIT_DEFAULT = {
+    "style": "mediterranean", "front": "auto",
+    "roof": "hip", "roof_slope": SLOPE, "roof_eave": EAVE, "annex_roof": True,
+    "win_head": "arch", "win_frame": "upvc", "gf_grille": True,
+    "door_arch": True, "arcades": True,
+    "rail": "ms_grill", "columns": "ionic",
+    "plinth": True, "bands": True, "cornice": True, "quoins": True,
+    "surrounds": True, "lanterns": True, "medallions": True,
+    "corbels": True, "porch_canopy": True, "entrance_canopy": True,
+    "wall": [0.88, 0.84, 0.74], "trim": [0.95, 0.93, 0.88],
+    "stone": [0.72, 0.66, 0.58], "roof_c": [0.78, 0.38, 0.24],
+    "metal": [0.10, 0.10, 0.10], "gate_color": "black",
+}
+OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
+#: the presets the designer offers
+PRESETS = {
+    "mediterranean": ("Mediterranean / Spanish villa", {}),
+    "classical": ("Classical (flat roof, cornices, columns)", {
+        "roof": "asdrawn", "win_head": "flat", "gf_grille": False,
+        "door_arch": True, "arcades": False, "rail": "asdrawn",
+        "columns": "corinthian", "porch_canopy": False, "medallions": True,
+        "wall": [0.93, 0.91, 0.86], "trim": [0.98, 0.97, 0.94],
+        "stone": [0.80, 0.77, 0.71]}),
+    "modern": ("Modern (clean box, glass railings, black frames)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "rail": "glass_post", "columns": "asdrawn",
+        "wall": [0.92, 0.92, 0.90], "trim": [0.30, 0.30, 0.32],
+        "stone": [0.45, 0.45, 0.47], "metal": [0.12, 0.12, 0.13],
+        "gate_color": "charcoal"}),
+    "contemporary": ("Contemporary (bands, stone plinth, glass)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "rail": "glass_post", "columns": "asdrawn", "plinth": True,
+        "bands": True, "surrounds": True,
+        "wall": [0.86, 0.84, 0.80], "trim": [0.35, 0.33, 0.31],
+        "stone": [0.50, 0.46, 0.42]}),
+}
+SIDE_DIR = {"north": (0.0, 1.0), "south": (0.0, -1.0), "east": (1.0, 0.0),
+            "west": (-1.0, 0.0)}
+
+
+def preset(name) -> dict:
+    return dict(KIT_DEFAULT, **PRESETS.get(name, ("", {}))[1], style=name)
+
+
+def kit_from_picture(pal, style=None) -> dict:
+    """A kit from a perspective: its style's preset, in its colours."""
+    style = style or detect(pal)
+    if style == "modern":
+        k = preset("modern")
+        k["wall"] = [round(float(v), 3) for v in pal["wall"]]
+        return k
+    k = preset("mediterranean")
+    col = (lambda c: [round(float(v), 3) for v in c])
+    k.update(wall=col(pal["wall"]),
+             trim=col(tuple(0.5 * c + 0.5 * 0.97 for c in pal["trim"])),
+             stone=col(tuple(max(0.0, c * 0.80) for c in pal["wall"])),
+             roof_c=col(pal["roof"]), metal=col(pal["metal"]))
+    return k
+
+
 def apply(doc, ref, src=None) -> dict:
-    """The perspective's look applied: {"look": style, "roofs", "arched",
-    "grilles", "rails", "colours"}."""
+    """The perspective's look applied (unless the elevations are designed
+    by hand: the design wins). {"look": style, …}."""
     from . import refelev as RE
+    if (doc.get("look") or {}).get("manual"):
+        rep = apply_kit(doc, doc["look"])
+        rep["note"] = "designed by hand: the design kept"
+        return rep
     if src is None:
         src = RE.source(ref["file"], int(ref.get("page", 1) or 1))
     pal = palette(src["img"])
     style = ref.get("look") if ref.get("look") in STYLES and \
         ref.get("look") != "auto" else detect(pal)
-    arch = doc["arch"]
-    rep = {"look": style}
-    mats = doc.setdefault("materials", {})
+    return apply_kit(doc, kit_from_picture(pal, style))
 
-    def col(c):
-        return [round(float(v), 3) for v in c]
-    mats["wall"] = {"name": "Plaster, as the picture", "color": col(pal["wall"])}
-    if style == "modern":
-        rep["colours"] = "walls"
-        doc["look"] = {"style": "modern"}
-        return rep
-    # 3.64.46: the trims' colours (made at every rebuild: ornament.py)
-    stone = tuple(max(0.0, c * 0.80) for c in pal["wall"])
-    trim = tuple(0.5 * c + 0.5 * 0.97 for c in pal["trim"])  # lighter
-    doc["look"] = {"style": "mediterranean", "trim": col(trim),
-                   "stone": col(stone), "metal": col(pal["metal"]),
-                   "wall": col(pal["wall"]), "roof": col(pal["roof"])}
-    from . import ornament as OR_
-    rep["columns"] = OR_.classical_columns(doc)
-    mats["roof"] = {"name": "Clay tiles, as the picture",
-                    "color": col(pal["roof"])}
-    mats["site"] = {"name": "Boundary wall, as the picture",
-                    "color": col(pal["trim"])}
-    rep["colours"] = "walls, roof tiles, boundary"
+
+def apply_kit(doc, kit) -> dict:
+    """The elevation kit applied to the model as the plans draw it (sizes
+    and positions stay): roofs, windows, doors, railings, columns,
+    colours; its mouldings are drawn at every rebuild (ornament.py)."""
+    k = dict(KIT_DEFAULT, **(kit or {}))
+    if isinstance(k.get("roof"), list):      # a look saved by 3.64.49/50:
+        k["roof_c"], k["roof"] = k["roof"], "hip"     # «roof» its colour
+    arch = doc["arch"]
+    rep = {"look": k.get("style", "custom")}
+    mats = doc.setdefault("materials", {})
+    doc["look"] = {kk: v for kk, v in k.items()}
+    if k.get("style") == "mediterranean":
+        doc["look"]["style"] = "mediterranean"
+    mats["wall"] = {"name": "Plaster, as designed", "color": list(k["wall"])}
+    mats["site"] = {"name": "Boundary wall, as designed",
+                    "color": list(k["trim"])}
+    rep["colours"] = "walls, boundary"
     levels = arch["levels"]
     from . import project as PJ
     el = PJ.elevations(arch)
     order = sorted(range(len(levels)), key=lambda i: el[i])
     ids = [levels[i]["id"] for i in order]
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
-    # the roof level: the top level holding only parapets / a stair room
-    top = ids[-1]
-    roof_lv = top if str(levels[-1].get("name", "")).strip().lower() == \
-        "roof" or all(str(w.get("name", "")).lower().startswith(
-            ("roof parapet", "roof edge")) or w.get("rail")
-            for w in arch["walls"] if w["level"] == top) else None
-    under = ids[-2] if roof_lv and len(ids) >= 2 else top
-    # 1. the roofs: no parapets up there; hip roofs over the floor below
-    #    the roof (and over a stair room on the roof)
-    if roof_lv:
-        n0 = len(arch["walls"])
-        arch["walls"] = [w for w in arch["walls"] if not (
-            w["level"] == roof_lv and (str(w.get("name", "")).lower()
-                                       .startswith(("roof parapet",
-                                                    "roof edge"))
-                                       or w.get("rail")))]
-        rep["parapets_off"] = n0 - len(arch["walls"])
-    n = hip_roofs(doc, under)
-    if roof_lv:
-        n += hip_roofs(doc, roof_lv)
-    n += annex_roofs(doc)
-    rep["roofs"] = n
-    doc["settings"]["roof_parapet"] = False
-    # 2. windows and doors
+    # 1. the roofs
+    arch["structure"] = [e for e in arch["structure"] if not is_look_roof(e)]
+    if k["roof"] == "hip":
+        mats["roof"] = {"name": "Clay tiles, as designed",
+                        "color": list(k["roof_c"])}
+        rep["colours"] += ", roof tiles"
+        top = ids[-1]
+        roof_lv = top if str(levels[-1].get("name", "")).strip().lower() \
+            == "roof" or all(str(w.get("name", "")).lower().startswith(
+                ("roof parapet", "roof edge")) or w.get("rail")
+                for w in arch["walls"] if w["level"] == top) else None
+        under = ids[-2] if roof_lv and len(ids) >= 2 else top
+        if roof_lv:
+            n0 = len(arch["walls"])
+            arch["walls"] = [w for w in arch["walls"] if not (
+                w["level"] == roof_lv and (str(w.get("name", "")).lower()
+                                           .startswith(("roof parapet",
+                                                        "roof edge"))
+                                           or w.get("rail")))]
+            rep["parapets_off"] = n0 - len(arch["walls"])
+        n = hip_roofs(doc, under, float(k["roof_slope"]),
+                      float(k["roof_eave"]))
+        if roof_lv:
+            n += hip_roofs(doc, roof_lv, float(k["roof_slope"]),
+                           float(k["roof_eave"]))
+        if k["annex_roof"]:
+            n += annex_roofs(doc, float(k["roof_slope"]),
+                             float(k["roof_eave"]) * 0.75)
+        rep["roofs"] = n
+        doc["settings"]["roof_parapet"] = False
+    # 2. windows and doors (outside ones)
     ws = {w["id"]: w for w in arch["walls"]}
     outer = _outer_walls(arch)
     gid = levels[g]["id"]
@@ -289,40 +358,60 @@ def apply(doc, ref, src=None) -> dict:
                 .lower().startswith("corner"):
             continue
         wd = float(o["w"])
-        if o["kind"] == "window" and w["level"] != gid and \
-                0.6 <= wd <= 3.0 and float(o["h"]) >= 0.9:
-            if o.get("head") != "arch":
-                o["head"] = "arch"
-                o["arch"] = "semi"
-                n_arch += 1
-            o["frame"] = "upvc"
-        elif o["kind"] == "window" and w["level"] == gid and wd >= 0.6:
-            if o.get("grille") != "ms":
-                o["grille"] = "ms"
-                n_gr += 1
-            o["frame"] = "upvc"
-        elif o["kind"] == "door" and wd >= 0.9 and w["level"] == gid:
-            if o.get("head") != "arch":
-                o["head"] = "arch"
-                o["arch"] = "semi"
-                n_arch += 1
+        if o["kind"] == "window":
+            if k["win_frame"] != "asdrawn":
+                o["frame"] = k["win_frame"]
+            if w["level"] != gid and 0.6 <= wd <= 3.0 and \
+                    float(o["h"]) >= 0.9:
+                if k["win_head"] == "arch" and o.get("head") != "arch":
+                    o["head"] = "arch"
+                    o["arch"] = "semi"
+                    n_arch += 1
+                elif k["win_head"] == "flat" and (o.get("head") == "arch"
+                                                  or o.get("arch")):
+                    o["head"] = "flat"
+                    o.pop("arch", None)
+            if w["level"] == gid and wd >= 0.6:
+                if k["gf_grille"] and o.get("grille") != "ms":
+                    o["grille"] = "ms"
+                    n_gr += 1
+        elif o["kind"] == "door" and wd >= 0.9 and w["level"] == gid \
+                and k["door_arch"] and o.get("head") != "arch":
+            o["head"] = "arch"
+            o["arch"] = "semi"
+            n_arch += 1
     rep["arched"] = n_arch
     rep["grilles"] = n_gr
-    # 3. the front: its wide upper windows as arcades of arched windows
-    rep["arcades"] = front_arcades(doc, outer, gid)
-    # 4. the railings and the gate: wrought iron
+    # 3. the front's wide upper windows as arcades
+    if k["arcades"]:
+        rep["arcades"] = front_arcades(doc, outer, gid)
+    # 4. the railings and the gate
     n_r = 0
-    for w in arch["walls"]:
-        if w.get("rail") and w.get("rail") not in ("ms_grill",):
-            w["rail"] = "ms_grill"
-            n_r += 1
-    doc["settings"]["terrace_rail_kind"] = "railing"
+    if k["rail"] != "asdrawn":
+        for w in arch["walls"]:
+            if w.get("rail") and w.get("rail") != k["rail"]:
+                w["rail"] = k["rail"]
+                n_r += 1
+        doc["settings"]["terrace_rail_kind"] = "railing"
     try:
-        doc["site"]["gate_color"] = "black"
+        if k.get("gate_color"):
+            doc["site"]["gate_color"] = k["gate_color"]
     except Exception:  # noqa: BLE001
         pass
     rep["rails"] = n_r
+    # 5. the outside free-standing columns
+    if k["columns"] != "asdrawn":
+        from . import ornament as OR_
+        rep["columns"] = OR_.classical_columns(doc, k["columns"])
     return rep
+
+
+def remove_kit(doc) -> None:
+    """The design taken off: the roofs it made gone, the look cleared (the
+    rest comes back as drawn at the next «Update from CAD»)."""
+    doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]
+                                if not is_look_roof(e)]
+    doc["look"] = {}
 
 
 def _outer_walls(arch) -> set:
@@ -358,11 +447,11 @@ def front_side(doc, outer=None):
     poly, _ws = _outline(arch, gid)
     if poly is None:
         return None, None, None
-    fr = None
+    fr = SIDE_DIR.get((doc.get("look") or {}).get("front"))  # set by hand
     cars = []
     for pk in (doc.get("parking") or {}).values():
         cars += [c for c in (pk or {}).get("cars") or [] if c.get("c")]
-    if cars:
+    if cars and fr is None:
         xs = [v for w in arch["walls"] if "a" in w
               for v in (w["a"][0], w["b"][0])]
         ys = [v for w in arch["walls"] if "a" in w
