@@ -178,6 +178,56 @@ def _ctx(doc):
     return arch, levels, el, order, g, polys
 
 
+def _regions(doc) -> dict:
+    """3.64.54: every volume's top as the roof slab over it draws it (its
+    slab on the level above, out to the walls' outer face), small notches
+    closed — a clean outline, so the fascia runs round it unbroken; the
+    walls' contour where no slab is drawn."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    arch, levels, el, order, g, polys = _ctx(doc)
+    out = {}
+    for i, poly in polys.items():
+        above = [j for j in order if el[j] > el[i] + 0.5]
+        reg = None
+        if above:
+            jid = levels[above[0]]["id"]
+            ps = []
+            for e in arch["structure"]:
+                if e.get("type") != "slab" or e.get("level") != jid or \
+                        len(e.get("corners") or []) < 3:
+                    continue
+                try:
+                    p = Polygon([tuple(c[:2]) for c in e["corners"]],
+                                [[tuple(c[:2]) for c in h]
+                                 for h in e.get("holes") or []
+                                 if len(h) >= 3]).buffer(0)
+                except Exception:  # noqa: BLE001
+                    continue
+                if p.area > 1.0:
+                    ps.append(Polygon(p.exterior) if p.geom_type ==
+                              "Polygon" else p)
+            if ps:
+                # out to the walls' outer face (a slab stops at their
+                # centre or inner face)
+                reg = unary_union(ps).buffer(0.12, join_style=2)
+                # only where this volume stands (a slab of the floor above
+                # may run past it: that part is not this volume's top)
+                reg = reg.intersection(poly.buffer(0.35, join_style=2))
+        if reg is None or reg.is_empty or reg.area < 1.0:
+            reg = poly
+        reg = reg.buffer(0.25, join_style=2).buffer(-0.25, join_style=2)
+        reg = reg.buffer(-0.25, join_style=2).buffer(0.25, join_style=2)
+        if reg.geom_type == "MultiPolygon":
+            reg = unary_union([Polygon(p.exterior) for p in reg.geoms
+                               if p.area > 1.0])
+        elif reg.geom_type == "Polygon":
+            reg = Polygon(reg.exterior)
+        if not reg.is_empty:
+            out[i] = reg
+    return out
+
+
 def _edges(poly) -> list:
     """The outline's edges, CCW: [(p, q, u, n_out, L)]."""
     from shapely.geometry.polygon import orient
@@ -240,8 +290,9 @@ def tops(doc) -> list:
     arch, levels, el, order, g, polys = _ctx(doc)
     roofed = {e["level"] for e in arch["structure"]
               if is_look_roof(e) and not e.get("annex")}
+    regs = _regions(doc)
     out = []
-    for i, poly in polys.items():
+    for i, poly in regs.items():
         if levels[i]["id"] in roofed:
             continue
         above = [j for j in order if el[j] > el[i] + 0.5]
@@ -249,6 +300,7 @@ def tops(doc) -> list:
         up = unary_union([polys[k] for k in above if k in polys]) \
             if any(k in polys for k in above) else None
         z1 = el[i] + float(levels[i]["height"])
+        mine = []
         for p, q, u, n, L in _edges(poly):
             mid = ((p[0] + q[0]) / 2 + n[0] * 0.05,
                    (p[1] + q[1]) / 2 + n[1] * 0.05)
@@ -260,11 +312,23 @@ def tops(doc) -> list:
                 cov = ln.intersection(up.buffer(0.02)).length / max(L, 1e-9)
                 if cov > 0.5 or up.contains(Point(mid)):
                     continue
-            if _railed(arch, levels, j, p, q):
-                out.append((i, p, q, u, n, L, z1, "terrace"))
+            ph = _parapet_h(arch, levels, j, p, q)
+            if up is not None:
+                # 3.64.54: a lower volume's top (a terrace, a low roof):
+                # all of it one light slab edge, at its parapet's top
+                zt = z1 if _railed(arch, levels, j, p, q) else z1 + ph
+                out.append((i, p, q, u, n, L, zt, "terrace"))
             else:
-                out.append((i, p, q, u, n, L,
-                            z1 + _parapet_h(arch, levels, j, p, q), "roof"))
+                mine.append((i, p, q, u, n, L, z1 + ph, "roof", ph))
+        # the top roof: an edge without a parapet where the rest has one
+        # is a stair core's or a court's side (no fascia: it would float)
+        if mine:
+            walled = sum(e[5] for e in mine if e[8] > 0.05)
+            total = sum(e[5] for e in mine)
+            for e in mine:
+                if e[8] <= 0.05 and walled > 0.5 * total and e[5] < 4.0:
+                    continue
+                out.append(e[:8])
     return out
 
 
@@ -274,25 +338,27 @@ def _fascias(doc, dark, light, slab_edges) -> list:
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     arch, levels, el, order, g, polys = _ctx(doc)
+    regs = _regions(doc)
     groups = {}
     for i, p, q, u, n, L, zt, kind in tops(doc):
         if kind == "terrace" and not slab_edges:
             continue
         d = FASCIA_D if kind == "roof" else EDGE_D
-        R = d + 0.35
-        zone = Polygon([(p[0] - u[0] * R, p[1] - u[1] * R),
-                        (q[0] + u[0] * R, q[1] + u[1] * R),
-                        (q[0] + u[0] * R + n[0] * R,
-                         q[1] + u[1] * R + n[1] * R),
-                        (p[0] - u[0] * R + n[0] * R,
-                         p[1] - u[1] * R + n[1] * R)])
+        R = d + 0.35        # across: the band and a margin
+        E = d + 0.02         # along: just the mitred corner, no stub
+        zone = Polygon([(p[0] - u[0] * E, p[1] - u[1] * E),
+                        (q[0] + u[0] * E, q[1] + u[1] * E),
+                        (q[0] + u[0] * E + n[0] * R,
+                         q[1] + u[1] * E + n[1] * R),
+                        (p[0] - u[0] * E + n[0] * R,
+                         p[1] - u[1] * E + n[1] * R)])
         key = (i, kind, round(zt / 0.05) * 0.05)
         groups.setdefault(key, []).append(zone)
     out = []
     taken = {}
     for (i, kind, zt), zones in sorted(groups.items(),
                                        key=lambda kv: -kv[0][2]):
-        poly = polys[i]
+        poly = regs[i]
         d = FASCIA_D if kind == "roof" else EDGE_D
         band = poly.buffer(d, join_style=2, mitre_limit=4.0).difference(
             poly.buffer(-0.01, join_style=2))
@@ -391,7 +457,7 @@ def _frame_box(doc, fr, dark) -> tuple:
                                      (e[1][1] + e[2][1]) * fr[1]) / 2)
     i, p, q, u, n, L, zt = best
     f = _Frame(p, u, n)
-    poly = polys[i]
+    poly = _regions(doc).get(i, polys[i])
     z0 = el[i] - 0.25
     out = []
     legs = []
@@ -420,12 +486,13 @@ def _frame_box(doc, fr, dark) -> tuple:
 def _incline_panel(doc, fr, clad, dark, skip=None) -> list:
     """An inclined cladding panel on a front corner, from the ground to
     above the roof, its inner edge raked."""
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import Point
     arch, levels, el, order, g, polys = _ctx(doc)
     gpoly = polys.get(g)
     if gpoly is None:
         return []
     gedge = gpoly.boundary
+    regs = _regions(doc)
     cands = []
     for e in _front_edges(doc, fr):
         i, p, q, u, n, L, zt = e
@@ -441,7 +508,7 @@ def _incline_panel(doc, fr, clad, dark, skip=None) -> list:
         for s_end, inward in ((0.0, 1.0), (L, -1.0)):
             probe = (p[0] + u[0] * (s_end - inward * 0.2) - n[0] * 0.2,
                      p[1] + u[1] * (s_end - inward * 0.2) - n[1] * 0.2)
-            if polys[i].contains(Point(probe)):
+            if regs.get(i, polys[i]).contains(Point(probe)):
                 continue                       # a concave end
             free = L
             for a, b in ops:
