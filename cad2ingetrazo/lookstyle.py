@@ -511,6 +511,6 @@ def is_look_roof(e) -> bool:
     if e.get("look"):
         return True
     return bool(e.get("tiles")) and not e.get("from_cad") and \
-        e.get("kind") == "hip" and abs(float(e.get("slope", 0)) - SLOPE) \
+        abs(float(e.get("slope", 0)) - SLOPE) \
         < 1e-3 and min(abs(float(e.get("overhang", 0)) - EAVE),
                        abs(float(e.get("overhang", 0)) - EAVE * 0.75)) < 1e-3
