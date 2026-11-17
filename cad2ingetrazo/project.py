@@ -265,7 +265,8 @@ def load(raw) -> dict:
     # 3.64.46: a perspective's look (its trims made at every rebuild)
     lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
     doc["look"] = {k: v for k, v in lk_.items()
-                   if k in ("style", "trim", "stone", "metal", "wall")}
+                   if k in ("style", "trim", "stone", "metal", "wall",
+                            "roof")}
     # 3.64.44: the reference elevations / perspectives (image, PDF, CAD)
     doc["ref_elev"] = []
     for r_ in raw.get("ref_elev") or []:

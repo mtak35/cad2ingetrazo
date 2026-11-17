@@ -431,7 +431,7 @@ def follow(doc, ref, src=None, used=()) -> dict:
     from . import elevread as EV
     from . import project as PJ
     arch = doc["arch"]
-    if ref.get("side") == "perspective":       # 3.64.45: its look
+    if effective_side(ref) == "perspective":   # 3.64.45: its look
         from . import lookstyle
         return lookstyle.apply(doc, ref, src)
     if src is None:
@@ -533,12 +533,14 @@ def follow_all(doc, panel=None) -> list:
     sides left."""
     out = []
     refs = [r for r in doc.get("ref_elev") or [] if r.get("follow", True)]
-    if not any(r.get("side") == "perspective" for r in refs):
+    if not any(effective_side(r) == "perspective" for r in refs):
         doc["look"] = {}             # 3.64.46: no perspective: no look
         from .lookstyle import is_look_roof
         doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]
                                     if not is_look_roof(e)]
-    refs.sort(key=lambda r: r.get("side") == "auto")
+    # the sides set by hand first, then «auto»; the perspectives last
+    refs.sort(key=lambda r: (effective_side(r) == "perspective",
+                             r.get("side") == "auto"))
     used = set()
     for r in refs:
         name = os.path.basename(r["file"])
@@ -643,3 +645,45 @@ def show(doc, scene, opacity=0.55, gap=0.8) -> list:
     if out:
         scene.version += 1
     return out
+
+
+_EFF = {}
+
+
+def is_photo(img) -> bool:
+    """A photo or a render (most of it coloured, little white paper) —
+    not a line drawing."""
+    import numpy as np
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    im = img.convertToFormat(QImage.Format_RGB32)
+    if im.width() > 400:
+        im = im.scaledToWidth(400, Qt.FastTransformation)
+    w, h = im.width(), im.height()
+    a = np.frombuffer(im.constBits(), dtype=np.uint8,
+                      count=im.sizeInBytes()).reshape(
+        h, im.bytesPerLine())[:, :w * 4].reshape(h, w, 4)[:, :, :3]
+    a = a.astype(np.int16)
+    mx, mn = a.max(axis=2), a.min(axis=2)
+    paper = (mn > 225)
+    sat = (mx - mn) > 40
+    return paper.mean() < 0.45 and sat.mean() > 0.15
+
+
+def effective_side(ref) -> str:
+    """The side a reference shows; «auto» on a photo or a render: a
+    perspective (its look is what it gives)."""
+    side = ref.get("side", "auto")
+    if side != "auto" or kind_of(ref.get("file", "")) != "image":
+        return side
+    key = (ref["file"], os.path.getmtime(ref["file"])
+           if os.path.isfile(ref["file"]) else 0)
+    if key not in _EFF:
+        try:
+            from PySide6.QtGui import QImage
+            img = QImage(ref["file"])
+            _EFF[key] = "perspective" if not img.isNull() and \
+                is_photo(img) else "auto"
+        except Exception:  # noqa: BLE001
+            _EFF[key] = "auto"
+    return _EFF[key]

@@ -291,6 +291,14 @@ def faces(doc) -> list:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("ornament._canopy")
+    try:                         # 3.64.49: the front's extras
+        fs = _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim,
+                           stone, metal, look)
+        if fs:
+            out.append(("Look front details", fs))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("ornament._front_extras")
     try:                         # 3.64.47: the front's main door
         from . import lookstyle as LS2
         _fr, fw, fo = LS2.front_side(doc, outer)
@@ -502,3 +510,142 @@ def _covered(arch, w, o, poly, el, g) -> bool:
             except Exception:  # noqa: BLE001
                 continue
     return False
+
+
+def _disc(p0, u, nl, s_, zc, r, a0, a1, col, n=18) -> list:
+    """A round boss on a wall's face (s_ along it, zc its centre)."""
+    quad = [(s_ + r * math.cos(2 * math.pi * k / n),
+             zc + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+    return _prism(p0, u, nl, quad, a0, a1, col)
+
+
+def _front_extras(doc, arch, ws, idx, el, polys, g, outer, trim, stone,
+                  metal, look) -> list:
+    """The front's details: corbels under its balconies and terraces, a
+    clay-tile pent roof along a terrace over the car porch, a medallion on
+    each blank stretch of its upper walls, lanterns beside its windows."""
+    from shapely.geometry import LineString, Point
+    from . import lookstyle as LS
+    from .engine import walls as W
+    fr, _w, _o = LS.front_side(doc, outer)
+    if fr is None:
+        return []
+    levels = arch["levels"]
+    gid = levels[g]["id"]
+    roof_c = _c4(look.get("roof") or (0.75, 0.40, 0.28))
+    out = []
+    # the ground floor's walls (to know what stands under a terrace)
+    lo_walls = [LineString([w["a"][:2], w["b"][:2]]).buffer(
+        float(w["t"]) / 2 + 0.15) for w in arch["walls"]
+        if w["level"] == gid and "a" in w and not w.get("rail")]
+    for w in arch["walls"]:
+        if not w.get("rail") or w["level"] == gid or "a" in w and False:
+            continue
+        i = idx.get(w["level"])
+        if i is None:
+            continue
+        seg = W.centre(w)
+        if seg.kind != "line" or seg.L < 1.0:
+            continue
+        u = seg.u
+        nl = (-u[1], u[0])
+        if abs(nl[0] * fr[0] + nl[1] * fr[1]) < 0.85:
+            continue
+        sg = 1.0 if nl[0] * fr[0] + nl[1] * fr[1] > 0 else -1.0
+        zf = el[i]
+        # corbels under the slab's edge, every 1.2 m
+        k = max(2, int(seg.L / 1.2) + 1)
+        for j in range(k):
+            s_ = 0.25 + (seg.L - 0.5) * j / (k - 1)
+            a0, a1 = (-0.45, 0.0) if sg > 0 else (0.0, 0.45)
+            out += _box(seg.p0, u, nl, s_ - 0.09, s_ + 0.09, a0, a1,
+                        zf - 0.55, zf - 0.12, trim)
+            out += _box(seg.p0, u, nl, s_ - 0.11, s_ + 0.11,
+                        a0 - (0.02 if sg > 0 else 0.0),
+                        a1 + (0.0 if sg > 0 else 0.02), zf - 0.12,
+                        zf - 0.08, trim)
+        # over the car porch (nothing under it): a tile pent roof along it
+        mid = seg.at(0.5)
+        under = any(p_.contains(Point(mid)) for p_ in lo_walls)
+        if not under:
+            d_ = 0.85
+            z_hi, z_lo = zf + 0.35, zf - 0.20
+            a_in, a_out = 0.0, d_
+            # (s, a) in the wall's frame, a outwards along fr
+            P = (lambda s__, a__, z__: (seg.p0[0] + u[0] * s__ + nl[0] *
+                                        sg * a__,
+                                        seg.p0[1] + u[1] * s__ + nl[1] *
+                                        sg * a__, z__))
+            s0, s1 = -0.15, seg.L + 0.15
+            top = [P(s0, a_in, z_hi), P(s1, a_in, z_hi),
+                   P(s1, a_out, z_lo), P(s0, a_out, z_lo)]
+            bot = [P(s0, a_in, z_hi - 0.08), P(s0, a_out, z_lo - 0.08),
+                   P(s1, a_out, z_lo - 0.08), P(s1, a_in, z_hi - 0.08)]
+            if sg < 0:
+                top, bot = list(reversed(top)), list(reversed(bot))
+            out.append({"loop": top, "holes": [], "color": roof_c})
+            out.append({"loop": bot, "holes": [], "color": roof_c})
+            # the tiles' courses (ridges every 0.25 m) and a fascia
+            n_ = int((s1 - s0) / 0.25)
+            for j in range(n_ + 1):
+                s_ = s0 + j * (s1 - s0) / max(n_, 1)
+                ridge = [P(s_ - 0.04, a_in, z_hi + 0.04),
+                         P(s_ + 0.04, a_in, z_hi + 0.04),
+                         P(s_ + 0.04, a_out, z_lo + 0.04),
+                         P(s_ - 0.04, a_out, z_lo + 0.04)]
+                out.append({"loop": ridge if sg > 0 else
+                            list(reversed(ridge)), "holes": [],
+                            "color": roof_c})
+            a0, a1 = (a_out - 0.04, a_out + 0.02)
+            out += _box(seg.p0, u, nl, s0, s1,
+                        *((a0, a1) if sg > 0 else (-a1, -a0)),
+                        z_lo - 0.22, z_lo - 0.06, trim)
+    # medallions on the blank stretches of the front's upper walls,
+    # lanterns beside its windows
+    ops_by = {}
+    for o in arch["openings"]:
+        ops_by.setdefault(o["wall"], []).append(o)
+    for w in arch["walls"]:
+        if w["id"] not in outer or w.get("rail") or str(
+                w.get("name", "")).lower().startswith("corner"):
+            continue
+        i = idx.get(w["level"])
+        if i not in polys:
+            continue
+        seg = W.centre(w)
+        if seg.kind != "line" or seg.L < 1.2:
+            continue
+        nl = (-seg.u[1], seg.u[0])
+        if abs(nl[0] * fr[0] + nl[1] * fr[1]) < 0.85:
+            continue
+        probe = seg.at(0.5)
+        t = float(w["t"])
+        pr = (probe[0] + nl[0] * (t / 2 + 0.25),
+              probe[1] + nl[1] * (t / 2 + 0.25))
+        sg = -1.0 if polys[i].buffer(-0.05).contains(Point(pr)) else 1.0
+        face = t / 2
+        a0, a1 = (face, face + 0.04) if sg > 0 else (-face - 0.04, -face)
+        b0, b1 = (face, face + 0.08) if sg > 0 else (-face - 0.08, -face)
+        zf = el[i]
+        h = float(levels[i]["height"])
+        ops = ops_by.get(w["id"], [])
+        if not ops and i != g and seg.L >= 1.6:
+            sc = seg.L / 2
+            zc = zf + h * 0.55
+            out += _disc(seg.p0, seg.u, nl, sc, zc, 0.46, a0, a1, trim)
+            for dx, dz in ((0.36, 0), (-0.36, 0), (0, 0.36), (0, -0.36)):
+                out += _disc(seg.p0, seg.u, nl, sc + dx, zc + dz, 0.2, a0,
+                             b1 if sg > 0 else a1, trim)
+            out += _disc(seg.p0, seg.u, nl, sc, zc, 0.26, b0, b1, stone)
+        for o in ops:
+            if o["kind"] != "window" or float(o["w"]) < 1.0 or \
+                    o.get("arcade"):
+                continue
+            zt = zf + float(o.get("sill", 0.0) or 0.0) + float(o["h"])
+            for s_ in (float(o["pos"]) - float(o["w"]) / 2 - 0.42,
+                       float(o["pos"]) + float(o["w"]) / 2 + 0.42):
+                if 0.2 < s_ < seg.L - 0.2:
+                    p = seg.at(s_ / seg.L)
+                    out += _lantern(p, seg.u, nl, sg, face, zt - 0.75,
+                                    metal)
+    return out

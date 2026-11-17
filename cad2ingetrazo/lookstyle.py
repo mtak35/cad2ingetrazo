@@ -60,6 +60,11 @@ def palette(img) -> dict:
         (sat > 0.06) & (sat < 0.35) & (r > b + 12)
     metal = (lum < 55) & ~green
 
+    share = float(tile.mean())
+    # the tiles: their brighter half (shade and dirt left out)
+    if tile.sum() > 100:
+        ts = sat[tile]
+        tile = tile & (sat >= np.median(ts))
     def med(mask, dflt):
         if mask.sum() < 50:
             return dflt
@@ -67,7 +72,7 @@ def palette(img) -> dict:
     out = {"wall": med(wall, (0.88, 0.84, 0.76)),
            "roof": med(tile, (0.66, 0.30, 0.22)),
            "metal": med(metal, (0.12, 0.11, 0.10)),
-           "tile_share": float(tile.mean())}
+           "tile_share": share}
     # the trims: lighter than the walls, as warm
     wl = np.array(out["wall"]) * 255
     trim = wall & (lum > 0.3 * wl[0] + 0.59 * wl[1] + 0.11 * wl[2] + 12)
@@ -236,7 +241,7 @@ def apply(doc, ref, src=None) -> dict:
     trim = tuple(0.5 * c + 0.5 * 0.97 for c in pal["trim"])  # lighter
     doc["look"] = {"style": "mediterranean", "trim": col(trim),
                    "stone": col(stone), "metal": col(pal["metal"]),
-                   "wall": col(pal["wall"])}
+                   "wall": col(pal["wall"]), "roof": col(pal["roof"])}
     from . import ornament as OR_
     rep["columns"] = OR_.classical_columns(doc)
     mats["roof"] = {"name": "Clay tiles, as the picture",
