@@ -215,7 +215,7 @@ def empty() -> dict:
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
-            "fixture_lib": {}, "escalators": []}
+            "fixture_lib": {}, "escalators": [], "ref_elev": []}
 
 
 def load(raw) -> dict:
@@ -262,6 +262,18 @@ def load(raw) -> dict:
                       if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
                        if k in ids and isinstance(v, list)}
+    # 3.64.44: the reference elevations / perspectives (image, PDF, CAD)
+    doc["ref_elev"] = []
+    for r_ in raw.get("ref_elev") or []:
+        if isinstance(r_, dict) and r_.get("file"):
+            doc["ref_elev"].append({
+                "file": str(r_["file"])[:500],
+                "page": max(int(r_.get("page", 1) or 1), 1),
+                "side": str(r_.get("side", "auto"))[:12],
+                "show": bool(r_.get("show", True)),
+                "follow": bool(r_.get("follow", True)),
+                **({"fit": r_["fit"]} if isinstance(r_.get("fit"), dict)
+                   else {})})
     doc["grid"] = SITE_.load_grid(raw.get("grid"))
     doc["parking"] = {k: v for k, v in (raw.get("parking") or {}).items()
                       if k in ids and isinstance(v, dict)}
@@ -15758,6 +15770,15 @@ def update_from_cad(doc, as_cad=False) -> list:
             from .host import log_error
             log_error("project.update_from_cad elevations")
             out.append(("Elevations", {"error": str(e)}))
+    if any(r_.get("follow", True) for r_ in doc.get("ref_elev") or []):
+        try:                  # 3.64.44: the reference elevations followed
+            from . import refelev
+            for n_, r_ in refelev.follow_all(doc):
+                out.append((f"Reference {n_}", r_))
+        except Exception as e:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.update_from_cad refs")
+            out.append(("References", {"error": str(e)}))
     from . import stairs as ST           # the stairs, as the plans draw them
     try:
         ST.auto(doc)

@@ -1453,6 +1453,12 @@ class Panel(QWidget):
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
+        f.addRow("Reference elevations", _btn(
+            "Elevations / perspectives to follow…", self._ref_elev,
+            "3.64.44: pictures, PDF pages or DXF / DWG drawings of each side "
+            "of the building (and perspectives): the model's windows and "
+            "doors follow them at every «Update from CAD», and they stand "
+            "beside the model to compare"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -1782,6 +1788,19 @@ class Panel(QWidget):
             self._apply_units()
             self.commit(self.doc(), "Units changed")
 
+    def _ref_elev(self):
+        from .refui import RefElevDialog
+        dlg = getattr(self, "_ref_dlg", None)
+        try:
+            if dlg is None or not dlg.isVisible():
+                dlg = RefElevDialog(self)
+                self._ref_dlg = dlg
+            dlg.show()
+            dlg.raise_()
+        except RuntimeError:            # its window was closed and deleted
+            self._ref_dlg = RefElevDialog(self)
+            self._ref_dlg.show()
+
     def _update_cad(self):
         doc = self.doc()
         if not any(k for k in doc["imports"] if not k.startswith("__plot")):
@@ -1822,10 +1841,15 @@ class Panel(QWidget):
         msg = "Updated from CAD: " + ", ".join(
             f"{n} ({r.get('walls', r.get('pads', 0))} walls"
             f"{', ' + str(r['parapets']) + ' parapet' if r.get('parapets') else ''})"
-            for n, r in out if not r.get("error"))
+            for n, r in out if not r.get("error") and "walls" in r)
         if bad:
             msg += " — NOT read: " + "; ".join(f"{n}: {e}" for n, e in bad)
         self.commit(doc, msg)
+        try:                      # 3.64.44: the shown references again
+            from .refui import refresh_shown
+            refresh_shown(self)
+        except Exception:  # noqa: BLE001
+            log_error("panel._update_cad refs")
         try:
             self.i_report.setText(msg)
         except Exception:  # noqa: BLE001

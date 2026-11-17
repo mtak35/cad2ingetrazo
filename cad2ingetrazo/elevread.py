@@ -403,9 +403,7 @@ def apply(doc, raw=None, file=None) -> dict:
     # ---- each elevation: its side, then what it says ----------------------
     used = set()
     rep["views"] = {}
-    n_ops = n_rail = n_par = 0
-    rounds = []
-    drop = set()
+    st = new_stats()
     geoms = []
     for v in views:
         geo = _view_geom(raw, v)
@@ -436,155 +434,188 @@ def apply(doc, raw=None, file=None) -> dict:
         circ = [(u + s, z + zg, rr) for (u, z, rr) in circ0]
         marks = {nm: [(u + s, z + zg) for (u, z) in pts]
                  for nm, pts in marks0.items()}
-        glass_names = {}
-        hit_circ = set()
-        for o, w, u0, u1, dep, behind_rail in ops:
-            z0, z1 = bands.get(w["level"], (None, None))
-            if z0 is None:
-                continue
-            lo, hi = u0 - 0.06, u1 + 0.06
-            zs = [z for (u, za, zb) in vert
-                  if lo <= u <= hi and zb - za > 0.2
-                  and za > z0 - 0.1 and zb < z1 + 0.05
-                  for z in (za, zb)]
-            zs += [z for (ua, ub, z) in horiz
-                   if ua >= lo and ub <= hi and ub - ua > 0.6 * (u1 - u0)
-                   and z0 - 0.1 < z < z1 - 0.05]
-            for i_, (cu, cz, rr) in enumerate(circ):
-                if lo <= cu <= hi and z0 < cz < z1:
-                    hit_circ.add(i_)
-            if len(zs) < 2:
-                continue
-            sill, head = min(zs), max(zs)
-            if head - sill < 0.3:
-                continue
-            sill = max(sill, z0)
-            head = min(head, z1)
-            arched = any(ua < hi and ub > lo and head - 1.0 < zb <= head + 0.1
-                         and za > sill for (ua, ub, za, zb) in arcs)
-            ch = False
-            if o["kind"] == "door" or behind_rail:
-                h_new = round(head - z0 - float(o.get("sill", 0.0) or 0.0), 3)
-                if o["kind"] != "door":
-                    h_new = round(head - z0 - float(o.get("sill", 0.0)), 3)
-                if h_new > 1.5 and abs(h_new - float(o["h"])) > 0.03:
-                    o["h"] = h_new
-                    ch = True
-            else:
-                s_new = round(sill - z0, 3)
-                if s_new < 0.08:
-                    s_new = 0.0
-                h_new = round(head - z0 - s_new, 3)
-                if abs(s_new - float(o.get("sill", 0.0) or 0.0)) > 0.03 or \
-                        abs(h_new - float(o["h"])) > 0.03:
-                    o["sill"], o["h"] = s_new, h_new
-                    ch = True
-            if not arched and (o.get("head") == "arch" or o.get("arch")):
-                o["head"] = "flat"
-                o.pop("arch", None)
-                ch = True
-            elif arched and o.get("head") != "arch":
-                o["head"] = "arch"
-                o.setdefault("arch", "semi")
-                ch = True
-            if ch:
-                o["elev_cad"] = 1
-                n_ops += 1
-            # the glass marks the windows hold (to know the railings' glass)
-            if o["kind"] == "window":
-                for nm, pts in marks.items():
-                    if any(lo <= u <= hi and sill <= z <= head
-                           for u, z in pts):
-                        glass_names[nm] = glass_names.get(nm, 0) + 1
-        # a round window the plans could not draw (a gable's oculus):
-        # the outer of concentric circles, set in the gable end seen there
-        cs_ = sorted((c_ for i_, c_ in enumerate(circ)
-                      if i_ not in hit_circ and c_[2] > 0.25),
-                     key=lambda c_: -c_[2])
-        kept = []
-        for cu, cz, rr in cs_:
-            if any(math.hypot(cu - k_[0], cz - k_[1]) < k_[2] for k_ in kept):
-                continue
-            kept.append((cu, cz, rr))
-            put = _oculus(arch, D, cu, cz, rr)
-            rounds.append({"side": D, "u": round(cu, 2), "z": round(cz, 2),
-                           "d": round(2 * rr, 2), "built": put})
-        # railings: glass when the glass marks stand in them
-        for w, u0, u1, dep in seen:
-            if not w.get("rail"):
-                continue
-            z0, z1 = bands.get(w["level"], (None, None))
-            if z0 is None:
-                continue
-            n_g = sum(1 for nm in glass_names for (u, z) in marks.get(nm, [])
-                      if u0 - 0.05 <= u <= u1 + 0.05 and
-                      z0 < z < z0 + float(w.get("height", 1.1) or 1.1) + 0.2)
-            if n_g and w.get("rail") not in ("glass", "glass_post"):
-                w["rail"] = "glass_post"
-                n_rail += 1
-        # roof parapets the elevation does not draw
-        umin = min((u for u, _a, _b in vert), default=0.0)
-        umax = max((u for u, _a, _b in vert), default=0.0)
-        for w, u0, u1, dep in seen:
-            nm = str(w.get("name", ""))
-            if not nm.lower().startswith("roof parapet"):
-                continue
-            z0, z1 = bands.get(w["level"], (None, None))
-            if z0 is None or u1 < umin - 3.0 or u0 > umax + 3.0:
-                continue
-            hp = float(w.get("height", 1.0) or 1.0)
-            cov = 0.0
-            for ua, ub, z in horiz:
-                if z0 + 0.25 <= z <= z0 + hp + 0.05:
-                    cov += max(0.0, min(ub, u1) - max(ua, u0))
-            span = max(u1 - u0, 0.05)
-            if cov < 0.4 * span and u1 - u0 > 0.0:
-                drop.add(w["id"])
-        # a void's railing the elevation does not draw (a roof open over
-        # a terrace: no railing round it up there)
-        f_, r_ = DIRS[D]
-        for m in doc.get("man_shafts") or []:
-            z0, z1 = bands.get(m.get("level"), (None, None))
-            if z0 is not None and m.get("above"):    # «VOID ABOVE»: the
-                z0, z1 = next(((a_, b_) for a_, b_ in   # floor over it
-                               sorted(bands.values()) if a_ > z0 + 0.5),
-                              (None, None))
-            if z0 is None or not m.get("pts") or m.get("auto") == "lift":
-                continue
-            us = [p_[0] * r_[0] + p_[1] * r_[1] for p_ in m["pts"]]
-            u0, u1 = min(us), max(us)
-            if u1 - u0 < 0.5 or u1 < umin - 0.5 or u0 > umax + 0.5:
-                continue
-            # seen from outside only: no wall of its level in front of it
-            dmin = min(p_[0] * f_[0] + p_[1] * f_[1] for p_ in m["pts"])
-            uc = (u0 + u1) / 2
-            lv_ = next((lid_ for lid_, b_ in bands.items()
-                        if abs(b_[0] - z0) < 1e-6), m.get("level"))
-            if any(w["level"] == lv_ and not w.get("rail") and
-                   wu0 + 0.05 < uc < wu1 - 0.05 and wd < dmin - 0.3
-                   for w, wu0, wu1, wd in seen):
-                continue
-            cov = 0.0
-            for ua, ub, z in horiz:
-                if z0 + 0.3 <= z <= z0 + 1.15:
-                    cov += max(0.0, min(ub, u1) - max(ua, u0))
-            if cov < 0.25 * (u1 - u0):
-                m["no_rail"] = True
-    if drop:
+        _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
+                    bands, st)
+    finish_stats(arch, st, rep)
+    return rep
+
+
+def new_stats() -> dict:
+    return {"openings": 0, "rails": 0, "round": [], "drop": set()}
+
+
+def finish_stats(arch, st, rep) -> None:
+    """The parapets marked to go, gone; the counts into the report."""
+    n_par = 0
+    if st["drop"]:
         # a jog between two dropped parapets goes with them
-        arch["walls"] = [w for w in arch["walls"] if w["id"] not in drop]
-        n_par = len(drop)
+        arch["walls"] = [w for w in arch["walls"]
+                         if w["id"] not in st["drop"]]
+        n_par = len(st["drop"])
         left = [w for w in arch["walls"]
                 if str(w.get("name", "")).lower().startswith("roof parapet")
                 and w.get("jog")]
         for w in left:
             arch["walls"].remove(w)
             n_par += 1
-    rep["openings"] = n_ops
-    if n_rail:
-        rep["rails"] = n_rail
+    rep["openings"] = rep.get("openings", 0) + st["openings"]
+    if st["rails"]:
+        rep["rails"] = rep.get("rails", 0) + st["rails"]
     if n_par:
-        rep["parapets"] = n_par
-    if rounds:
-        rep["round"] = rounds
-    return rep
+        rep["parapets"] = rep.get("parapets", 0) + n_par
+    if st["round"]:
+        rep.setdefault("round", []).extend(st["round"])
+
+def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
+                bands, st, know_arcs=True, careful=False) -> None:
+    """What one elevation seen from side D says, set in the model: the
+    openings' sills and heads (and arched / flat heads when the drawing's
+    arcs are known), a gable's round window, glass railings, the parapets
+    and void railings it does not draw. ``vert`` / ``horiz`` / … in model
+    metres (u along the view, z absolute). ``st`` gathers the counts."""
+    glass_names = {}
+    hit_circ = set()
+    for o, w, u0, u1, dep, behind_rail in ops:
+        z0, z1 = bands.get(w["level"], (None, None))
+        if z0 is None:
+            continue
+        lo, hi = u0 - 0.06, u1 + 0.06
+        zs = [z for (u, za, zb) in vert
+              if lo <= u <= hi and zb - za > 0.2
+              and za > z0 - 0.1 and zb < z1 + 0.05
+              for z in (za, zb)]
+        zs += [z for (ua, ub, z) in horiz
+               if ua >= lo and ub <= hi and ub - ua > 0.6 * (u1 - u0)
+               and z0 - 0.1 < z < z1 - 0.05]
+        for i_, (cu, cz, rr) in enumerate(circ):
+            if lo <= cu <= hi and z0 < cz < z1:
+                hit_circ.add(i_)
+        if len(zs) < 2:
+            continue
+        sill, head = min(zs), max(zs)
+        if head - sill < 0.3:
+            continue
+        sill = max(sill, z0)
+        head_raw = head
+        head = min(head, z1 - 0.15)      # (the slab / lintel over it)
+        arched = any(ua < hi and ub > lo and head - 1.0 < zb <= head + 0.1
+                     and za > sill for (ua, ub, za, zb) in arcs)
+        ch = False
+        if o["kind"] == "door" or behind_rail:
+            h_new = round(head - z0 - float(o.get("sill", 0.0) or 0.0), 3)
+            if o["kind"] != "door":
+                h_new = round(head - z0 - float(o.get("sill", 0.0)), 3)
+            if h_new > 1.5 and abs(h_new - float(o["h"])) > 0.03:
+                o["h"] = h_new
+                ch = True
+        else:
+            s_new = round(sill - z0, 3)
+            if s_new < 0.08:
+                s_new = 0.0
+            h_new = round(head - z0 - s_new, 3)
+            if abs(s_new - float(o.get("sill", 0.0) or 0.0)) > 0.03 or \
+                    abs(h_new - float(o["h"])) > 0.03:
+                o["sill"], o["h"] = s_new, h_new
+                ch = True
+        if not know_arcs:
+            # a picture: no arcs known — a straight top drawn over it says
+            # «flat»; else the head is left as it is
+            flat_ = any(abs(z - head_raw) < 0.08 and min(ub, hi) - max(ua, lo)
+                        > 0.7 * (u1 - u0) for (ua, ub, z) in horiz)
+            if flat_ and (o.get("head") == "arch" or o.get("arch")):
+                o["head"] = "flat"
+                o.pop("arch", None)
+                ch = True
+        elif not arched and (o.get("head") == "arch" or o.get("arch")):
+            o["head"] = "flat"
+            o.pop("arch", None)
+            ch = True
+        elif arched and o.get("head") != "arch":
+            o["head"] = "arch"
+            o.setdefault("arch", "semi")
+            ch = True
+        if ch:
+            o["elev_cad"] = 1
+            st["openings"] += 1
+        # the glass marks the windows hold (to know the railings' glass)
+        if o["kind"] == "window":
+            for nm, pts in marks.items():
+                if any(lo <= u <= hi and sill <= z <= head
+                       for u, z in pts):
+                    glass_names[nm] = glass_names.get(nm, 0) + 1
+    # a round window the plans could not draw (a gable's oculus):
+    # the outer of concentric circles, set in the gable end seen there
+    cs_ = sorted((c_ for i_, c_ in enumerate(circ)
+                  if i_ not in hit_circ and c_[2] > 0.25),
+                 key=lambda c_: -c_[2])
+    kept = []
+    for cu, cz, rr in cs_:
+        if any(math.hypot(cu - k_[0], cz - k_[1]) < k_[2] for k_ in kept):
+            continue
+        kept.append((cu, cz, rr))
+        put = _oculus(arch, D, cu, cz, rr)
+        st["round"].append({"side": D, "u": round(cu, 2), "z": round(cz, 2),
+                       "d": round(2 * rr, 2), "built": put})
+    # railings: glass when the glass marks stand in them
+    for w, u0, u1, dep in seen:
+        if not w.get("rail"):
+            continue
+        z0, z1 = bands.get(w["level"], (None, None))
+        if z0 is None:
+            continue
+        n_g = sum(1 for nm in glass_names for (u, z) in marks.get(nm, [])
+                  if u0 - 0.05 <= u <= u1 + 0.05 and
+                  z0 < z < z0 + float(w.get("height", 1.1) or 1.1) + 0.2)
+        if n_g and w.get("rail") not in ("glass", "glass_post"):
+            w["rail"] = "glass_post"
+            st["rails"] += 1
+    if careful:                  # a picture: openings only
+        return
+    # roof parapets the elevation does not draw
+    umin = min((u for u, _a, _b in vert), default=0.0)
+    umax = max((u for u, _a, _b in vert), default=0.0)
+    for w, u0, u1, dep in seen:
+        nm = str(w.get("name", ""))
+        if not nm.lower().startswith("roof parapet"):
+            continue
+        z0, z1 = bands.get(w["level"], (None, None))
+        if z0 is None or u1 < umin - 3.0 or u0 > umax + 3.0:
+            continue
+        hp = float(w.get("height", 1.0) or 1.0)
+        cov = 0.0
+        for ua, ub, z in horiz:
+            if z0 + 0.25 <= z <= z0 + hp + 0.05:
+                cov += max(0.0, min(ub, u1) - max(ua, u0))
+        span = max(u1 - u0, 0.05)
+        if cov < 0.4 * span and u1 - u0 > 0.0:
+            st["drop"].add(w["id"])
+    # a void's railing the elevation does not draw (a roof open over
+    # a terrace: no railing round it up there)
+    f_, r_ = DIRS[D]
+    for m in doc.get("man_shafts") or []:
+        z0, z1 = bands.get(m.get("level"), (None, None))
+        if z0 is not None and m.get("above"):    # «VOID ABOVE»: the
+            z0, z1 = next(((a_, b_) for a_, b_ in   # floor over it
+                           sorted(bands.values()) if a_ > z0 + 0.5),
+                          (None, None))
+        if z0 is None or not m.get("pts") or m.get("auto") == "lift":
+            continue
+        us = [p_[0] * r_[0] + p_[1] * r_[1] for p_ in m["pts"]]
+        u0, u1 = min(us), max(us)
+        if u1 - u0 < 0.5 or u1 < umin - 0.5 or u0 > umax + 0.5:
+            continue
+        # seen from outside only: no wall of its level in front of it
+        dmin = min(p_[0] * f_[0] + p_[1] * f_[1] for p_ in m["pts"])
+        uc = (u0 + u1) / 2
+        lv_ = next((lid_ for lid_, b_ in bands.items()
+                    if abs(b_[0] - z0) < 1e-6), m.get("level"))
+        if any(w["level"] == lv_ and not w.get("rail") and
+               wu0 + 0.05 < uc < wu1 - 0.05 and wd < dmin - 0.3
+               for w, wu0, wu1, wd in seen):
+            continue
+        cov = 0.0
+        for ua, ub, z in horiz:
+            if z0 + 0.3 <= z <= z0 + 1.15:
+                cov += max(0.0, min(ub, u1) - max(ua, u0))
+        if cov < 0.25 * (u1 - u0):
+            m["no_rail"] = True
