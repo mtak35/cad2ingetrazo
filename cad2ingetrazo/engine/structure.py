@@ -2072,6 +2072,53 @@ def _faces(raw, color) -> list:
             {"loop": f, "holes": [], "color": color} for f in raw]
 
 
+def _gable_oculus(tri, ocs, x0, x1, P) -> list:
+    """3.64.42: a gable's end wall (``tri`` in (y, z), swept from x0 to
+    x1) with round windows ``ocs`` [(y, z, r)]: the wall with the holes,
+    a frame ring proud of both faces and the glass in the middle."""
+    def circ(yc, zc, r, n=32):
+        return [(yc + r * math.cos(2 * math.pi * i / n),
+                 zc + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+    def remap(fs, color):
+        out = []
+        for f in fs:
+            if isinstance(f, dict):
+                out.append({"loop": [P(c, a, b) for a, b, c in f["loop"]],
+                            "holes": [[P(c, a, b) for a, b, c in h]
+                                      for h in f["holes"]],
+                            "color": color})
+            else:
+                out.append({"loop": [P(c, a, b) for a, b, c in f],
+                            "holes": [], "color": color})
+        return out
+    holes = [list(reversed(circ(y, z, r))) for y, z, r in ocs]
+    faces = remap(W.solid({"outer": list(tri), "holes": holes}, x0, x1),
+                  GABLE_COLOR)
+    fw = 0.05
+    for y, z, r in ocs:
+        ring = {"outer": circ(y, z, r),
+                "holes": [list(reversed(circ(y, z, r - fw)))]}
+        faces += remap(W.solid(ring, x0 - 0.02, x1 + 0.02),
+                       (0.18, 0.18, 0.19, 1.0))
+        # the glazing bars of a cross (as drawn)
+        for bar in ([(y - r + fw, z - 0.012), (y + r - fw, z - 0.012),
+                     (y + r - fw, z + 0.012), (y - r + fw, z + 0.012)],
+                    [(y - 0.012, z - r + fw), (y + 0.012, z - r + fw),
+                     (y + 0.012, z + r - fw), (y - 0.012, z + r - fw)]):
+            faces += remap(W.solid({"outer": bar, "holes": []},
+                                   (x0 + x1) / 2 - 0.02,
+                                   (x0 + x1) / 2 + 0.02),
+                           (0.18, 0.18, 0.19, 1.0))
+        xm = (x0 + x1) / 2
+        g = circ(y, z, r - fw)
+        faces.append({"loop": [P(xm + 0.002, a, b) for a, b in g],
+                      "holes": [], "color": GLASS_COLOR})
+        faces.append({"loop": [P(xm - 0.002, a, b) for a, b in reversed(g)],
+                      "holes": [], "color": GLASS_COLOR})
+    return faces
+
+
 def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
     """A roof's faces, resting on ``base`` (its level's wall tops): a
     pitched roof's underside passes through the walls' outer top edge."""
@@ -2126,9 +2173,28 @@ def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
         d = 0.002
         b2 = B - d / tan
         tri = [(-b2, base - 0.001), (b2, base - 0.001), (0, zb(0) - d)]
-        faces += _sweep(tri, A - wall_t + 0.001, A - 0.001, P, GABLE_COLOR)
-        faces += _sweep(tri, -A + 0.001, -A + wall_t - 0.001, P,
-                        GABLE_COLOR)
+        # 3.64.42: a round window in a gable (as the elevation draws it)
+        ocs = {1: [], -1: []}
+        for oc in r.get("oculus") or []:
+            try:
+                ex, ey = float(oc["x"]) - cx, float(oc["y"]) - cy
+                xl = ex * ux[0] + ey * ux[1]
+                yl = ex * uy[0] + ey * uy[1]
+                rr = float(oc["d"]) / 2
+                # one drawn sitting on the eave line: lifted just clear
+                zc = max(float(oc["z"]), base + rr + 0.06)
+                # inside the triangle, clear of its sides
+                if zc - rr > base + 0.05 and \
+                        zc + rr < zb(abs(yl) + rr) - 0.05:
+                    ocs[1 if xl > 0 else -1].append((yl, zc, rr))
+            except (KeyError, TypeError, ValueError):
+                pass
+        for sg, x0_, x1_ in ((1, A - wall_t + 0.001, A - 0.001),
+                             (-1, -A + 0.001, -A + wall_t - 0.001)):
+            if not ocs[sg]:
+                faces += _sweep(tri, x0_, x1_, P, GABLE_COLOR)
+                continue
+            faces += _gable_oculus(tri, ocs[sg], x0_, x1_, P)
         return faces
     # a hip roof: four planes of one slope, the ridge along x
     Ao, Bo = A + o, B + o

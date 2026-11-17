@@ -614,6 +614,15 @@ def _structure(raw, level_ids: set) -> list[dict]:
                 for k_ in ("from_cad", "tiles"):    # 3.64.40: read off
                     if e.get(k_):                   # the roof plan
                         rec[k_] = True
+                ocs_ = []                   # 3.64.42: a gable's round
+                for oc in e.get("oculus") or []:    # window
+                    try:
+                        ocs_.append({k2: float(oc[k2])
+                                     for k2 in ("x", "y", "z", "d")})
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if ocs_:
+                    rec["oculus"] = ocs_[:4]
             else:                                   # footing
                 kind = e.get("kind") if e.get("kind") in (
                     "strip", "raft", "combined") else "pad"

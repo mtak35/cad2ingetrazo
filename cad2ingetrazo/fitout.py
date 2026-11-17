@@ -211,6 +211,8 @@ def _text_cuts(doc, lid, pl, rooms, entries) -> int:
         own = bool(CUT_OWN.search(s))
         if not (up or own):
             continue
+        # 3.64.42: «VOID ABOVE» — this floor stays, the slab over it opens
+        above = own and not up and bool(re.search(r"\bABOVE\b", s, re.I))
         g = _outline_at(pl, rooms, float(t["x"]), float(t["y"]))
         if g is None or g.is_empty:
             continue
@@ -220,7 +222,8 @@ def _text_cuts(doc, lid, pl, rooms, entries) -> int:
                for x, y in list(g.exterior.coords)[:-1]]
         doc.setdefault("man_shafts", []).append(
             {"id": _new_id(), "level": lid, "through": False, "pts": pts,
-             "auto": "text", "up": up, "own": True,
+             "auto": "text", "up": up, "own": not above,
+             **({"above": True} if above else {}),
              "note": s.strip()[:30]})
         n += 1
     return n
@@ -249,6 +252,11 @@ def cut_targets(doc, m, slabs) -> list:
                 out.append(s)
     if m.get("own", True) and z0 > lowest + 1e-6:
         add(PJ._floor_slabs(doc, lid))
+    if m.get("above"):          # 3.64.42: the floor (or roof) just over it
+        ups = sorted(z for z in zl.values() if z > z0 + 1e-6)
+        if ups:
+            k_ = next(k for k, z in zl.items() if abs(z - ups[0]) < 1e-6)
+            add(PJ._floor_slabs(doc, k_))
     if m.get("up"):
         for k, z in zl.items():
             if z > z0 + 1e-6:

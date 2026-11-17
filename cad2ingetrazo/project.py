@@ -7217,8 +7217,8 @@ def opening_parapets(doc) -> int:
                for e in arch["structure"] if e["type"] == "slab"
                and not e.get("grade") and not e.get("zone")
                and (e.get("roof") or e.get("holes"))),
-        sorted(repr((m.get("level"), m.get("pts"))) for m in
-               doc.get("man_shafts") or []),
+        sorted(repr((m.get("level"), m.get("pts"), m.get("no_rail")))
+               for m in doc.get("man_shafts") or []),
         [st.get(k) for k in ("parapet_rail", "rail_h", "terrace_curb_h",
                              "terrace_rail_kind", "roof_parapet",
                              "roof_parapet_h", "slab_pos",
@@ -7274,6 +7274,7 @@ def opening_parapets(doc) -> int:
             recs.append(r)
     # (a lift well, a duct read from the CAD: walled round, no railing)
     man = [Polygon(m["pts"]).buffer(0) for m in doc.get("man_shafts") or []
+           if not m.get("no_rail")          # 3.64.42: as the elevation
            if not (m.get("auto") == "lift" or m.get("auto") and re.search(
                r"DUCT|SHAFT|P\.?\s?D", str(m.get("note", "")), re.I))]
     frozen = {tuple(k) for k in st.get("rail_frozen") or []}
@@ -15674,6 +15675,16 @@ def update_from_cad(doc, as_cad=False) -> list:
                                                         dict(how))))
         except Exception as e:  # noqa: BLE001
             out.append(("Foundation", {"error": str(e)}))
+    if doc["settings"].get("elev_cad", True):
+        try:                  # 3.64.42: the drawing's elevations read back
+            from . import elevread
+            rep_ = elevread.apply(doc)
+            if rep_.get("views"):
+                out.append(("Elevations", rep_))
+        except Exception as e:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.update_from_cad elevations")
+            out.append(("Elevations", {"error": str(e)}))
     from . import stairs as ST           # the stairs, as the plans draw them
     try:
         ST.auto(doc)
