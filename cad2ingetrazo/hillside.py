@@ -371,6 +371,25 @@ def fill_groups(doc):
     return [gr]
 
 
+def densify(corners, front, step=3.0):
+    """The plot's corners with its sides cut every ``step`` m (the wall
+    then follows the ground side by side, stepping where the upper
+    ground begins) and its front sides renumbered: (corners, front)."""
+    out, fr = [], []
+    n = len(corners)
+    front = set(front or [])
+    for i in range(n):
+        a, b = corners[i], corners[(i + 1) % n]
+        L = math.dist(a, b)
+        k = max(int(round(L / step)), 1) if L > 1.5 * step else 1
+        for j in range(k):
+            t = j / k
+            if i in front:
+                fr.append(len(out))
+            out.append([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+    return out, fr
+
+
 def lift(doc, parts, z0):
     """The boundary wall's parts (built standing on ``z0``) set on the
     ground they run over: each point up by the ground there."""

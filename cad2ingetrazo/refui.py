@@ -75,6 +75,31 @@ class RefElevDialog(QDialog):
         info.setWordWrap(True)
         info.setStyleSheet("color: #8a94a3;")
         lay.addWidget(info)
+        # 3.64.67: the kind of building — what the look and the extension's
+        # choices follow (a mosque's domes and minarets, a warehouse's
+        # cladding, no villa ornament on an office block…)
+        from . import btype as BT
+        brow = QHBoxLayout()
+        bl = QLabel("<b>Type of building:</b>")
+        brow.addWidget(bl)
+        self.btype = QComboBox()
+        for k_, l_ in BT.TYPES:
+            self.btype.addItem(l_, k_)
+        self.btype.setToolTip(
+            "What the building is: the look a perspective gives and the "
+            "elements the extension adds follow it. «Auto» reads it from "
+            "the plans' room names.")
+        cur_ = BT.chosen(self._doc())
+        self.btype.setCurrentIndex(max(self.btype.findData(cur_), 0))
+        self.btype.currentIndexChanged.connect(
+            lambda _i=0: self._set_btype())
+        brow.addWidget(self.btype)
+        self.bnote = QLabel()
+        self.bnote.setWordWrap(True)
+        self.bnote.setStyleSheet("color: #8a94a3;")
+        brow.addWidget(self.bnote, 1)
+        lay.addLayout(brow)
+        self._btype_note()
         self.tab = QTableWidget(0, len(self.COLS))
         self.tab.setHorizontalHeaderLabels(self.COLS)
         self.tab.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -127,6 +152,28 @@ class RefElevDialog(QDialog):
         self._load()
         self._refresh_map()
         self._marks()
+
+    # ---- the kind of building --------------------------------------------------
+    def _btype_note(self):
+        from . import btype as BT
+        doc = self._doc()
+        k = BT.effective(doc)
+        auto = BT.chosen(doc) == "auto"
+        self.bnote.setText((f"Read as: {BT.LABEL.get(k, k)} — " if auto
+                            else "") + BT.NOTE.get(k, ""))
+
+    def _set_btype(self):
+        doc = self._doc()
+        doc["settings"]["building_type"] = self.btype.currentData() or "auto"
+        persp = any(r.get("follow", True) and RE.effective_side(r) ==
+                    "perspective" for r in doc.get("ref_elev") or [])
+        if persp:              # the perspective's look again, as this kind
+            self.panel.commit(doc, "Type of building set")
+            self._btype_note()
+            self._follow()
+            return
+        self.panel.commit(doc, "Type of building set")
+        self._btype_note()
 
     # ---- rows ----------------------------------------------------------------
     def _doc(self):

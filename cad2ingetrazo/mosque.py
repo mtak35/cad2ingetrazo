@@ -123,6 +123,7 @@ def hall(doc):
 def minarets(doc, b=1.5) -> int:
     """Four modern minarets at the prayer hall's corners (none made by
     hand yet): their height about 2.6 times the building's."""
+    _migrate(doc)
     if doc.get("minarets"):
         return 0
     from . import minarets as MN
@@ -143,9 +144,10 @@ def minarets(doc, b=1.5) -> int:
     for x, y in cs:                    # just outside the hall's corner
         d = math.hypot(x - cx, y - cy)
         k = (d + b * 0.35) / max(d, 1e-6)
-        MN.new_minaret(doc, lid, cx + (x - cx) * k, cy + (y - cy) * k,
-                       b=b, h=H, galleries=1, cupola="modern",
-                       rot=ang % 90.0, color="white")
+        rec = MN.new_minaret(doc, lid, cx + (x - cx) * k,
+                             cy + (y - cy) * k, b=b, h=H, galleries=1,
+                             cupola="modern", rot=ang % 90.0, color="white")
+        rec["id"] = "auto-" + rec["id"]     # (the look's: gone with it)
     return 4
 
 
@@ -158,22 +160,60 @@ def arches(doc) -> int:
     arch = doc["arch"]
     outer = _outer_walls(arch)
     ws = {w["id"]: w for w in arch["walls"]}
+    jali = doc["settings"].get("jali_style", "cnc") or "cnc"
     n = 0
     for o in arch["openings"]:
         w = ws.get(o["wall"])
         if w is None or w["id"] not in outer or float(o["w"]) < 0.6:
             continue
+        if o["kind"] != "door" and float(o["w"]) >= 0.6 and \
+                o.get("grille") in (None, "", "ms"):
+            o["grille"] = jali        # 3.64.67: the jali in the arches
         if o.get("head") == "arch":
             continue
         o["head"] = "arch"
         o["arch"] = "semi"
-        o.pop("grille", None) if o.get("grille") == "ms" else None
         try:
             PJ.fit_head(o)
         except Exception:  # noqa: BLE001
             pass
         n += 1
     return n
+
+
+def crown(doc) -> int:
+    """3.64.67: the hall's upper tier as the perspective shows it — a row
+    of tall arched jali windows along the outside walls of the level
+    over the prayer hall (those round it, not the residences'), on walls
+    that have no openings yet."""
+    from . import project as PJ
+    from .lookstyle import _outer_walls
+    from shapely.geometry import Point
+    lid, poly = hall(doc)
+    if poly is None:
+        return 0
+    arch = doc["arch"]
+    levels = arch["levels"]
+    i = next(k for k, lv in enumerate(levels) if lv["id"] == lid)
+    if i + 1 >= len(levels):
+        return 0
+    up = levels[i + 1]
+    zone = poly.minimum_rotated_rectangle.buffer(9.0)
+    outer = _outer_walls(arch)
+    busy = {o["wall"] for o in arch["openings"]}
+    ids = [w["id"] for w in arch["walls"] if w["level"] == up["id"]
+           and w["id"] in outer and w["id"] not in busy
+           and w.get("kind", "line") == "line" and "a" in w
+           and zone.contains(Point((w["a"][0] + w["b"][0]) / 2,
+                                   (w["a"][1] + w["b"][1]) / 2))
+           and math.dist(w["a"], w["b"]) >= 2.0]
+    if not ids:
+        return 0
+    H = float(up["height"])
+    h = max(min(H - 0.9, 3.2), 1.2)
+    return PJ.openings_along(doc, ids, w=1.1, h=round(h, 3), sill=0.45,
+                             pitch=1.7, group=1, gap=0.6, style="semi",
+                             grille="cnc")
 
 
 def hall_storey(doc) -> bool:
@@ -207,5 +247,28 @@ def apply(doc) -> dict:
     rep["hall_18ft"] = hall_storey(doc)
     rep["minarets"] = minarets(doc)
     rep["arched"] = arches(doc)
+    try:
+        rep["crown"] = crown(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.crown")
     boundary(doc)
     return rep
+
+
+def _migrate(doc) -> None:
+    """3.64.66 made the look's minarets without the «auto-» mark (its
+    modern ones): marked now."""
+    for m in doc.get("minarets") or []:
+        if m.get("cupola") == "modern" and \
+                not str(m.get("id", "")).startswith("auto-"):
+            m["id"] = "auto-" + str(m.get("id", ""))
+
+
+def remove(doc) -> int:
+    """The look's own minarets taken away (another kind of building)."""
+    _migrate(doc)
+    old = doc.get("minarets") or []
+    doc["minarets"] = [m for m in old
+                       if not str(m.get("id", "")).startswith("auto-")]
+    return len(old) - len(doc["minarets"])

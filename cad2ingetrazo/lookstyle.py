@@ -25,7 +25,8 @@ import math
 STYLES = {"auto": "Auto (from the picture)",
           "mediterranean": "Mediterranean / Spanish villa",
           "modern": "Modern (glass, black frames, sconces)",
-          "mosque": "Modern mosque (white, arches, domes, minarets)"}
+          "mosque": "Modern mosque (white, arches, domes, minarets)",
+          "industrial": "Industrial (metal cladding, plain)"}
 EAVE = 0.6096                     # 2'-0" eaves
 SLOPE = 22.0
 MIN_SIDE = 1.0                    # a block narrower than this: no roof of its own
@@ -351,6 +352,14 @@ PRESETS = {
         "stone": [0.80, 0.72, 0.60], "roof_c": [0.70, 0.38, 0.26],
         "accent": [0.95, 0.92, 0.84], "gate_color": "black"}),
     "mediterranean": ("Traditional — Mediterranean / Spanish villa", {}),
+    "industrial": ("Industrial (metal-clad, flat roofs, plain openings)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "flat",
+        "win_frame": "aluminium", "door_arch": False, "rail": "ms_grill",
+        "columns": "asdrawn", "slab_edges": False, "fascia": True,
+        "fascia_d": 0.10, "fascia_h": 0.45,
+        "wall": [0.74, 0.76, 0.78], "trim": [0.42, 0.44, 0.47],
+        "stone": [0.62, 0.63, 0.64], "metal": [0.30, 0.31, 0.33],
+        "gate_color": "charcoal"}),
     "mosque": ("Modern mosque (white, arched, domes, slim minarets)", {
         **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
         "win_frame": "black", "door_arch": True, "rail": "asdrawn",
@@ -362,6 +371,8 @@ PRESETS = {
 }
 #: a line on what each style is, under the designer's choice
 STYLE_NOTES = {
+    "industrial": "Grey metal-clad walls, flat roofs with a thin fascia, "
+                  "plain flat-headed openings, no ornament.",
     "mosque": "White, every opening arched, deep white slab edges on the "
               "tiers, the domes the plans draw, slim square minarets at "
               "the prayer hall, a lattice boundary wall.",
@@ -417,6 +428,12 @@ def kit_from_picture(pal, style=None) -> dict:
         if sum(lt) / 3 > 0.75:              # (its white, as the picture's)
             k.update(wall=col(lt))
         return k
+    if style in PRESETS and style != "mediterranean":
+        k = preset(style)                 # 3.64.67: the kind's own style,
+        lt = pal.get("light") or pal["wall"]          # its walls the
+        if style not in ("industrial",) and sum(lt) / 3 > 0.6:  # picture's
+            k.update(wall=col(lt))
+        return k
     k = preset("mediterranean")
     col = (lambda c: [round(float(v), 3) for v in c])
     k.update(wall=col(pal["wall"]),
@@ -439,13 +456,15 @@ def apply(doc, ref, src=None) -> dict:
     pal = palette(src["img"])
     style = ref.get("look") if ref.get("look") in STYLES and \
         ref.get("look") != "auto" else detect(pal)
-    try:                      # 3.64.66: a mosque's drawing: the mosque look
-        from . import mosque as MQ
-        if (ref.get("look") in (None, "", "auto")) and MQ.is_mosque(doc):
-            style = "mosque"
+    try:                      # 3.64.67: the kind of building leads: a
+        from . import btype as BT          # mosque's look, a warehouse's…
+        if ref.get("look") in (None, "", "auto"):
+            st_ = BT.STYLE_OF.get(BT.effective(doc))
+            if st_:
+                style = st_
     except Exception:  # noqa: BLE001
         from .host import log_error
-        log_error("lookstyle.apply mosque")
+        log_error("lookstyle.apply building type")
     return apply_kit(doc, kit_from_picture(pal, style))
 
 
@@ -562,6 +581,13 @@ def apply_kit(doc, kit) -> dict:
         from . import ornament as OR_
         rep["columns"] = OR_.classical_columns(doc, k["columns"])
     # 6. 3.64.66: a mosque's domes, minarets, arches, boundary wall
+    if not k.get("mosque"):
+        try:
+            from . import mosque as MQ
+            MQ.remove(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("lookstyle.mosque remove")
     if k.get("mosque"):
         try:
             from . import mosque as MQ

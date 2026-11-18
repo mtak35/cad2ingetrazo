@@ -93,6 +93,7 @@ DEFAULTS = {
     "walk_up": 0.1524,             # m, walkways / verandahs over the lawns
     "walkways": True,
     "ground_ffl": 0.6096,          # m, ground F.F.L. above N.G.L. (0 = CAD)
+    "building_type": "auto",       # 3.64.67: villa, mosque, industrial… (btype)
     "rail_needs_text": True,       # railings only where the CAD writes them
     "stair_max_flight": 14,        # risers in one flight at most
     "stair_shape": "u",            # a standard stair: a U-turn
@@ -13101,6 +13102,15 @@ def _site_groups(doc):
     z0 = plot_top(doc)
     site_ = dict(doc["site"], _front=[      # 3.64.34: the plot's front
         i for i, f_ in enumerate(plot.get("sb_front") or []) if f_])
+    try:                    # 3.64.67: on a slope, its sides cut short so
+        from . import hillside as HS_     # each piece stands on its own
+        if HS_.on(doc) and not doc["site"].get("gates"):   # ground
+            corners, site_["_front"] = HS_.densify(
+                corners, site_["_front"],
+                max(float(doc["site"].get("pier_gap", 3.0) or 3.0), 1.5))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.hillside densify")
     parts, sym = SITE_.build(corners, site_, z0)
     try:                    # 3.64.66: on a slope, on the ground it crosses
         from . import hillside as HS_

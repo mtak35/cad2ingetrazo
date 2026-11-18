@@ -144,6 +144,21 @@ def _outward(faces, cx, cy):
     return faces
 
 
+def smooth(mesh, cos_max=0.94) -> None:
+    """3.64.67: a curved surface drawn smooth — the edges between faces
+    turning less than ~20° soft (no grid of lines over a dome)."""
+    for e in mesh.edges:
+        fs = list(getattr(e, "faces", ()) or [])
+        if len(fs) != 2:
+            continue
+        try:
+            n1, n2 = fs[0].normal(), fs[1].normal()
+            if n1.dotProduct(n1, n2) >= cos_max:
+                e.soft = True
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def build(dome, z_base, hi=False):
     """[(part name, faces, rgb)] of one dome standing at ``z_base``."""
     R = max(float(dome.get("d", 6.0)), 0.5) / 2
@@ -293,7 +308,9 @@ def groups(doc):
         if not faces:
             continue
         label = dict((a, b) for a, b, _r in KINDS).get(dm["kind"], "Dome")
-        g = Group(PJ._mesh_of(faces),
+        mesh_ = PJ._mesh_of(faces)
+        smooth(mesh_)
+        g = Group(mesh_,
                   name=f"Dome {k} · {label} Ø{dm['d']:.2f} m · {lv['name']}")
         g.component = False
         g.material = {"color": COLOR.get(dm.get("color"), COLOR["white"]),
