@@ -38,7 +38,7 @@ SETS = (
     ("grazers", "Wall grazers under every roof and terrace edge", 250.0,
      3000),
     ("terraces", "Porches and terraces lit from above", 300.0, 3000),
-    ("garden", "Garden: bollards along the paths and lawns", 60.0, 2700),
+    ("garden", "Garden: bollards along the paths and lawns", 25.0, 2700),
     ("pillars", "Boundary and gate pillars: lamps on their tops", 120.0,
      2700),
 )
@@ -360,6 +360,67 @@ def show_render_tab(window) -> bool:
         return False
     d.show()
     d.raise_()
+    return True
+
+
+# ---- the lights' markers in the model ------------------------------------------------
+MARKERS_KEY = "cad2ingetrazo/render/markers"
+
+
+def markers_mode() -> str:
+    """"all" (shown), "hide_ours", "hide_all" — the bulbs the Render tab
+    draws over the model; the lights themselves always render."""
+    try:
+        from PySide6.QtCore import QSettings
+        v = QSettings("CAD2IngeTrazo", "render").value(MARKERS_KEY, "all")
+        return v if v in ("all", "hide_ours", "hide_all") else "all"
+    except Exception:  # noqa: BLE001
+        return "all"
+
+
+def set_markers_mode(mode, viewport=None) -> None:
+    from PySide6.QtCore import QSettings
+    QSettings("CAD2IngeTrazo", "render").setValue(MARKERS_KEY, mode)
+    install_marker_filter()
+    if viewport is not None:
+        viewport.update()
+
+
+def install_marker_filter() -> bool:
+    """Wrap the Render tab's marker drawing (once) so its bulbs follow
+    markers_mode(); its lights, list and render are untouched."""
+    import sys
+    mod = None
+    for name in ("ingetrazo_plugin_render_blender", "plugins.render_blender"):
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "draw_lights"):
+            break
+        mod = None
+    if mod is None:
+        return False
+    if getattr(mod, "_c2i_wrapped", False):
+        return True
+    orig = mod.draw_lights
+
+    def draw_lights(app, panel, viewport, painter, _orig=orig, _mod=mod):
+        mode = markers_mode()
+        if mode == "hide_all":
+            return None
+        if mode == "hide_ours":
+            st0 = _mod._state
+
+            def _state(a, _st0=st0):
+                st = _st0(a)
+                st["lights"] = [lt for lt in st["lights"] if not ours(lt)]
+                return st
+            _mod._state = _state
+            try:
+                return _orig(app, panel, viewport, painter)
+            finally:
+                _mod._state = st0
+        return _orig(app, panel, viewport, painter)
+    mod.draw_lights = draw_lights
+    mod._c2i_wrapped = True
     return True
 
 
@@ -709,6 +770,19 @@ def _dialog_class():
             self.gain.setSingleStep(0.25)
             self.gain.setValue(float(self._qs.value(SK + "gain", 1.5)))
             f.addRow("Overall brightness ×", self.gain)
+            self.markers = QComboBox()
+            for k, lab in (("all", "Show every light's bulb"),
+                           ("hide_ours", "Hide the bulbs of these lights "
+                                         "(«C2I · …»)"),
+                           ("hide_all", "Hide all the bulbs")):
+                self.markers.addItem(lab, k)
+            self.markers.setCurrentIndex(max(0, self.markers.findData(
+                markers_mode())))
+            self.markers.currentIndexChanged.connect(
+                lambda _i: set_markers_mode(self.markers.currentData(),
+                                            self._vp()))
+            f.addRow("In the model (the render keeps them all)", self.markers)
+            install_marker_filter()
             v.addLayout(f)
             b = QHBoxLayout()
             for text, fn in (("Put the lights in", self._put),
@@ -881,6 +955,11 @@ def _dialog_class():
             self.exposure.setValue(float(self._qs.value(SK + "exposure",
                                                         0.0)))
             f.addRow("Exposure (EV)", self.exposure)
+            self.auto_ev = QCheckBox("Auto exposure — meter the shot like a "
+                                     "camera (the EV above is added)")
+            self.auto_ev.setChecked(self._qs.value(SK + "auto_ev", "1")
+                                    == "1")
+            f.addRow(self.auto_ev)
             self.look = QComboBox()
             for k, lab in (("Medium High Contrast", "Medium-high contrast"),
                            ("Base Contrast", "Natural"),
@@ -891,6 +970,14 @@ def _dialog_class():
             self.look.setCurrentIndex(max(0, self.look.findData(
                 self._qs.value(SK + "look", "Medium High Contrast"))))
             f.addRow("Contrast", self.look)
+            self.lmode = QComboBox()
+            for k, lab in (("auto", "By the hour — full at night, dimmed at "
+                                    "dusk, only their glow by day"),
+                           ("on", "Always full"), ("off", "Off")):
+                self.lmode.addItem(lab, k)
+            self.lmode.setCurrentIndex(max(0, self.lmode.findData(
+                self._qs.value(SK + "lmode", "auto"))))
+            f.addRow("Lamps", self.lmode)
             self.bloom = QCheckBox("Soft glow round the lamps (bloom)")
             self.bloom.setChecked(self._qs.value(SK + "bloom", "1") == "1")
             f.addRow(self.bloom)
@@ -1042,11 +1129,13 @@ def _dialog_class():
                 q.setValue(SK + k, wd.value())
             for k, wd in (("sky", self.sky), ("ground", self.ground),
                           ("look", self.look), ("engine", self.engine),
-                          ("ph", self.ph), ("ph_res", self.ph_res)):
+                          ("ph", self.ph), ("ph_res", self.ph_res),
+                          ("lmode", self.lmode)):
                 q.setValue(SK + k, wd.currentData())
             q.setValue(SK + "quality", self.quality.currentIndex())
             for k, wd in (("sun_custom", self.sun_custom),
                           ("bloom", self.bloom), ("transp", self.transp),
+                          ("auto_ev", self.auto_ev),
                           ("blend", self.blend), ("h_bg", self.h_bg)):
                 q.setValue(SK + k, "1" if wd.isChecked() else "0")
 
@@ -1098,8 +1187,10 @@ def _dialog_class():
                         "ground": self.ground.currentData(),
                         "haze": self.haze.value(),
                         "exposure": self.exposure.value(),
+                        "auto_exposure": self.auto_ev.isChecked(),
                         "look": self.look.currentData(),
                         "bloom": self.bloom.isChecked(),
+                        "lights_mode": self.lmode.currentData(),
                         "transparent": self.transp.isChecked()}}
 
         def _hdri_path(self):

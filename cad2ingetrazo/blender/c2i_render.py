@@ -1,4 +1,4 @@
-# CAD2IngeTrazo 3.64.57 — runs INSIDE Blender, on top of IngeTrazo's own
+# CAD2IngeTrazo 3.64.58 — runs INSIDE Blender, on top of IngeTrazo's own
 # «Render with Blender» script (resources/blender/render_scene.py, copied
 # next to the job as render_scene_base.py): everything it does — the model,
 # the camera, the finishes, the lights, the engine — and then the job's
@@ -254,11 +254,20 @@ def make(mat, cat, opt, detail):
             n = _noise(nt, obj, 9.0, 12.0)
             ramp = nt.nodes.new("ShaderNodeValToRGB")
             nt.links.new(n.outputs["Fac"], ramp.inputs["Fac"])
-            ramp.color_ramp.elements[0].color = (0.06, 0.16, 0.03, 1.0)
-            ramp.color_ramp.elements[1].color = (0.22, 0.38, 0.08, 1.0)
+            # a real lawn: deep and lighter greens with drier patches,
+            # not one bright green
+            els = ramp.color_ramp.elements
+            els[0].color = (0.035, 0.075, 0.018, 1.0)
+            els[1].color = (0.13, 0.19, 0.05, 1.0)
+            els[1].position = 0.75
+            mid = els.new(0.45)
+            mid.color = (0.075, 0.13, 0.03, 1.0)
             nt.links.new(ramp.outputs["Color"], s)
-            n2 = _noise(nt, obj, 120.0, 4.0)
-            _bump(nt, bsdf, n2.outputs["Fac"], 0.6 * detail)
+            n2 = _noise(nt, obj, 160.0, 6.0)
+            _bump(nt, bsdf, n2.outputs["Fac"], 0.8 * detail)
+            _val(bsdf, ("Sheen Weight", "Sheen"), 0.25)   # blades' fuzz
+            _val(bsdf, ("Sheen Tint",), (0.30, 0.45, 0.12, 1.0))
+            _val(bsdf, ("Specular IOR Level", "Specular"), 0.2)
     elif cat == "soil":
         _val(bsdf, rough, 0.95)
         _vary(nt, bsdf, base, obj, 8.0, 0.3)
@@ -345,12 +354,56 @@ def apply_materials(c2i):
         cat = _cat_of(mat, cmap, tmap)
         if cat is None:
             continue
+        if cat not in ("glow", "glass"):
+            _albedo(mat)
         try:
             if make(mat, cat, opt, detail):
                 counts[cat] = counts.get(cat, 0) + 1
         except Exception as e:  # noqa: BLE001 — a plainer material is fine
             say("material", mat.name, "kept:", e)
+        if cat in ("wall", "stone", "concrete", "floor", "brick", "tiles",
+                   "wood", "paving"):
+            _bevel(mat)
     say("materials", ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+
+
+def _albedo(mat, cap=0.80):
+    """No paint is whiter than ~80 %: a model's pure white renders as a
+    blown-out glare. The colour kept, its brightness capped."""
+    bsdf = _bsdf(mat)
+    if bsdf is None:
+        return
+    sock = bsdf.inputs["Base Color"]
+    if sock.links:
+        return
+    c = list(sock.default_value)
+    m = max(c[:3])
+    if m > cap:
+        k = cap / m
+        sock.default_value = (c[0] * k, c[1] * k, c[2] * k, c[3])
+
+
+def _bevel(mat, radius=0.012):
+    """Rounded edges in the shading (Cycles): the light catches each
+    corner as on a real wall instead of a razor-sharp CG edge."""
+    bsdf = _bsdf(mat)
+    if bsdf is None:
+        return
+    nt = mat.node_tree
+    try:
+        bv = nt.nodes.new("ShaderNodeBevel")
+    except RuntimeError:
+        return
+    _val(bv, ("Radius",), radius)
+    if hasattr(bv, "samples"):
+        bv.samples = 6
+    n_in = bsdf.inputs["Normal"]
+    if n_in.links:                       # a bump: the bevel under it
+        src = n_in.links[0].from_node
+        if src.type == "BUMP" and not src.inputs["Normal"].links:
+            nt.links.new(bv.outputs["Normal"], src.inputs["Normal"])
+    else:
+        nt.links.new(bv.outputs["Normal"], n_in)
 
 
 # ---- the environment -----------------------------------------------------------------
@@ -379,22 +432,44 @@ def environment(scene, job, c2i):
     for o in list(scene.objects):          # the base script's sky lights
         if o.type == "LIGHT" and o.data.type == "SUN":
             bpy.data.objects.remove(o, do_unlink=True)
+    lights_k = {"night": 1.0, "blue": 0.8, "golden": 0.3,
+                "overcast": 0.15}.get(sky, 0.03)
     if sky.startswith("hdri"):
         path = env.get("hdri")
-        if path and str(path).startswith("builtin:"):
+        builtin = bool(path and str(path).startswith("builtin:"))
+        if builtin:
             path = os.path.join(bpy.utils.system_resource(
                 "DATAFILES", path="studiolights/world"),
                 str(path).split(":", 1)[1] + ".exr")
         if path and os.path.isfile(path):
-            night = "night" in os.path.basename(path).lower()
-            set_hdri(scene, path, (0.35 if night else 1.0) * sky_k,
-                     float(env.get("h_rot", 0.0)),
-                     bool(env.get("h_bg", True)))
+            low = os.path.basename(path).lower()
+            night = "night" in low or "moon" in low
+            dusk = any(k in low for k in ("sunset", "sunrise", "dusk",
+                                          "dawn", "evening", "golden"))
+            lights_k = 1.0 if night else (0.3 if dusk else 0.03)
+            rot = float(env.get("h_rot", 0.0))
+            img = bpy.data.images.load(path, check_existing=True)
+            sun, peak = hdri_sun(img, rot)
+            # Blender's own HDRIs are small and photographed close up: their
+            # light only, a physical sky (with their sun) seen behind
+            bg_mode = "hdri" if env.get("h_bg", True) and not builtin \
+                else "sky"
+            set_hdri(scene, img, (0.35 if night else 1.0) * sky_k, rot,
+                     bg_mode, sun)
             if env.get("sun_custom"):
-                s = add_sun(scene, _sun_dir(float(env.get("sun_az", 135.0)),
-                                            float(env.get("sun_el", 40.0))),
-                            4.0 * sun_k)
-            say("environment", "hdri", os.path.basename(path))
+                add_sun(scene, _sun_dir(float(env.get("sun_az", 135.0)),
+                                        float(env.get("sun_el", 40.0))),
+                        4.0 * sun_k)
+            elif not night and sun is not None and sun[2] > 0.02 and \
+                    peak < 200.0:
+                # its sun is clipped or soft: a lamp where it is, for crisp
+                # shadows (an unclipped HDRI sun casts its own)
+                s_ = add_sun(scene, sun, (2.0 if dusk else 3.5) * sun_k)
+                if dusk:
+                    s_.data.color = (1.0, 0.75, 0.5)
+                say("hdri sun", "at %.0f° up, lamp added" %
+                    math.degrees(math.asin(max(-1, min(1, sun[2])))))
+            say("environment", "hdri", os.path.basename(path), bg_mode)
         else:
             say("environment", "hdri missing:", path, "- a physical sky")
             set_world(scene, sun_dir)
@@ -429,8 +504,10 @@ def environment(scene, job, c2i):
                 bpy.data.objects.remove(o, do_unlink=True)
         z = (job.get("ground") or {}).get("z", -0.002) - 0.01
         add_ground(scene, z, 2000.0, cols.get(gnd, cols["plain"]))
-        g = bpy.data.materials.get("IngeTrazo ground")
-        if g is not None:
+        go = bpy.context.active_object        # the plane just added
+        g = go.active_material if go is not None else None
+        if g is not None and gnd in ("grass", "concrete", "asphalt",
+                                     "sand"):
             make(g, "grass" if gnd == "grass" else "concrete", {}, 1.0)
     # haze: a thin volume in the world (Cycles)
     haze = float(env.get("haze", 0.0))
@@ -453,13 +530,62 @@ def environment(scene, job, c2i):
             except TypeError:
                 continue
     scene.render.film_transparent = bool(env.get("transparent", False))
-    if env.get("bloom"):
+    # the lamps for the hour: full at night, a glow by day (the lamps'
+    # glass still shows lit)
+    mode = env.get("lights_mode", "auto")
+    k = {"auto": lights_k, "on": 1.0, "off": 0.0}.get(mode, lights_k)
+    n = 0
+    for o in scene.objects:
+        if o.type == "LIGHT" and o.data.type != "SUN" and \
+                not o.name.startswith("IngeTrazo moon"):
+            o.data.energy *= k
+            n += 1
+            if k == 0.0:
+                o.hide_render = True
+    say("lamps", n, "at", "%.0f%%" % (k * 100))
+    if env.get("bloom") and k >= 0.25:
         _bloom(scene)
 
 
-def set_hdri(scene, path, strength, rot_deg, show_bg=True):
-    """A photographed sky: the HDR image all round, lighting the scene (and
-    seen behind it, or only its light with a plain sky behind)."""
+def hdri_sun(img, rot_deg):
+    """Where an HDRI's sun is: (direction toward it in the scene, its peak
+    brightness) — the brightest spot of the upper half, read through the
+    world's rotation. None when it has no clear sun."""
+    try:
+        import numpy as np
+        w, h = img.size
+        if w < 8 or h < 4:
+            return None, 0.0
+        px = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(px)
+        a = px.reshape(h, w, 4)[:, :, :3]
+        lum = a @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        lum[: h // 2, :] = 0.0                     # rows go bottom → top
+        idx = int(np.argmax(lum))
+        peak = float(lum.flat[idx])
+        med = float(np.median(lum[h // 2:, :]))
+        if peak < max(3.0, med * 8.0):
+            return None, peak
+        y, x = divmod(idx, w)
+        u, v = (x + 0.5) / w, (y + 0.5) / h
+        phi = (u - 0.5) * 2.0 * math.pi
+        th = (v - 0.5) * math.pi
+        d = (-math.cos(phi) * math.cos(th), math.sin(phi) * math.cos(th),
+             math.sin(th))
+        # the mapping turns the lookup by +rot: the scene's direction is
+        # the lookup turned back
+        r = -math.radians(rot_deg)
+        d = (d[0] * math.cos(r) - d[1] * math.sin(r),
+             d[0] * math.sin(r) + d[1] * math.cos(r), d[2])
+        return d, peak
+    except Exception as e:  # noqa: BLE001
+        say("hdri sun", "not read:", e)
+        return None, 0.0
+
+
+def set_hdri(scene, img, strength, rot_deg, bg_mode="hdri", sun=None):
+    """A photographed sky: the HDR image all round lights the scene; seen
+    behind it (bg_mode "hdri") or a physical sky with its sun ("sky")."""
     world = bpy.data.worlds.new("C2I HDRI")
     scene.world = world
     if hasattr(world, "use_nodes"):
@@ -470,7 +596,7 @@ def set_hdri(scene, path, strength, rot_deg, show_bg=True):
     out = next((n for n in nodes if n.type == "OUTPUT_WORLD"), None) or \
         nodes.new("ShaderNodeOutputWorld")
     env = nodes.new("ShaderNodeTexEnvironment")
-    env.image = bpy.data.images.load(path, check_existing=True)
+    env.image = img
     tc = nodes.new("ShaderNodeTexCoord")
     mp = nodes.new("ShaderNodeMapping")
     rot = mp.inputs.get("Rotation")
@@ -480,18 +606,37 @@ def set_hdri(scene, path, strength, rot_deg, show_bg=True):
     links.new(mp.outputs["Vector"], env.inputs["Vector"])
     links.new(env.outputs["Color"], bg.inputs["Color"])
     bg.inputs["Strength"].default_value = strength
-    if show_bg:
+    if bg_mode == "hdri":
         links.new(bg.outputs[0], out.inputs["Surface"])
         return
-    # only its light: the camera sees a plain sky
-    plain = nodes.new("ShaderNodeBackground")
-    plain.inputs["Color"].default_value = (0.55, 0.68, 0.85, 1.0)
-    plain.inputs["Strength"].default_value = 1.0
+    # its light only: the camera sees a physical sky
+    sky_bg = nodes.new("ShaderNodeBackground")
+    sky = nodes.new("ShaderNodeTexSky")
+    for kind in ("MULTIPLE_SCATTERING", "NISHITA", "HOSEK_WILKIE",
+                 "PREETHAM"):
+        try:
+            sky.sky_type = kind
+            break
+        except (TypeError, ValueError):
+            continue
+    d = sun if sun is not None and sun[2] > 0.02 else (0.4, -0.5, 0.75)
+    ln = math.sqrt(sum(c * c for c in d)) or 1.0
+    d = tuple(c / ln for c in d)
+    if hasattr(sky, "sun_elevation"):
+        sky.sun_elevation = math.asin(max(-1.0, min(1.0, d[2])))
+    if hasattr(sky, "sun_rotation"):
+        sky.sun_rotation = -math.atan2(d[0], d[1]) + math.pi / 2
+    if hasattr(sky, "sun_direction"):
+        sky.sun_direction = d
+    if hasattr(sky, "sun_disc"):
+        sky.sun_disc = False
+    links.new(sky.outputs["Color"], sky_bg.inputs["Color"])
+    sky_bg.inputs["Strength"].default_value = 0.12
     lp = nodes.new("ShaderNodeLightPath")
     mix = nodes.new("ShaderNodeMixShader")
     links.new(lp.outputs["Is Camera Ray"], mix.inputs[0])
     links.new(bg.outputs[0], mix.inputs[1])
-    links.new(plain.outputs[0], mix.inputs[2])
+    links.new(sky_bg.outputs[0], mix.inputs[2])
     links.new(mix.outputs[0], out.inputs["Surface"])
 
 
@@ -545,6 +690,67 @@ def _bloom(scene):
 
 
 # ---- main ---------------------------------------------------------------------------
+def auto_exposure(scene, c2i):
+    """Meter the shot like a camera: a small quick render, read in linear
+    light, the exposure set so the house sits at mid-grey (centre-weighted;
+    a night kept dark). The user's EV is added on top."""
+    import numpy as np
+    env = c2i.get("env") or {}
+    if not env.get("auto_exposure", True):
+        return
+    sky = env.get("sky", "day")
+    night = sky in ("night", "blue") or "night" in str(env.get("hdri", ""))
+    r = scene.render
+    keep = dict(pct=r.resolution_percentage, path=r.filepath,
+                fmt=r.image_settings.file_format,
+                comp=getattr(r, "use_compositing", None))
+    cyc = scene.render.engine == "CYCLES"
+    if cyc:
+        keep["samples"] = scene.cycles.samples
+    tmp = os.path.join(os.path.dirname(bpy.path.abspath(r.filepath)) or ".",
+                       "c2i_meter.exr")
+    try:
+        r.resolution_percentage = max(5, min(100, int(36000 /
+                                                      max(1, r.resolution_x))))
+        r.image_settings.file_format = "OPEN_EXR"
+        r.filepath = tmp
+        if keep["comp"] is not None:
+            r.use_compositing = False
+        if cyc:
+            scene.cycles.samples = 24
+        say("metering", "the light")
+        bpy.ops.render.render(write_still=True)
+        img = bpy.data.images.load(tmp, check_existing=False)
+        w, h = img.size
+        px = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(px)
+        a = px.reshape(h, w, 4)[:, :, :3]
+        lum = a @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        yy, xx = np.mgrid[0:h, 0:w]
+        wgt = np.exp(-(((xx - w / 2) / (0.35 * w)) ** 2 +
+                       ((yy - h / 2) / (0.35 * h)) ** 2))
+        lavg = float(np.exp((wgt * np.log(lum + 1e-4)).sum() / wgt.sum()))
+        key = 0.07 if night else 0.18
+        ev = max(-5.0, min(4.0, math.log2(key / max(lavg, 1e-5))))
+        scene.view_settings.exposure = ev + float(env.get("exposure", 0.0))
+        say("exposure", "%.2f EV (metered %.3f)" % (ev, lavg))
+        bpy.data.images.remove(img)
+    except Exception as e:  # noqa: BLE001
+        say("exposure", "kept:", e)
+    finally:
+        r.resolution_percentage = keep["pct"]
+        r.filepath = keep["path"]
+        r.image_settings.file_format = keep["fmt"]
+        if keep["comp"] is not None:
+            r.use_compositing = keep["comp"]
+        if cyc:
+            scene.cycles.samples = keep["samples"]
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def c2i_main():
     job = load_job()
     c2i = job.get("c2i") or {}
@@ -571,10 +777,26 @@ def c2i_main():
     environment(scene, job, c2i)
     if scene.render.engine == "CYCLES":
         try:
-            scene.cycles.use_denoising = True
-            scene.cycles.max_bounces = 8
+            c = scene.cycles
+            c.use_denoising = True
+            c.max_bounces = 8
+            for attr, v in (("use_adaptive_sampling", True),
+                            ("adaptive_threshold", 0.01),
+                            ("sample_clamp_indirect", 8.0),
+                            ("blur_glossy", 0.5),
+                            ("caustics_reflective", False),
+                            ("caustics_refractive", False),
+                            ("use_light_tree", True),
+                            ("denoiser", "OPENIMAGEDENOISE"),
+                            ("denoising_input_passes", "RGB_ALBEDO_NORMAL"),
+                            ("denoising_prefilter", "ACCURATE")):
+                try:
+                    setattr(c, attr, v)
+                except (AttributeError, TypeError, ValueError):
+                    pass
         except AttributeError:
             pass
+    auto_exposure(scene, c2i)
     last = {"text": None}
 
     def _stats(text, *_a):

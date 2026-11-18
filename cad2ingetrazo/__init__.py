@@ -11,7 +11,7 @@ ArchXQ IT Lite (c) Orlando Souza / XQ, GPL-3.0-or-later.
 """
 from __future__ import annotations
 
-__version__ = "3.64.57"
+__version__ = "3.64.58"
 TITLE = "CAD2IngeTrazo"
 
 _panel = None
@@ -40,6 +40,14 @@ def setup(app) -> None:
 
     _panel = Panel(app)
     dock = app.add_panel(TITLE, _panel)
+
+    def _markers():                 # 3.64.58: the render lights' bulbs
+        try:
+            from . import lighting
+            lighting.install_marker_filter()
+        except Exception:  # noqa: BLE001
+            log_error("setup.markers")
+    QTimer.singleShot(2000, _markers)
 
     def show():
         try:
