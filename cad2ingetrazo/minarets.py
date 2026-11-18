@@ -26,7 +26,9 @@ ACCENT = (0.70, 0.22, 0.18)          # the galleries' red band
 CUPOLA = (0.93, 0.92, 0.88)
 GOLD = (0.86, 0.69, 0.25)
 CUPOLAS = [("onion", "Onion"), ("bulbous", "Bulbous (fluted)"),
-           ("conical", "Conical (Ottoman pencil)")]
+           ("conical", "Conical (Ottoman pencil)"),
+           ("modern", "Modern (slim square shaft, open lantern)")]
+SLOT = (0.30, 0.31, 0.33)            # a modern minaret's screened slots
 
 
 def _ring(cx, cy, r, n, rot=0.0, flutes=0, depth=0.06):
@@ -78,8 +80,67 @@ def _rail(cx, cy, r, z, n, color, h=0.9, t=0.06, rot=0.0, square=False,
             PJ._prism(outer.difference(inner), z, z + h, 1e-5)]
 
 
+def build_modern(m, z0, hi=False):
+    """3.64.66: a modern minaret — a slim square shaft with a screened
+    slot up each face, a band, an open lantern on four posts, a flat cap
+    and a small dome with its finial."""
+    cx, cy = float(m["x"]), float(m["y"])
+    B = max(float(m.get("b", 1.5)), 0.6)
+    H = max(float(m.get("h", 30.0)), 6.0)
+    rot = float(m.get("rot", 0.0) or 0.0)
+    col = DM.COLOR.get(m.get("color", "white"), STONE)
+    parts = []
+    shaft = 0.80 * H
+    parts.append(("shaft", _prism(_sq(cx, cy, B, rot), z0, z0 + shaft,
+                                  col), col))
+    a = math.radians(rot)
+    ux, uy = math.cos(a), math.sin(a)
+    for k in range(4):                       # a slot up each face
+        th = a + k * math.pi / 2
+        nx, ny = math.cos(th), math.sin(th)
+        tx, ty = -ny, nx
+        w = 0.34 * B
+        c0 = (cx + nx * (B / 2 + 0.005), cy + ny * (B / 2 + 0.005))
+        pts = [(c0[0] + tx * w / 2, c0[1] + ty * w / 2),
+               (c0[0] - tx * w / 2, c0[1] - ty * w / 2),
+               (c0[0] - tx * w / 2 - nx * 0.04, c0[1] - ty * w / 2 - ny * 0.04),
+               (c0[0] + tx * w / 2 - nx * 0.04, c0[1] + ty * w / 2 - ny * 0.04)]
+        parts.append(("slot", _prism(pts, z0 + 0.22 * H, z0 + 0.74 * H,
+                                     SLOT), SLOT))
+    _ = (ux, uy)
+    z = z0 + shaft
+    parts.append(("band", _prism(_sq(cx, cy, B * 1.12, rot), z - 0.35, z,
+                                 TRIM), TRIM))
+    lan = 0.10 * H                          # the open lantern
+    p = B * 0.16
+    for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        px = cx + (sx * (B / 2 - p / 2)) * math.cos(a) - \
+            (sy * (B / 2 - p / 2)) * math.sin(a)
+        py = cy + (sx * (B / 2 - p / 2)) * math.sin(a) + \
+            (sy * (B / 2 - p / 2)) * math.cos(a)
+        parts.append(("post", _prism(_sq(px, py, p, rot), z, z + lan, col),
+                      col))
+    parts.append(("core", _prism(_sq(cx, cy, B * 0.42, rot), z, z + lan,
+                                 SLOT), SLOT))
+    z += lan
+    parts.append(("cap", _prism(_sq(cx, cy, B * 1.18, rot), z, z + 0.30,
+                                col), col))
+    z += 0.30
+    R = B * 0.36
+    prof = DM.profile("hemi", R, R, 12 if not hi else 20)
+    parts.append(("cupola", DM._lathe(prof, z, cx, cy, 20, CUPOLA), CUPOLA))
+    z += prof[-1][1] - 0.02
+    fh = max(H - (z - z0), 0.8)
+    parts.append(("finial", DM._lathe(
+        [(0.05, 0.0), (0.08, fh * 0.2), (0.03, fh * 0.45), (0.0, fh)],
+        z, cx, cy, 10, GOLD), GOLD))
+    return parts
+
+
 def build_minaret(m, z0, hi=False):
     """[(part, faces, rgb)] of one minaret rising from ``z0``."""
+    if m.get("cupola") == "modern":
+        return build_modern(m, z0, hi)
     cx, cy = float(m["x"]), float(m["y"])
     B = max(float(m.get("b", 1.8)), 0.6)
     H = max(float(m.get("h", 30.0)), 6.0)

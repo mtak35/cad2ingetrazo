@@ -56,7 +56,7 @@ DEFAULTS = {
     "slab": "*SLAB*, *FLOOR*OUTLINE*",
     "holes": "*STAIR*, *SHAFT*, *LIFT*, *VOID*, *DUCT*, *OPENING*",
     "text": "*",
-    "plot": "*PLOT*, *SITE*, *BOUNDARY*, *PROP*",
+    "plot": "*PLOT*, *SITE*, *BOUNDARY*, *BOUNDRY*, *PROP*",
     "footings": "*FOOT*, *FOUND*, *FNDN*",
     "stairs": "*STAIR*, *ESCALERA*",
     "escalators": "*ESCALAT*, *TRAV*LATOR*, *MOVING*WALK*",
@@ -215,7 +215,8 @@ def empty() -> dict:
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
-            "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}}
+            "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {},
+            "hill": {}, "plan_area": {}, "cad_domes": {}}
 
 
 def load(raw) -> dict:
@@ -262,6 +263,14 @@ def load(raw) -> dict:
                       if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
                        if k in ids and isinstance(v, list)}
+    doc["plan_area"] = {k: v for k, v in (raw.get("plan_area") or {}).items()
+                        if k in ids and isinstance(v, list)}
+    doc["cad_domes"] = {k: v for k, v in (raw.get("cad_domes") or {}).items()
+                        if k in ids and isinstance(v, list)}
+    # 3.64.66: two ground levels (a site on a slope)
+    hl_ = raw.get("hill") if isinstance(raw.get("hill"), dict) else {}
+    doc["hill"] = {k: v for k, v in hl_.items()
+                   if k in ("on", "lower", "upper", "low", "roads", "manual")}
     # 3.64.46: a perspective's look (its trims made at every rebuild)
     lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
     from .lookstyle import KIT_DEFAULT as KD_
@@ -1010,7 +1019,7 @@ def basement_windows(doc) -> dict:
     # (before that, nothing is taken away — the levels may change yet)
     final = any(w["level"] == g["id"] for w in arch["walls"])
     for lv in arch["levels"]:
-        if lv.get("kind") != "basement":
+        if lv.get("kind") != "basement" or _lower_ground(doc, lv["id"]):
             continue
         lid = lv["id"]
         z0 = info[lid]["z0"]
@@ -5657,6 +5666,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                      and not _match(lay[s[4]], P["stairs"])]
             xo = slab_openings(xsegs, [], shafts + openings_all, maxlen=30.0,
                                maxarea=400.0)
+            try:            # 3.64.66: a thin X box in a wall's gap (an
+                xo = _not_wall_gaps(arch, lid, xo)   # arched opening's
+            except Exception:  # noqa: BLE001      # hidden lines): not a
+                from .host import log_error        # hole in the floor
+                log_error("project._not_wall_gaps")
             rep["voids"] = len(xo)
             openings_all = openings_all + xo
         rep["shafts"] = 0
@@ -5991,9 +6005,19 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     # the plot, when this part of the drawing holds its boundary
     rep["plot"] = False
     mine_plot = not doc["arch"].get("plot") or \
-        doc["imports"].get(PLOT_KEY, {}).get("level") == lid
-    if mine_plot and (roles_found.get("plot") or how.get("plot_from_cad")):
+        doc["imports"].get(PLOT_KEY, {}).get("level") == lid or \
+        _plot_stale(doc, lid)
+    if mine_plot and (roles_found.get("plot") or how.get("plot_from_cad")
+                      or _plot_layer_segs(raw, how.get("region"), P)):
         loop = plot_from_loop(pl, P)
+        if loop and not _plot_holds(doc, lid, loop):
+            loop = None         # (a planter's outline, not the plot)
+        if not loop:            # 3.64.66: the plot's outline drawn apart
+            try:                # (beside the plans), its lines in this one
+                loop = plot_drawn_apart(raw, how, P, base)
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project.plot_drawn_apart")
         if loop and set_plot(doc, loop) is None:
             rep["plot"] = True
             doc["imports"][PLOT_KEY] = dict(how, file=str(path), level=lid)
@@ -6001,7 +6025,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     # a basement's outer walls: RCC retaining walls, no doors or windows
     lv_ = next((x for x in arch["levels"] if x["id"] == lid), None)
     if lv_ is not None and lv_.get("kind") == "basement" and \
-            st.get("basement_rcc", True):
+            st.get("basement_rcc", True) and \
+            not _lower_ground(doc, lid):
+        # (3.64.66: a lower ground floor on a slope is no basement: its
+        # sides open on the lower road)
         try:
             rep["retaining"] = basement_walls(doc, lid)["walls"]
         except Exception:  # noqa: BLE001
@@ -6023,6 +6050,18 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.apply_hidden_lines")
+    try:                    # 3.64.66: what the plan covers (a site's two
+        from . import hillside as HS_            # grounds: the upper one)
+        doc.setdefault("plan_area", {})[lid] = HS_.plan_area(pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.plan_area")
+    try:                    # 3.64.66: the domes the plan draws (circles)
+        from . import mosque as MQ_
+        rep["domes"] = MQ_.read_domes(doc, lid, pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.read_domes")
     # the floor levels the CAD notes («LEV. +4'-0"»): the levels set so
     if st.get("levels_cad", True):
         try:
@@ -10182,6 +10221,12 @@ def levels_from_cad(doc) -> list:
     levels = arch["levels"]
     if not levels:
         return []
+    try:                      # 3.64.66: a lower and an upper ground floor
+        from . import hillside as HS_
+        HS_.apply(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.hillside apply")
     k_abs = 0.3048 if any(
         (h or {}).get("unit_k") in (0.0254, 0.3048)
         for h in doc["imports"].values()) else 1.0
@@ -10241,6 +10286,12 @@ def levels_from_cad(doc) -> list:
                         e_.get("note") and e_.get("level") == lv["id"]:
                     o_ = float(e_.get("offset", 0.0) or 0.0) - d_
                     e_["offset"] = 0.0 if abs(o_) < 0.005 else round(o_, 4)
+    try:
+        from . import hillside as HS_
+        HS_.finish(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.hillside finish")
     return changed
 
 
@@ -11527,13 +11578,16 @@ def _parking_groups(doc):
         z = z_of[lid] + open_offset(doc, lid) + 0.012
         faces = [f for a in areas_ for f in LS.faces(a, z)]
         zt_ = None
-        if g_i is not None and lid == arch["levels"][g_i]["id"]:
+        if (g_i is not None and lid == arch["levels"][g_i]["id"]) or \
+                (doc.get("hill") or {}).get("lower") == lid:
             # 3.64.4: the ground floor's lawns as the plan hatches them, a
             # bed of earth and grass 6" over the natural ground (the
-            # setting) — not on the floor's level
+            # setting) — not on the floor's level (3.64.66: a lower ground
+            # floor's, on the lower road's ground)
             try:
                 from shapely.geometry import Polygon as _Pg
-                zb_ = plot_top(doc)
+                zb_ = plot_top(doc) if (doc.get("hill") or {}).get(
+                    "lower") != lid else _hill_low(doc)
                 zt_ = zb_ + float(st.get("landscape_h", 0.1524) or 0.0)
                 pvs_ = [_Pg(q).buffer(0) for q in
                         (doc.get("pavers") or {}).get(lid) or []]
@@ -13048,6 +13102,12 @@ def _site_groups(doc):
     site_ = dict(doc["site"], _front=[      # 3.64.34: the plot's front
         i for i, f_ in enumerate(plot.get("sb_front") or []) if f_])
     parts, sym = SITE_.build(corners, site_, z0)
+    try:                    # 3.64.66: on a slope, on the ground it crosses
+        from . import hillside as HS_
+        parts = HS_.lift(doc, parts, z0)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.hillside lift")
     low = arch["levels"][0]["id"]
     out = []
     blocks = {}                               # gate index -> [groups]
@@ -13812,6 +13872,15 @@ def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
     return None
 
 
+def _hill_low(doc) -> float:
+    """The lower road's ground on a slope (3.64.66)."""
+    try:
+        from . import hillside as HS_
+        return HS_.low_z(doc)
+    except Exception:  # noqa: BLE001
+        return plot_top(doc)
+
+
 def plot_top(doc) -> float:
     """The plot's ground: under the ground floor by the plinth."""
     arch = doc["arch"]
@@ -13847,6 +13916,181 @@ def set_plot(doc, corners, front=None, dist=None) -> str | None:
     arch = dict(doc["arch"], plot=raw)
     doc["arch"]["plot"] = M.load(arch)["plot"]
     return None
+
+
+def _not_wall_gaps(arch, lid, boxes) -> list:
+    """The X-marked boxes that are not an opening's in a wall: a box a
+    wall thick or less (≤ 0.6 m across) lying on the line of the level's
+    walls, its ends at their piers — the arched gap the plan's hidden
+    lines draw — is the wall's opening, not a cut in the slab."""
+    from shapely.geometry import Polygon as _Pg, LineString as _Ls
+    ws = [w for w in arch["walls"] if w["level"] == lid and "a" in w]
+    if not ws or not boxes:
+        return boxes
+    lines = []
+    for w in ws:                    # (each run on past its ends: the gap
+        a, b_ = w["a"], w["b"]      # between two piers)
+        L = math.dist(a, b_)
+        if L < 0.05:
+            continue
+        ux, uy = (b_[0] - a[0]) / L, (b_[1] - a[1]) / L
+        lines.append((_Ls([(a[0] - 2.5 * ux, a[1] - 2.5 * uy),
+                           (b_[0] + 2.5 * ux, b_[1] + 2.5 * uy)]),
+                      float(w.get("t", 0.2))))
+    out = []
+    for b in boxes:
+        try:
+            g = _Pg(b).buffer(0)
+            r = g.minimum_rotated_rectangle
+            cs = list(r.exterior.coords)[:4]
+            e1 = math.dist(cs[0], cs[1])
+            e2 = math.dist(cs[1], cs[2])
+            thin = min(e1, e2)
+            c = g.centroid
+            on = any(ln.distance(c) <= t / 2 + 0.08 and thin <= t + 0.12
+                     for ln, t in lines)
+        except Exception:  # noqa: BLE001
+            on = False
+        if not (on and thin <= 0.6):
+            out.append(b)
+    return out
+
+
+def _lower_ground(doc, lid) -> bool:
+    """The level is a lower ground floor (its plan's title says so, or
+    the site's two grounds have it): no basement."""
+    if (doc.get("hill") or {}).get("lower") == lid:
+        return True
+    try:
+        from . import hillside as HS_
+        return bool(HS_.LOWER_RX.search(HS_.titles(doc).get(lid, "")))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _plot_holds(doc, lid, loop) -> bool:
+    """The outline holds most of the level's walls (a plot, not a bed)."""
+    ws = [w for w in doc["arch"]["walls"] if w["level"] == lid and "a" in w]
+    if len(ws) < 4:
+        return True
+    try:
+        from shapely.geometry import Point as _Pt, Polygon as _Pg
+        g = _Pg(loop).buffer(0.5)
+        k = sum(1 for w in ws if g.contains(_Pt((w["a"][0] + w["b"][0]) / 2,
+                                                 (w["a"][1] + w["b"][1]) / 2)))
+        return k >= 0.6 * len(ws)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _plot_stale(doc, lid) -> bool:
+    """The plot set earlier lies nowhere near this level's walls (from
+    another drawing, another place): it is replaced."""
+    plot = doc["arch"].get("plot")
+    ws = [w for w in doc["arch"]["walls"] if w["level"] == lid and "a" in w]
+    if not plot or not ws:
+        return False
+    try:
+        from shapely.geometry import Point as _Pt, Polygon as _Pg
+        g = _Pg(plot["corners"]).buffer(5.0)
+        return not any(g.contains(_Pt((w["a"][0] + w["b"][0]) / 2,
+                                      (w["a"][1] + w["b"][1]) / 2))
+                       for w in ws)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _plot_layer(name, P) -> bool:
+    return _match(name, P.get("plot") or []) or bool(
+        re.search(r"PLOT|BOUNDA?RY|BOUNDRY", str(name or "").upper()))
+
+
+def _plot_layer_segs(raw, region, P) -> list:
+    """The plot layers' lines inside ``region`` (drawing units)."""
+    if not region:
+        return []
+    x0, y0, x1, y1 = (float(v) for v in region)
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    return [s for s in raw["segs"] if _plot_layer(s[4], P)
+            and x0 <= (s[0] + s[2]) / 2 <= x1
+            and y0 <= (s[1] + s[3]) / 2 <= y1]
+
+
+def plot_drawn_apart(raw, how, P, base) -> list | None:
+    """The plot's closed outline drawn beside the plans (a site plan's
+    boundary on its own), moved onto this plan: the shift that lays most
+    of the plan's own plot lines on it. Its lines are chained (a polyline
+    and the arc closing it) with a small snap. Model metres, or None."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import polygonize, unary_union
+    region = how.get("region")
+    mine = _plot_layer_segs(raw, region, P)
+    if len(mine) < 3:
+        return None
+    k = raw["unit"]
+    tol = 0.08 / k                       # 8 cm, in drawing units
+    x0, y0, x1, y1 = (float(v) for v in region)
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    out_ = [s for s in raw["segs"] if _plot_layer(s[4], P)
+            and not (x0 <= (s[0] + s[2]) / 2 <= x1
+                     and y0 <= (s[1] + s[3]) / 2 <= y1)]
+    if not out_:
+        return None
+
+    def q(v):
+        return round(v / tol) * tol
+    lines = [LineString([(q(s[0]), q(s[1])), (q(s[2]), q(s[3]))])
+             for s in out_ if math.dist(s[:2], s[2:4]) > 1e-9]
+    polys = [g for g in polygonize(unary_union(lines))
+             if g.area * k * k > 100.0]
+    if not polys:
+        return None
+    # the outer rings of the closed parts (a plot drawn with inner lines)
+    rings = [Polygon(g.exterior) for g in
+             getattr(unary_union(polys), "geoms", [unary_union(polys)])]
+    pts = [(s[0], s[1]) for s in mine] + [(s[2], s[3]) for s in mine]
+    plot_pts = {(s[0], s[1]) for s in mine if "PLOT" in str(s[4]).upper()} | \
+        {(s[2], s[3]) for s in mine if "PLOT" in str(s[4]).upper()}
+    seen = set()
+    pts = [p for p in pts if not (round(p[0] / tol), round(p[1] / tol)) in seen
+           and not seen.add((round(p[0] / tol), round(p[1] / tol)))]
+    best = None
+    for ring in rings:
+        if ring.area * k * k > 200000.0:
+            continue
+        ext = ring.exterior
+        vs = list(ext.coords)[:-1]
+        if len(vs) > 60:
+            vs = vs[::max(len(vs) // 60, 1)]
+        sample = pts[::max(1, len(pts) // 40)]
+        cand = sorted(pts, key=lambda p: 0 if p in plot_pts else 1)[:300]
+        for v in vs:
+            for p in cand:
+                dx, dy = p[0] - v[0], p[1] - v[1]
+                hit = sum(1 for r in sample
+                          if ext.distance(Point(r[0] - dx, r[1] - dy)) < 3 * tol)
+                if best is None or hit > best[0]:
+                    best = (hit, ring, dx, dy)
+    if best is None or best[0] < max(6, 0.25 * len(sample)):
+        return None
+    _hit, ring, dx, dy = best
+    loop = [(x + dx, y + dy) for x, y in list(ring.exterior.coords)[:-1]]
+    dr = dict(raw, segs=[], loops=[{"layer": "PLOT", "pts": loop}],
+              layers=["PLOT"], circles=[], arcs=[], texts=[], fills=[],
+              inserts=[], seg_style=[], styles=[])
+    plc = cadread.place(dr, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
+                        how.get("rot", 0.0))
+    pts_m = plc["loops"][0]["pts"] if plc["loops"] else None
+    if not pts_m:
+        return None
+    g = Polygon(pts_m).buffer(0).simplify(0.05)
+    if g.geom_type != "Polygon" or g.area < 20.0:
+        return None
+    from shapely.geometry.polygon import orient
+    g = orient(g, 1.0)                     # counter-clockwise
+    return [[round(x, 4), round(y, 4)] for x, y in list(g.exterior.coords)[:-1]]
 
 
 def plot_from_loop(drawing_placed, P) -> list | None:
@@ -14026,7 +14270,8 @@ def _garden_z(doc, lid, x, y):
             except Exception:  # noqa: BLE001
                 pass
     st = doc["settings"]
-    zb = plot_top(doc)
+    zb = plot_top(doc) if (doc.get("hill") or {}).get("lower") != lid \
+        else _hill_low(doc)
     for a in (doc.get("landscape") or {}).get(lid) or []:
         try:
             if Polygon(a).buffer(0.05).contains(q):
@@ -14468,9 +14713,32 @@ def _plot_groups(doc):
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project._plot_groups cuts")
+    z_pl = top
+    try:                # 3.64.66: on a slope, the plate on the lower road;
+        from . import hillside as HS_      # the upper ground its own block
+        if HS_.on(doc):
+            z_pl = HS_.low_z(doc)
+            H_ = HS_.high_area(doc)
+            if H_ is not None:
+                from shapely.geometry import Polygon as _Pg
+                np_ = []
+                for outer, hs in plates:
+                    g_ = _Pg(outer, [list(h) for h in hs]).buffer(0) \
+                        .difference(H_)
+                    for q in getattr(g_, "geoms", [g_]):
+                        if q.geom_type != "Polygon" or q.area < 0.05:
+                            continue
+                        np_.append((S._ccw([tuple(c) for c in list(
+                            q.exterior.coords)[:-1]]), [list(reversed(
+                                S._ccw([tuple(c) for c in list(
+                                    h.coords)[:-1]]))) for h in q.interiors]))
+                plates = np_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._plot_groups hill")
     fs_ = []
     for outer, hs in plates:
-        fs_ += W.solid({"outer": outer, "holes": hs}, top - 0.10, top)
+        fs_ += W.solid({"outer": outer, "holes": hs}, z_pl - 0.10, z_pl)
     for f in fs_:
         if isinstance(f, dict):
             _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
@@ -14744,6 +15012,12 @@ def commit(viewport, doc, opts=None) -> None:
     try:
         new_groups += _plot_groups(doc)
         new_groups += _site_groups(doc)
+        try:                       # 3.64.66: the earth under the upper
+            from . import hillside as HS_     # ground floor, retained
+            new_groups += HS_.fill_groups(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.hillside fill")
         new_groups += _dig_groups(doc)
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error

@@ -24,7 +24,8 @@ import math
 
 STYLES = {"auto": "Auto (from the picture)",
           "mediterranean": "Mediterranean / Spanish villa",
-          "modern": "Modern (glass, black frames, sconces)"}
+          "modern": "Modern (glass, black frames, sconces)",
+          "mosque": "Modern mosque (white, arches, domes, minarets)"}
 EAVE = 0.6096                     # 2'-0" eaves
 SLOPE = 22.0
 MIN_SIDE = 1.0                    # a block narrower than this: no roof of its own
@@ -256,6 +257,8 @@ KIT_DEFAULT = {
     "gf_clad": False, "shutters": False, "siding": False,
     "eave_brackets": False,
     "fascia_d": 0.30, "fascia_h": 0.55, "accent": [0.24, 0.16, 0.10],
+    # 3.64.66: a mosque's own elements (mosque.py)
+    "mosque": False,
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)
@@ -348,9 +351,20 @@ PRESETS = {
         "stone": [0.80, 0.72, 0.60], "roof_c": [0.70, 0.38, 0.26],
         "accent": [0.95, 0.92, 0.84], "gate_color": "black"}),
     "mediterranean": ("Traditional — Mediterranean / Spanish villa", {}),
+    "mosque": ("Modern mosque (white, arched, domes, slim minarets)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "black", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "wall": [0.95, 0.94, 0.91], "trim": [0.97, 0.96, 0.93],
+        "stone": [0.88, 0.86, 0.82], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.30, 0.31, 0.33], "gate_color": "charcoal"}),
 }
 #: a line on what each style is, under the designer's choice
 STYLE_NOTES = {
+    "mosque": "White, every opening arched, deep white slab edges on the "
+              "tiers, the domes the plans draw, slim square minarets at "
+              "the prayer hall, a lattice boundary wall.",
     "classical": "Symmetry, columns, pediments, Greek / Roman proportions.",
     "neoclassical": "A pedimented portico on Ionic columns, plain walls, "
                     "a cornice and floor bands.",
@@ -397,6 +411,12 @@ def kit_from_picture(pal, style=None) -> dict:
                  clad=col(pal.get("clad") or (0.72, 0.72, 0.70)),
                  incline_panel=bool(pal.get("incline")))
         return k
+    if style == "mosque":
+        k = preset("mosque")
+        lt = pal.get("light") or pal["wall"]
+        if sum(lt) / 3 > 0.75:              # (its white, as the picture's)
+            k.update(wall=col(lt))
+        return k
     k = preset("mediterranean")
     col = (lambda c: [round(float(v), 3) for v in c])
     k.update(wall=col(pal["wall"]),
@@ -419,6 +439,13 @@ def apply(doc, ref, src=None) -> dict:
     pal = palette(src["img"])
     style = ref.get("look") if ref.get("look") in STYLES and \
         ref.get("look") != "auto" else detect(pal)
+    try:                      # 3.64.66: a mosque's drawing: the mosque look
+        from . import mosque as MQ
+        if (ref.get("look") in (None, "", "auto")) and MQ.is_mosque(doc):
+            style = "mosque"
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("lookstyle.apply mosque")
     return apply_kit(doc, kit_from_picture(pal, style))
 
 
@@ -534,6 +561,14 @@ def apply_kit(doc, kit) -> dict:
     if k["columns"] != "asdrawn":
         from . import ornament as OR_
         rep["columns"] = OR_.classical_columns(doc, k["columns"])
+    # 6. 3.64.66: a mosque's domes, minarets, arches, boundary wall
+    if k.get("mosque"):
+        try:
+            from . import mosque as MQ
+            rep["mosque"] = MQ.apply(doc)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("lookstyle.mosque")
     return rep
 
 

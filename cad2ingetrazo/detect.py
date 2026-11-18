@@ -37,7 +37,7 @@ KEYS = {
     "text": [r"TEXT", r"TXT", r"(^|[^A-Z])TEX($|[^A-Z])", r"ANNO", r"ROOM",
              r"NAME", r"LABEL", r"TAG",
              r"A-AREA", r"TEXTO", r"NOTE"],
-    "plot": [r"PLOT", r"SITE", r"BOUNDARY", r"PROPERTY", r"\bLOT\b",
+    "plot": [r"PLOT", r"SITE", r"BOUNDA?RY", r"PROPERTY", r"\bLOT\b",
              r"PARCEL", r"TERRENO", r"LOTE", r"L-PROP", r"C-PROP",
              r"PROP.?LINE", r"LIMIT"],
     "grid": [r"GRID", r"GIRD", r"AXIS", r"AXES", r"EJE", r"S-GRID", r"CENT.?LINE",
@@ -101,7 +101,8 @@ def by_name(name: str) -> list:
     if "rails" in out and "walls" in out:
         out.remove("walls")
     # the boundary wall is the plot's, not the building's
-    if any(w in n for w in ("BOUNDARY", "COMPOUND", "OTHER PROP")) and \
+    if any(w in n for w in ("BOUNDARY", "BOUNDRY", "COMPOUND",
+                           "OTHER PROP")) and \
             "walls" in out:
         out.remove("walls")
     # «WINDOW» says window, not wall; «DOOR FRAME» door; «COLUMN» not «COL»
