@@ -277,6 +277,8 @@ def load(raw) -> list:
                         "base_w": min(max(float(d.get("base_w") or 1.45),
                                           1.0), 3.0),
                         "rot": float(d.get("rot") or 0.0) % 360.0,
+                        "z_off": min(max(float(d.get("z_off") or 0.0),
+                                         -20.0), 40.0),
                         "color": d.get("color") if d.get("color") in COLOR
                         else "white"})
         except (KeyError, TypeError, ValueError):
@@ -301,7 +303,8 @@ def groups(doc):
         if i is None:
             continue
         lv = arch["levels"][i]
-        z0 = elev[i] + float(lv["height"]) + slab_t
+        z0 = elev[i] + float(lv["height"]) + slab_t + \
+            float(dm.get("z_off", 0.0) or 0.0)
         faces = []
         for _nm, fs, _c in build(dm, z0, hi):
             faces += fs

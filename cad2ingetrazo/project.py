@@ -217,7 +217,8 @@ def empty() -> dict:
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {},
-            "hill": {}, "plan_area": {}, "cad_domes": {}}
+            "hill": {}, "plan_area": {}, "cad_domes": {}, "tiers": {},
+            "bound_lines": {}}
 
 
 def load(raw) -> dict:
@@ -268,6 +269,10 @@ def load(raw) -> dict:
                         if k in ids and isinstance(v, list)}
     doc["cad_domes"] = {k: v for k, v in (raw.get("cad_domes") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["tiers"] = {k: v for k, v in (raw.get("tiers") or {}).items()
+                    if k in ids and isinstance(v, dict)}
+    doc["bound_lines"] = {k: v for k, v in (raw.get("bound_lines") or {})
+                          .items() if k in ids and isinstance(v, list)}
     # 3.64.66: two ground levels (a site on a slope)
     hl_ = raw.get("hill") if isinstance(raw.get("hill"), dict) else {}
     doc["hill"] = {k: v for k, v in hl_.items()
@@ -6054,12 +6059,19 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     try:                    # 3.64.66: what the plan covers (a site's two
         from . import hillside as HS_            # grounds: the upper one)
         doc.setdefault("plan_area", {})[lid] = HS_.plan_area(pl)
+        bl_ = HS_.bound_lines(pl)
+        if bl_:
+            doc.setdefault("bound_lines", {})[lid] = bl_
+        else:
+            (doc.get("bound_lines") or {}).pop(lid, None)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.plan_area")
     try:                    # 3.64.66: the domes the plan draws (circles)
         from . import mosque as MQ_
         rep["domes"] = MQ_.read_domes(doc, lid, pl)
+        rep["tiers"] = MQ_.read_tiers(doc, lid, pl,
+                                      lambda n: _match(n, P["walls"]))
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.read_domes")
@@ -6354,6 +6366,13 @@ def _parking_import(doc, lid, pl, P) -> dict:
     for ins in pl.get("inserts", ()):
         if _match(ins["layer"], P["cars"]) or \
                 re.search(r"(^|[^A-Z])(CAR|VEHIC)", str(ins["name"]).upper()):
+            if ins.get("empty"):         # 3.64.67: an empty car block (an
+                # xref lost): a 4.8 × 1.9 m car at its insertion point,
+                # across the row the blocks stand in
+                cars.append({"c": [round(ins["x"], 4), round(ins["y"], 4)],
+                             "ang": round(float(ins["rot"]) + 90.0, 3),
+                             "L": 4.8, "W": 1.9})
+                continue
             c = PK.car_of(ins)
             if c:
                 cars.append(c)
@@ -11515,6 +11534,8 @@ def _parking_groups(doc):
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project parking floor top")
+        if (doc.get("hill") or {}).get("lower") == lid:
+            z = _hill_low(doc)       # 3.64.67: on the lower road's ground
         faces = []
         # the bay lines painted as one clean, joined shape
         faces += PK.paint_union(pk.get("bays") or [], z + 0.004)
@@ -11579,6 +11600,7 @@ def _parking_groups(doc):
         z = z_of[lid] + open_offset(doc, lid) + 0.012
         faces = [f for a in areas_ for f in LS.faces(a, z)]
         zt_ = None
+        tops_ = None
         if (g_i is not None and lid == arch["levels"][g_i]["id"]) or \
                 (doc.get("hill") or {}).get("lower") == lid:
             # 3.64.4: the ground floor's lawns as the plan hatches them, a
@@ -11599,12 +11621,31 @@ def _parking_groups(doc):
                     for q_ in pvs_:          # the stones, flush with it
                         faces += [dict(f, color=(0.66, 0.64, 0.60))
                                   for f in _prism(q_, zb_, zt_ + 0.012)]
+                    tops_ = [zt_]
+                    lowg_ = (doc.get("hill") or {}).get("lower") == lid
                     for a in areas_:
                         pg_ = _Pg(a).buffer(0)
                         if pvu_ is not None:
                             pg_ = pg_.difference(pvu_)
-                        for f in _prism(pg_, zb_, zt_):
-                            top_ = all(abs(q[2] - zt_) < 1e-6
+                        za_ = zt_
+                        if lowg_:     # 3.64.67: a garden on a slope: at the
+                            try:      # level its note gives (raised bed)
+                                from shapely.geometry import Point as _PtL
+                                ns_ = [(m_["v"], _PtL(m_["x"], m_["y"])
+                                        .distance(pg_.centroid))
+                                       for m_ in (doc.get("marks") or {})
+                                       .get(lid) or []
+                                       if m_.get("v") is not None and
+                                       pg_.buffer(1.0).contains(
+                                           _PtL(m_["x"], m_["y"]))]
+                                if ns_:
+                                    za_ = max(min(ns_, key=lambda q: q[1])[0],
+                                              zt_)
+                                    tops_.append(za_)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        for f in _prism(pg_, zb_, za_):
+                            top_ = all(abs(q[2] - za_) < 1e-6
                                        for q in f["loop"])
                             faces.append(dict(f, color=LS.GREEN[:3] if top_
                                               else (0.45, 0.36, 0.25),
@@ -11628,12 +11669,13 @@ def _parking_groups(doc):
                 pa_ = ML_.attrs_of("finish/slate_tiles.jpg") or \
                     ML_.attrs_of("finish/sandstone_cladding.jpg")
                 zl_ = locals().get("zt_")
+                tl_ = tops_ or ([zl_] if zl_ is not None else [])
                 for fc_ in g.mesh.faces:
                     n_ = fc_.normal()
                     if n_.z() <= 0.9 * max(n_.length(), 1e-9):
                         continue
                     zf_ = fc_.vertices[0].z()
-                    if zl_ is None or abs(zf_ - zl_) < 1e-4:
+                    if zl_ is None or any(abs(zf_ - t_) < 1e-4 for t_ in tl_):
                         fc_.attrs.update(ga_)            # the grass
                     elif pa_ and zf_ > zl_ + 1e-4:
                         fc_.attrs.update(pa_)            # the stones
@@ -13111,7 +13153,18 @@ def _site_groups(doc):
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.hillside densify")
-    parts, sym = SITE_.build(corners, site_, z0)
+    parts, sym = None, []
+    try:                    # 3.64.68: on a two-ground site, the boundary
+        from . import hillside as HS_      # walls the plans draw
+        if HS_.on(doc) and doc.get("bound_lines") and \
+                not doc["site"].get("gates") and \
+                doc["site"].get("from_plan", True):
+            parts = HS_.drawn_parts(doc, site_, z0) or None
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.hillside drawn walls")
+    if parts is None:
+        parts, sym = SITE_.build(corners, site_, z0)
     try:                    # 3.64.66: on a slope, on the ground it crosses
         from . import hillside as HS_
         parts = HS_.lift(doc, parts, z0)
@@ -15054,6 +15107,12 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.domes groups")
+    try:                       # 3.64.68: a mosque's stepped tiers
+        from . import mosque as MQT_
+        new_groups += MQT_.groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.mosque tiers")
     try:                       # 3.64.46: a perspective's classical trims
         from . import ornament as OR_
         new_groups += OR_.groups(doc)

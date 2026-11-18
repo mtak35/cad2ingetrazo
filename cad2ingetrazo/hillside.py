@@ -371,6 +371,126 @@ def fill_groups(doc):
     return [gr]
 
 
+BOUND_RX = re.compile(r"BOUNDA?RY|BOUNDRY|COMPOUND", re.I)
+
+
+def bound_lines(pl) -> list:
+    """At the import: the plan's boundary-wall lines (not the plot's own
+    limit line) — [[x0, y0, x1, y1]…] in model metres."""
+    lay = pl["layers"]
+    return [[round(s[0], 3), round(s[1], 3), round(s[2], 3), round(s[3], 3)]
+            for s in pl["segs"] if BOUND_RX.search(str(lay[s[4]]))
+            and math.dist(s[:2], s[2:4]) > 0.05]
+
+
+def drawn_centres(doc):
+    """The boundary walls as the plans draw them (3.64.68): one line of
+    each double line, the beds' outlines (small closed shapes) left
+    out, merged — shapely lines, or None."""
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import linemerge, polygonize, unary_union
+    segs = []
+    for lid, ls in (doc.get("bound_lines") or {}).items():
+        segs += [((a, b), (c, d)) for a, b, c, d in ls]
+    if len(segs) < 3:
+        return None
+    lines = [LineString(s) for s in segs]
+    beds = []
+    for f in polygonize(unary_union(lines)):
+        r = f.minimum_rotated_rectangle
+        cs = list(r.exterior.coords)[:4]
+        sh = min(math.dist(cs[0], cs[1]), math.dist(cs[1], cs[2]))
+        if 1.0 < f.area < 150.0 and sh > 1.2:
+            beds.append(Polygon(f.exterior).buffer(0.08))
+    bu = unary_union(beds) if beds else None
+    kept = []
+    for ln in sorted(lines, key=lambda q: -q.length):
+        if ln.length < 0.4:
+            continue
+        if bu is not None and bu.contains(ln):
+            continue
+        (x0, y0), (x1, y1) = ln.coords[0], ln.coords[-1]
+        a = math.atan2(y1 - y0, x1 - x0)
+        dup = False
+        for k in kept:            # the other face of a double line
+            (u0, v0), (u1, v1) = k.coords[0], k.coords[-1]
+            b = math.atan2(v1 - v0, u1 - u0)
+            da = abs((a - b + math.pi / 2) % math.pi - math.pi / 2)
+            if da < math.radians(6) and k.distance(ln) < 0.4 and \
+                    k.buffer(0.45).intersection(ln).length > 0.5 * ln.length:
+                dup = True
+                break
+        if not dup:
+            kept.append(ln)
+    if not kept:
+        return None
+    m = linemerge(unary_union(kept))
+    pcs = [g for g in getattr(m, "geoms", [m]) if g.length >= 1.5]
+    if not pcs:
+        return None
+    from shapely.geometry import MultiLineString
+    return MultiLineString([list(g.coords) for g in pcs])
+
+
+def drawn_parts(doc, site, z0) -> list:
+    """The boundary wall built along the lines the plans draw (not round
+    the plot): a low wall with its coping and the design's panels over
+    it (or a solid wall), piers at the bays — [(name, kind, faces,
+    colour)], standing on ``z0`` (``lift`` sets it on the ground)."""
+    from shapely.geometry import LineString, MultiLineString
+    from . import project as PJ
+    from . import site as SITE
+    from . import siteorn as SO
+    cl = drawn_centres(doc)
+    if cl is None:
+        return []
+    t = float(site.get("t", 0.23))
+    h = float(site.get("h", 2.1))
+    gap = max(float(site.get("pier_gap", 3.0) or 3.0), 1.5)
+    pier = float(site.get("pillar", 0.35))
+    style = site.get("front_style") or site.get("style", "plain")
+    fin = site.get("front_finish") or site.get("finish", "plaster")
+    col = SITE.WALL_FINISHES.get(fin, ("", SITE.WALL_COLOR))[1]
+    over = style in SO.PIER_STYLES
+    solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
+                      if over else h - 0.075)
+    # each run cut every bay (the wall then steps with the ground)
+    runs = []
+    for ln in cl.geoms:
+        cs = list(ln.coords)
+        for a, b in zip(cs, cs[1:]):
+            L = math.dist(a, b)
+            k = max(int(round(L / gap)), 1)
+            for j in range(k):
+                p = (a[0] + (b[0] - a[0]) * j / k, a[1] + (b[1] - a[1]) * j / k)
+                q = (a[0] + (b[0] - a[0]) * (j + 1) / k,
+                     a[1] + (b[1] - a[1]) * (j + 1) / k)
+                runs.append(LineString([p, q]))
+    out = []
+    for k, ln in enumerate(runs, 1):
+        body = ln.buffer(t / 2, cap_style=2, join_style=2)
+        out.append((f"Boundary wall {k}", "boundary",
+                    PJ._prism(body, z0, solid_top, 1e-5), col))
+        cp = ln.buffer(t / 2 + 0.04, cap_style=2, join_style=2)
+        out.append((f"Boundary wall {k} coping", "boundary",
+                    PJ._prism(cp, solid_top, solid_top + 0.075, 1e-5),
+                    SITE.CAP_COLOR))
+        if over:
+            for nm_, fs_, c_ in SO.ornaments(style, MultiLineString(
+                    [list(ln.coords)]), z0, solid_top + 0.075, h, t,
+                    gap * 2, pier):
+                out.append((nm_, "boundary", fs_, c_ or col))
+        if site.get("pillars", True):             # a pier at its start
+            a = ln.coords[0]
+            from shapely.geometry import box
+            sq = box(a[0] - pier / 2, a[1] - pier / 2, a[0] + pier / 2,
+                     a[1] + pier / 2)
+            out.append((f"Pillar {k}", "boundary",
+                        PJ._prism(sq, z0, z0 + h + 0.1, 1e-5),
+                        tuple(min(1.0, c * 0.95) for c in col)))
+    return out
+
+
 def densify(corners, front, step=3.0):
     """The plot's corners with its sides cut every ``step`` m (the wall
     then follows the ground side by side, stepping where the upper

@@ -15,6 +15,7 @@ a DXF / DWG, placed on the model by an insertion point, in METRES.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 _INSUNITS_M = {1: 0.0254, 2: 0.3048, 4: 0.001, 5: 0.01, 6: 1.0,
@@ -509,6 +510,15 @@ def _emit(e, inherit, depth, sag, out) -> None:
                     "lmid": [(max(lx_) + min(lx_)) / 2,
                              (max(ly_) + min(ly_)) / 2],
                     "segs": len(mine), "depth": depth})
+            elif re.search(r"(^|[^A-Z])(CAR|VEHIC)", str(e.dxf.name).upper()):
+                # 3.64.67: a car block with nothing in it (an xref's car the
+                # DWG lost): its place and turn kept — a car of its own
+                ins = e.dxf.insert
+                out["inserts"].append({
+                    "name": e.dxf.name, "layer": lay, "x": ins[0],
+                    "y": ins[1], "rot": float(e.dxf.get("rotation", 0.0)),
+                    "box": [ins[0], ins[1], ins[0], ins[1]],
+                    "segs": 0, "depth": depth, "empty": True})
     elif t == "LINE":
         a, b = e.dxf.start, e.dxf.end
         _seg(out, (a[0], a[1], b[0], b[1], lay), st)
@@ -650,6 +660,10 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
     styles = drawing.get("styles") or []
     dashed = [bool(styles[i][1]) if 0 <= i < len(styles) else False
               for i in sty_out] if has_sty else []
+    # 3.64.68: each line's colour (rgb 0-255, BYLAYER / BYBLOCK resolved)
+    colors = [tuple(styles[i][2]) if 0 <= i < len(styles) and
+              len(styles[i]) > 2 else None
+              for i in sty_out] if has_sty else []
     def box(b):
         pts = [T(b[0], b[1]), T(b[2], b[1]), T(b[2], b[3]), T(b[0], b[3])]
         return pts
@@ -692,7 +706,7 @@ def place(drawing: dict, base, insert=(0.0, 0.0), rot_deg: float = 0.0,
                     **_ld(i), **_lc(i), **_ob(i))
                for i in drawing.get("inserts", ())]
     return {"segs": segs, "layers": layers, "inserts": inserts,
-            "dashed": dashed,
+            "dashed": dashed, "colors": colors,
             "loops": [{"layer": lp["layer"], "pts": [T(*p) for p in lp["pts"]]}
                       for lp in drawing["loops"] if lp["layer"] in index],
             "circles": [{"layer": ci["layer"], "c": T(*ci["c"]),

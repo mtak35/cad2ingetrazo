@@ -123,14 +123,24 @@ def hall(doc):
 def minarets(doc, b=1.5) -> int:
     """Four modern minarets at the prayer hall's corners (none made by
     hand yet): their height about 2.6 times the building's."""
-    _migrate(doc)
-    if doc.get("minarets"):
+    remove(doc)                 # (the look's own: made again, as now)
+    if doc.get("minarets"):     # (made by hand: left as they are)
         return 0
     from . import minarets as MN
     from . import project as PJ
     lid, poly = hall(doc)
     if poly is None:
         return 0
+    try:                        # 3.64.68: at the highest tier's corners,
+        from shapely.ops import unary_union    # as the perspectives show
+        for tl in (doc.get("tiers") or {}):
+            plan = tier_plan(doc, tl)
+            if plan:
+                poly = unary_union(plan[-1][1])
+                break
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.minarets tiers")
     arch = doc["arch"]
     el = PJ.elevations(arch)
     gi = next(i for i, lv in enumerate(arch["levels"]) if lv["id"] == lid)
@@ -246,6 +256,11 @@ def apply(doc) -> dict:
         log_error("mosque.sync_domes")
     rep["hall_18ft"] = hall_storey(doc)
     rep["minarets"] = minarets(doc)
+    try:                               # 3.64.68: the roof plan's tiers
+        rep["tiers"] = apply_tiers(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.apply_tiers")
     rep["arched"] = arches(doc)
     try:
         rep["crown"] = crown(doc)
@@ -272,3 +287,313 @@ def remove(doc) -> int:
     doc["minarets"] = [m for m in old
                        if not str(m.get("id", "")).startswith("auto-")]
     return len(old) - len(doc["minarets"])
+
+
+# ---- 3.64.68: the roof plan's tiers (stepped roofs, deep projecting slabs) ---------
+TIER_STEP = 3.048                   # 10'-0" a tier over the one below
+FASCIA = 0.45                       # the projecting slabs' depth
+
+
+def _fill(lines, grow=0.35):
+    """Closed shapes of a family of lines (double wall lines, a gap at a
+    door): thickened, their insides filled, thinned back."""
+    from shapely.geometry import MultiLineString, Polygon
+    if not lines:
+        return []
+    g = MultiLineString(lines).buffer(grow, join_style=2)
+    out = []
+    for q in getattr(g, "geoms", [g]):
+        if q.geom_type != "Polygon":
+            continue
+        f = Polygon(q.exterior).buffer(-grow, join_style=2)
+        for r in getattr(f, "geoms", [f]):
+            if r.geom_type == "Polygon" and r.area >= 6.0:
+                out.append(r.simplify(0.03))
+    return out
+
+
+def _rings(lines, snap=0.03) -> list:
+    """The closed rings the lines make end to end (an outline drawn as its
+    sides, overlapping other outlines): [[(x, y)…]] of 6 m² and more."""
+    from shapely.geometry import Polygon
+    key = (lambda p: (round(p[0] / snap), round(p[1] / snap)))
+    adj, pos = {}, {}
+    for a, b in lines:
+        ka, kb = key(a), key(b)
+        if ka == kb:
+            continue
+        pos.setdefault(ka, a)
+        pos.setdefault(kb, b)
+        adj.setdefault(ka, []).append(kb)
+        adj.setdefault(kb, []).append(ka)
+    seen, out = set(), []
+    for k0 in adj:
+        if k0 in seen or len(adj[k0]) != 2:
+            continue
+        ring, prev, cur, ok = [k0], None, k0, False
+        while True:
+            nx = [n for n in adj[cur] if n != prev]
+            if len(adj[cur]) != 2 or not nx:
+                break
+            prev, cur = cur, nx[0]
+            if cur == k0:
+                ok = True
+                break
+            if cur in ring:
+                break
+            ring.append(cur)
+        seen.update(ring)
+        if ok and len(ring) >= 3:
+            g = Polygon([pos[k] for k in ring]).buffer(0)
+            if g.geom_type == "Polygon" and g.area >= 6.0:
+                out.append(list(g.simplify(0.03).exterior.coords)[:-1])
+    return out
+
+
+def read_tiers(doc, lid, pl, wall_match) -> int:
+    """At the import: a roof plan whose walls are drawn in several colours
+    (each colour a tier — the plan's convention; the walls in the layer's
+    own colour are the ordinary ones) and its dashed outlines (the
+    projecting roof slabs): their lines kept as ``doc["tiers"][lid]``."""
+    cols = pl.get("colors") or []
+    dsh = pl.get("dashed") or []
+    lay = pl["layers"]
+    t = doc.setdefault("tiers", {})
+    t.pop(lid, None)
+    if len(cols) != len(pl["segs"]):
+        return 0
+    by = {}
+    proj = []
+    for s, c, d in zip(pl["segs"], cols, dsh or [False] * len(cols)):
+        name = str(lay[s[4]])
+        ln = [[round(s[0], 3), round(s[1], 3)], [round(s[2], 3),
+                                                  round(s[3], 3)]]
+        if d and re.search(r"PROJ|SLAB|CANTI|OVERHANG|ROOF", name, re.I):
+            proj.append(ln)
+        elif wall_match(name) and c is not None and not d:
+            by.setdefault(tuple(c), []).append(ln)
+    if len(by) < 3:                 # (the ordinary walls and 2+ tiers)
+        return 0
+    main = max(by, key=lambda c: len(by[c]))
+    groups = [{"color": list(c), "lines": ls} for c, ls in by.items()
+              if c != main and len(ls) >= 4]
+    if len(groups) < 2:
+        return 0
+    t[lid] = {"groups": groups, "proj": proj}
+    return len(groups)
+
+
+def tier_plan(doc, lid):
+    """[(rank, [polygons], top z, overhang m)] of the level's tiers — the
+    colour nearest the middle the highest; each tier the area its lines
+    close with the tiers inside it — or []."""
+    from shapely.geometry import MultiLineString, Point
+    from shapely.ops import unary_union
+    from . import project as PJ
+    rec = (doc.get("tiers") or {}).get(lid)
+    arch = doc["arch"]
+    i = next((k for k, lv in enumerate(arch["levels"]) if lv["id"] == lid),
+             None)
+    if not rec or i is None or "groups" not in rec or \
+            "lines" not in (rec["groups"] or [{}])[0]:
+        return []
+    gl = [[tuple(map(tuple, ln)) for ln in g["lines"]] for g in rec["groups"]]
+    mids = [[Point((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in ls]
+            for ls in gl]
+    allm = [p for ms in mids for p in ms]
+    cx = sum(p.x for p in allm) / len(allm)
+    cy = sum(p.y for p in allm) / len(allm)
+    c = Point(cx, cy)
+    order = sorted(range(len(gl)), key=lambda k: sum(
+        p.distance(c) for p in mids[k]) / len(mids[k]))   # inner first
+    regions = []
+    acc_lines, prev = [], None
+    for k in order:
+        acc_lines += gl[k]
+        f = unary_union(_fill(acc_lines)) if _fill(acc_lines) else None
+        if f is None:
+            continue
+        reg = f if prev is None else f.difference(prev.buffer(0.02))
+        prev = f if prev is None else unary_union([prev, f])
+        ps = [q for q in getattr(reg, "geoms", [reg])
+              if q.geom_type == "Polygon" and q.area >= 3.0]
+        if ps:
+            regions.append(ps)
+    if len(regions) < 2:
+        return []
+    regions.reverse()                   # outer (lowest) first
+    E = PJ.elevations(arch)[i]
+    h = float(arch["levels"][i]["height"])
+    # the projecting slabs: how far the dashed outlines stand off each tier
+    pl_ = rec.get("proj") or []
+    dm = [Point((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in pl_]
+    out = []
+    for r, ps in enumerate(regions):
+        top = E if r == 0 else E + h + (r - 1) * TIER_STEP
+        u = unary_union(ps)
+        ds = sorted(u.exterior.distance(p) if u.geom_type == "Polygon"
+                    else u.boundary.distance(p)
+                    for p in dm if not u.buffer(-0.05).contains(p))
+        ds = [d_ for d_ in ds if 0.15 <= d_ <= 3.0]
+        ov = ds[len(ds) // 2] if ds else 0.6
+        out.append((r, ps, top, round(min(max(ov, 0.3), 2.5), 3)))
+    _ = MultiLineString
+    return out
+
+
+def apply_tiers(doc) -> dict:
+    """The tiers made: the lowest tier's walls on the roof plan's level
+    taken away (it is the roof of the floor under it), the higher tiers'
+    walls raised a step each, that level's roofs cut off the lowest tier,
+    the domes on the highest tier set on its top."""
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+    from .engine import model as M
+    arch = doc["arch"]
+    rep = {"removed": 0, "raised": 0}
+    for lid in list((doc.get("tiers") or {}).keys()):
+        plan = tier_plan(doc, lid)
+        if not plan:
+            continue
+        i = next(k for k, lv in enumerate(arch["levels"]) if lv["id"] == lid)
+        h = float(arch["levels"][i]["height"])
+        bounds = [(r, unary_union(ps).boundary) for r, ps, _z, _o in plan]
+        gone = set()
+        for w in arch["walls"]:
+            if w["level"] != lid or "a" not in w:
+                continue
+            m = Point((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
+            best = min(bounds, key=lambda q: q[1].distance(m))
+            if best[1].distance(m) > float(w.get("t", 0.2)) / 2 + 0.25:
+                continue
+            if best[0] == 0:
+                gone.add(w["id"])
+            elif best[0] >= 2:
+                w["height"] = round(h + (best[0] - 1) * TIER_STEP, 3)
+                rep["raised"] += 1
+        if gone:
+            arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
+            arch["openings"] = [o for o in arch["openings"]
+                                if o["wall"] not in gone]
+            rep["removed"] += len(gone)
+        # this level's roofs off the lowest tier
+        low = unary_union(plan[0][1]).buffer(0.05)
+        keep, add = [], []
+        for s in arch["structure"]:
+            if s.get("type") == "slab" and s.get("level") == lid and \
+                    s.get("roof"):
+                try:
+                    g = Polygon(s["corners"]).buffer(0).difference(low)
+                except Exception:  # noqa: BLE001
+                    keep.append(s)
+                    continue
+                pcs = [q for q in getattr(g, "geoms", [g])
+                       if q.geom_type == "Polygon" and q.area > 0.5]
+                for k, q in enumerate(pcs):
+                    rec = dict(s, corners=[[round(x, 4), round(y, 4)] for
+                                           x, y in list(q.exterior.coords)[:-1]],
+                               holes=[])
+                    if k == 0:
+                        keep.append(rec)
+                    else:
+                        rec.pop("id", None)
+                        add.append(rec)
+                continue
+            keep.append(s)
+        arch["structure"] = keep
+        if add:
+            arch["structure"] += M.new_elements(arch["structure"], add)
+        # the domes on the highest tier
+        r_top, ps_top, _z, _o = plan[-1]
+        top_u = unary_union(ps_top).buffer(0.3)
+        for d in doc.get("domes") or []:
+            if d.get("level") == lid and top_u.contains(Point(d["x"], d["y"])):
+                d["z_off"] = round((r_top - 1) * TIER_STEP, 3)
+    return rep
+
+
+def _court_holes(doc, lid):
+    """The open courts the level's floor leaves (X-marked shafts ≥ 4 m²)."""
+    from shapely.geometry import Polygon
+    out = []
+    for s in doc["arch"]["structure"]:
+        if s.get("type") == "slab" and s.get("level") == lid and \
+                not s.get("roof"):
+            for h in s.get("shafts") or []:
+                try:
+                    g = Polygon(h).buffer(0)
+                    if g.area >= 4.0:
+                        out.append(g)
+                except Exception:  # noqa: BLE001
+                    pass
+    return out
+
+
+def groups(doc):
+    """The tiers' roofs (the higher tiers', over their raised walls) and
+    the deep projecting slabs round each tier."""
+    if not (doc.get("look") or {}).get("mosque") or not doc.get("tiers"):
+        return []
+    from PySide6.QtGui import QVector3D
+    from shapely.ops import unary_union
+    from core.group import Group
+    from core.mesh import Mesh
+    from . import project as PJ
+    from .engine import structure as S
+    from .engine import walls as W
+    from .host import KEY, level_layer
+    out = []
+    col = tuple((doc.get("look") or {}).get("trim") or (0.97, 0.96, 0.93))
+    for lid, rec in (doc.get("tiers") or {}).items():
+        plan = tier_plan(doc, lid)
+        if not plan:
+            continue
+        lv = next(x for x in doc["arch"]["levels"] if x["id"] == lid)
+        courts = unary_union(_court_holes(doc, lid)) if \
+            _court_holes(doc, lid) else None
+        mesh = Mesh()
+
+        def solid(g, z0, z1):
+            for q in getattr(g, "geoms", [g]):
+                if q.geom_type != "Polygon" or q.area < 0.05:
+                    continue
+                outer = S._ccw([tuple(c) for c in
+                                list(q.exterior.coords)[:-1]])
+                holes = [list(reversed(S._ccw([tuple(c) for c in
+                                               list(r.coords)[:-1]])))
+                         for r in q.interiors]
+                for f in W.solid({"outer": outer, "holes": holes}, z0, z1):
+                    if isinstance(f, dict):
+                        PJ._safe_add(mesh, [QVector3D(*c) for c in
+                                            f["loop"]],
+                                     [[QVector3D(*c) for c in hh]
+                                      for hh in f["holes"]])
+                    else:
+                        PJ._safe_add(mesh, [QVector3D(*c) for c in f])
+        # the higher tiers' own roofs (over the level's roof)
+        higher = None
+        for r, ps, top, ov in reversed(plan):
+            g = unary_union(ps)
+            if r >= 2:
+                gg = g if courts is None else g.difference(courts)
+                solid(gg, top - 0.15, top)
+            # the projecting slab round the tier (not over the ones above)
+            sl = g.buffer(ov, join_style=2).difference(g.buffer(-0.25,
+                                                               join_style=2))
+            if higher is not None:
+                sl = sl.difference(higher)
+            if courts is not None:
+                sl = sl.difference(courts)
+            solid(sl, top - FASCIA, top + 0.05)
+            higher = g if higher is None else unary_union([higher, g])
+        PJ._soften(mesh)
+        g_ = Group(mesh, name=f"Tiers — roofs and projecting slabs · "
+                   f"{lv['name']}")
+        g_.component = False
+        g_.material = {"color": col, "opacity": 1.0}
+        g_.layer = level_layer(lv["name"])
+        g_.ifc = {"class": "IfcSlab", "name": "Tier roofs"}
+        g_.ext = {KEY: {"type": "tiers", "id": "tiers-" + lid,
+                        "level": lid}}
+        out.append(g_)
+    return out
