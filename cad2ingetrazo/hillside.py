@@ -390,8 +390,13 @@ def drawn_centres(doc):
     from shapely.geometry import LineString, Polygon
     from shapely.ops import linemerge, polygonize, unary_union
     segs = []
-    for lid, ls in (doc.get("bound_lines") or {}).items():
-        segs += [((a, b), (c, d)) for a, b, c, d in ls]
+    bl = doc.get("bound_lines") or {}
+    lo = (doc.get("hill") or {}).get("lower")
+    # 3.64.70: on a two-ground site the lower ground floor's plan draws
+    # the whole boundary (the upper plan's lines are its beds, steps…)
+    use = [lo] if on(doc) and bl.get(lo) else list(bl)
+    for lid in use:
+        segs += [((a, b), (c, d)) for a, b, c, d in bl.get(lid) or []]
     if len(segs) < 3:
         return None
     lines = [LineString(s) for s in segs]
@@ -478,6 +483,11 @@ def drawn_parts(doc, site, z0) -> list:
                      a[1] + (b[1] - a[1]) * (j + 1) / k)
                 runs.append(LineString([p, q]))
     at = ground_fn(doc)
+    from shapely.geometry import Point, Polygon
+    try:
+        plot_g = Polygon(doc["arch"]["plot"]["corners"]).buffer(-0.3)
+    except Exception:  # noqa: BLE001
+        plot_g = None
     out = []
     for k, ln in enumerate(runs, 1):
         body = ln.buffer(t / 2, cap_style=2, join_style=2)
@@ -487,8 +497,12 @@ def drawn_parts(doc, site, z0) -> list:
         L_ = max(math.dist((ax_, ay_), (bx_, by_)), 1e-6)
         nx_, ny_ = -(by_ - ay_) / L_, (bx_ - ax_) / L_
         mx_, my_ = (ax_ + bx_) / 2, (ay_ + by_) / 2
-        g1 = at(mx_ + nx_ * 2.0, my_ + ny_ * 2.0)
-        g2 = at(mx_ - nx_ * 2.0, my_ - ny_ * 2.0)
+        p1 = (mx_ + nx_ * 2.0, my_ + ny_ * 2.0)
+        p2 = (mx_ - nx_ * 2.0, my_ - ny_ * 2.0)
+        g1, g2 = at(*p1), at(*p2)
+        if plot_g is not None and (not plot_g.contains(Point(*p1)) or
+                                   not plot_g.contains(Point(*p2))):
+            g1 = g2                  # (on the plot's edge: a full wall)
         if abs(g1 - g2) > 1.0:
             out.append((f"Parapet {k}", "boundary",
                         PJ._prism(body, z0, z0 + 1.05, 1e-5), col))
