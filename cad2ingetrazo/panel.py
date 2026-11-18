@@ -1477,16 +1477,14 @@ class Panel(QWidget):
                       "«Floor levels from the CAD's level notes» is on, "
                       "still set the floors they note) — the walls, slabs, "
                       "stairs, ramps and everything on them follow"))
-        row = QHBoxLayout()
-        row.addWidget(_btn("Analyse", self._analyse,
-                           "Read the file and list its layers — nothing "
-                           "changes"))
+        # 3.64.59: «Import to …» and «Furniture & fixtures from CAD» live in
+        # the «Select floor on drawing» window (no «Analyse» any more); the
+        # button is kept, unshown, for the label it carries
         self.i_go = _btn("Import to level", self._import, "Walls, doors, "
                            "windows, columns, beams, slab with holes, room "
                            "names and texts — replaces this level's earlier "
                            "import", primary=True)
-        row.addWidget(self.i_go)
-        f.addRow(row)
+        self.i_go.setVisible(False)
         self.i_changed = QLabel("")
         self.i_changed.setWordWrap(True)
         self.i_changed.setStyleSheet("color: #c0392b; font-weight: bold;")
@@ -1713,10 +1711,23 @@ class Panel(QWidget):
                     detected[n] = rs[0]
         except Exception:  # noqa: BLE001
             detected = {}
-        dlg = PortionDialog(self, d, self._target_name(),
+        tgt = self._target_name()
+        dlg = PortionDialog(self, d, tgt,
                             self._taken(self.doc(), path), self._region, base,
                             roles=getattr(self, "_layer_roles", None) or {},
-                            detected=detected)
+                            detected=detected,
+                            actions=[
+                                ("import", f"Import to «{tgt}»",
+                                 "Use this floor and import it now: walls, "
+                                 "doors, windows, columns, beams, slab with "
+                                 "holes, room names and texts (replaces "
+                                 "this level's earlier import)"),
+                                ("furniture", "Furniture && fixtures from CAD",
+                                 "Use this floor, import it (if it is not "
+                                 "yet) and place the CAD's furniture and "
+                                 "fixture blocks — beds, WCs, basins, "
+                                 "sofas, tables, kitchens… — as library "
+                                 "models where they are drawn")])
         if not dlg.exec():
             return
         self._layer_roles = dict(dlg.layer_roles)
@@ -1729,6 +1740,24 @@ class Panel(QWidget):
             self.i_bx.setValue(dlg.base[0])
             self.i_by.setValue(dlg.base[1])
         self._show_portion()
+        act = getattr(dlg, "action", None)
+        if act == "import":
+            self._import()
+        elif act == "furniture":
+            here = self.level_box.currentData()
+            done = here not in (NEW, NEW_BELOW, ROOF_NEW, FOUNDATION,
+                                SITE_LV) and here in (
+                self.doc().get("imports") or {})
+            if not done:
+                self._import()
+            self._cad_furniture()
+            try:
+                self.c_furn.blockSignals(True)
+                self.c_furn.setChecked(bool(
+                    self.doc()["settings"].get("cad_furniture")))
+                self.c_furn.blockSignals(False)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _analyse(self):
         path = self.i_file.text().strip()

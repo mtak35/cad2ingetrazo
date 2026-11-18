@@ -478,9 +478,10 @@ class PortionDialog(QDialog):
     ``.base`` (x, y), drawing units; or ``.whole`` True for all of it."""
 
     def __init__(self, parent, drawing, level_name, taken=(), region=None,
-                 base=None, roles=None, detected=None):
+                 base=None, roles=None, detected=None, actions=()):
         super().__init__(parent)
         self.layer_roles = dict(roles or {})
+        self.action = None          # 3.64.59: what to do after (import…)
         self.setWindowTitle(f"CAD2IngeTrazo — select «{level_name}» on the "
                             "drawing")
         self.resize(1360, 820)
@@ -523,9 +524,28 @@ class PortionDialog(QDialog):
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         row.addWidget(self.ok)
+        self.acts = []
+        for key, label, tip in actions or ():
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            if key == "import":
+                b.setStyleSheet("QPushButton { background: #1f9d55; color: "
+                                "white; font-weight: bold; padding: 4px "
+                                "12px; } QPushButton:disabled { background: "
+                                "#a9cdb8; color: #eef5f0; }")
+            b.clicked.connect(lambda _c=False, k=key: self._act(k))
+            row.addWidget(b)
+            self.acts.append(b)
         row.addWidget(cancel)
         v.addLayout(row)
         self._changed()
+
+    def _act(self, key):
+        """Use this floor, then the panel does ``key`` (import, furniture)."""
+        if not self.ok.isEnabled():
+            return
+        self.action = key
+        self.accept()
 
     def _layers_box(self, drawing, detected):
         """Every layer of the CAD on / off: shown here, and read at the
@@ -627,9 +647,13 @@ class PortionDialog(QDialog):
                              "snaps to line ends and crossings (yellow)."
                              + others)
         else:
-            self.tip.setText("<b>Ready.</b> «Use this floor» — or draw the box"
-                             " / pick the point again." + others)
+            self.tip.setText("<b>Ready.</b> «Use this floor», «Import to …» "
+                             "(this floor, imported now) or «Furniture & "
+                             "fixtures from CAD» — or draw the box / pick "
+                             "the point again." + others)
         self.ok.setEnabled(c.region is not None and c.base is not None)
+        for b in getattr(self, "acts", ()):
+            b.setEnabled(self.ok.isEnabled())
         self.b_base.setEnabled(c.region is not None)
         self.b_ll.setEnabled(c.region is not None)
 
