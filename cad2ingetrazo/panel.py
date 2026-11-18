@@ -918,49 +918,71 @@ class Panel(QWidget):
         self.commit(doc, "Furniture from the CAD: " + ", ".join(
             f"{n} {k}" for k, n in tot.most_common()))
 
-    def _furniture_only(self, path):
-        """3.64.60: only the furniture and fixtures of the part of the CAD
-        just selected, placed on the level chosen — no walls, slabs or
-        anything else imported (the level's own import is left as it was).
-        """
+    def _furniture_only(self, path, what="furniture"):
+        """3.64.60–61: only the furniture and fixtures (``what``
+        "furniture") or only the landscape — lawns, pavers, trees, plants
+        ("landscape") — of the part of the CAD just selected, placed on the
+        level chosen: no walls, slabs or anything else imported. The part
+        is kept as that floor's furniture / landscape source, so «Update
+        from CAD» reads them again from it."""
         from . import furnish as FU
         doc = self.doc()
         here = self.level_box.currentData()
-        ids = {lv["id"] for lv in doc["arch"]["levels"]}
-        if here not in ids:
-            self.flash("Furniture goes on a floor of the model: choose that "
-                       "floor in «Level» (a new floor: import it first)",
-                       10000)
+        arch = doc["arch"]
+        ids = {lv["id"] for lv in arch["levels"]}
+        if here == NEW:                       # a new floor, empty: made
+            old_ = {x["id"] for x in arch["levels"]}
+            arch["levels"] = M.add_floor(arch["levels"])
+            here = next(x["id"] for x in arch["levels"]
+                        if x["id"] not in old_)
+            lv_ = PJ.level_by_id(arch, here)
+            if lv_ is not None:
+                lv_["height"] = round(float(self.i_floor_h.value()), 4)
+        elif here == SITE_LV and what == "landscape":
+            here = next((lv["id"] for lv in arch["levels"]
+                         if lv["kind"] == "ground"), None)
+        elif here not in ids:
+            self.flash("Choose the floor in «Level» first (furniture and "
+                       "landscape go on a floor of the model)", 10000)
+            return
+        if here is None:
             return
         how = dict(self._how(), file=path)
-        imports = doc.setdefault("imports", {})
-        old = imports.get(here)
-        imports[here] = dict(old or {}, **how)     # read from here, this once
+        doc.setdefault("extra_src", {}).setdefault(here, {})[what] = how
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        n_green = 0
         try:
-            got = FU.furnish(doc, lids=[here])
+            if what == "landscape":
+                n_green = PJ.refresh_landscape(doc, [here])
+                got = FU.furnish(doc, lids=[here], only=FU.LANDSCAPE_KINDS)
+            else:
+                got = FU.furnish(doc, lids=[here], skip=FU.LANDSCAPE_KINDS)
         except Exception as e:  # noqa: BLE001
             log_error("panel._furniture_only")
-            self.flash(f"Furniture not read — {e}", 8000)
-            got = None
+            self.flash(f"Not read — {e}", 8000)
+            return
         finally:
             QApplication.restoreOverrideCursor()
-            if old is None:
-                imports.pop(here, None)
-            else:
-                imports[here] = old
-        if got is None:
-            return
         from collections import Counter
         tot = Counter()
         for v_ in got.values():
             tot.update(v_)
+        if what == "landscape":
+            pv = len((doc.get("pavers") or {}).get(here) or [])
+            parts = ([f"{n_green} lawn / planting area(s)"] if n_green
+                     else []) + ([f"{pv} pavers"] if pv else []) + [
+                f"{n} {k}" for k, n in tot.most_common()]
+            if not parts:
+                self.flash("No lawns, pavers, trees or plants found in this "
+                           "part of the CAD", 8000)
+                return
+            self.commit(doc, "Landscape from the CAD: " + ", ".join(parts))
+            return
         if not tot:
             self.flash("No furniture or fixture blocks recognised in this "
                        "part of the CAD", 8000)
             return
-        if old is not None:
-            doc["settings"]["cad_furniture"] = True
+        doc["settings"]["cad_furniture"] = True
         self.commit(doc, "Furniture & fixtures from the CAD: " + ", ".join(
             f"{n} {k}" for k, n in tot.most_common()))
 
@@ -1769,11 +1791,17 @@ class Panel(QWidget):
                                  "holes, room names and texts (replaces "
                                  "this level's earlier import)"),
                                 ("furniture", "Furniture && fixtures from CAD",
-                                 "Use this floor, import it (if it is not "
-                                 "yet) and place the CAD's furniture and "
-                                 "fixture blocks — beds, WCs, basins, "
-                                 "sofas, tables, kitchens… — as library "
-                                 "models where they are drawn")])
+                                 "Only the CAD's furniture and fixture "
+                                 "blocks of this part — beds, WCs, basins, "
+                                 "sofas, tables, kitchens… — placed as "
+                                 "library models on the level chosen (no "
+                                 "walls or anything else imported)"),
+                                ("landscape", "Landscape from CAD",
+                                 "Only the landscape of this part — lawns "
+                                 "and planting (green hatches), stepping "
+                                 "stones / pavers, trees and plants — on "
+                                 "the level chosen (the ground floor for "
+                                 "«Site»)")])
         if not dlg.exec():
             return
         self._layer_roles = dict(dlg.layer_roles)
@@ -1789,6 +1817,8 @@ class Panel(QWidget):
         act = getattr(dlg, "action", None)
         if act == "import":
             self._import()
+        elif act == "landscape":
+            self._furniture_only(path, "landscape")
         elif act == "furniture":
             self._furniture_only(path)
             try:

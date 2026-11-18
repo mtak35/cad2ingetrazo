@@ -294,6 +294,12 @@ def load(raw) -> dict:
                         if k in ids and isinstance(v, list)}
     doc["pavers"] = {k: v for k, v in (raw.get("pavers") or {}).items()
                      if k in ids and isinstance(v, list)}
+    # 3.64.60: the CAD part a floor's furniture / landscape alone came from
+    # (that floor not imported as a plan)
+    doc["extra_src"] = {k: {w: h for w, h in v.items() if isinstance(h, dict)
+                            and h.get("file")}
+                        for k, v in (raw.get("extra_src") or {}).items()
+                        if k in ids and isinstance(v, dict)}
     # elements kept out of the 3D model (drawn on a floor they are not on)
     doc["deleted_floors"] = [x for x in raw.get("deleted_floors") or []
                              if isinstance(x, dict) and x.get("level")]
@@ -5130,6 +5136,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     ``how``: unit, base mode/point, insertion, rotation, layer patterns.
     Returns a report {walls, openings, columns, beams, slab, texts, rooms,
     skipped: [why…], far_km}."""
+    # 3.64.61: the floor's own plan now: its furniture / landscape read
+    # from it (not from a part picked for them alone)
+    (doc.get("extra_src") or {}).pop(lid, None)
     st = doc["settings"]
     arch = doc["arch"]
     raw = cadread.read(path, how.get("unit"))
@@ -15955,16 +15964,20 @@ def openings_along(doc, wall_ids, w=0.46, h=1.4, sill=0.5, pitch=0.75,
     return n
 
 
-def refresh_landscape(doc) -> int:
-    """The landscape areas of every imported floor read again from its CAD
-    plan (3.64.4: the lawn hatches too). How many areas."""
+def refresh_landscape(doc, lids=None) -> int:
+    """The landscape areas of every imported floor (or of ``lids``) read
+    again from its CAD plan (3.64.4: the lawn hatches too). How many
+    areas."""
     from . import furnish as FU_
     from . import landscape as LS
     n = 0
+    doc.setdefault("landscape", {})
     for lv in doc["arch"]["levels"]:
         lid = lv["id"]
+        if lids is not None and lid not in lids:
+            continue
         try:
-            pl = FU_.cad_plan(doc, lid)
+            pl = FU_.cad_plan(doc, lid, "landscape")
         except Exception:  # noqa: BLE001
             pl = None
         if not pl:

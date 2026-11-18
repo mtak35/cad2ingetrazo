@@ -246,11 +246,32 @@ def pick(kind, L, W, entries, cache=None):
     return hit
 
 
-def cad_plan(doc, lid):
+def source(doc, lid, what="furniture"):
+    """Where a floor's furniture (``what`` "furniture") or landscape
+    ("landscape") is read from: the CAD part picked for them alone (3.64.61,
+    «Select floor on drawing» ▸ Furniture / Landscape), else the floor's
+    imported plan."""
+    ex = (doc.get("extra_src") or {}).get(lid) or {}
+    how = ex.get(what) if isinstance(ex, dict) else None
+    if isinstance(how, dict) and how.get("file"):
+        return how
+    return (doc.get("imports") or {}).get(lid)
+
+
+#: what «Furniture & fixtures» places; the rest (trees, plants) is the
+#: landscape's (3.64.60)
+LANDSCAPE_KINDS = {"tree", "plant"}
+
+
+def furniture_kinds() -> set:
+    return {k for k in KINDS if k not in LANDSCAPE_KINDS}
+
+
+def cad_plan(doc, lid, what="furniture"):
     """The level's CAD plan placed in the model (``cadread.place``), or
     None."""
     from . import cadread
-    how = (doc.get("imports") or {}).get(lid)
+    how = source(doc, lid, what)
     if not isinstance(how, dict) or not how.get("file"):
         return None
     raw = cadread.read(how["file"], how.get("unit"))
@@ -301,10 +322,10 @@ def oval_basins(pl, rooms) -> list:
     return keep
 
 
-def cad_blocks(doc, lid) -> list:
+def cad_blocks(doc, lid, what="furniture") -> list:
     """The level's CAD blocks, placed in the model (``cadread.place``)."""
     from . import cadread
-    how = (doc.get("imports") or {}).get(lid)
+    how = source(doc, lid, what)
     if not isinstance(how, dict) or not how.get("file"):
         return []
     raw = cadread.read(how["file"], how.get("unit"))
@@ -392,7 +413,7 @@ def face_wall(poly, cx, cy, ex, ey, reach=0.75, own=None, back=None):
 BATH_KINDS = ("wc", "basin", "shower", "bathtub")
 
 
-def furnish(doc, lids=None, entries=None, only=None) -> dict:
+def furnish(doc, lids=None, entries=None, only=None, skip=None) -> dict:
     """The furniture / fixtures of the CAD blocks on levels ``lids`` (all
     imported) set as library models: the CAD-made ones of those levels
     made again, the hand-placed kept. {level: {kind: n}}."""
@@ -407,11 +428,15 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
     out = {}
     cache = {}
     names = {lv["id"] for lv in arch["levels"]}
-    for lid in (lids or list((doc.get("imports") or {}).keys())):
+    for lid in (lids or list(dict.fromkeys(
+            list((doc.get("imports") or {}).keys()) +
+            list((doc.get("extra_src") or {}).keys())))):
         if lid not in names:
             continue
+        what_ = "landscape" if only is not None and set(only) <= \
+            LANDSCAPE_KINDS else "furniture"
         try:
-            blocks = cad_blocks(doc, lid)
+            blocks = cad_blocks(doc, lid, what_)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("furnish.cad_blocks")
@@ -425,7 +450,9 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
                             if not (f.get("cad") and f["level"] == lid
                                     and f.get("src") != "fitout"
                                     and (only is None
-                                         or f.get("kind") in only))]
+                                         or f.get("kind") in only)
+                                    and not (skip and f.get("kind")
+                                             in skip))]
         got = {}
         seen = []
         near = None                      # the floor's reach (its walls)
@@ -522,6 +549,8 @@ def furnish(doc, lids=None, entries=None, only=None) -> dict:
             if kind is None or (kind == "tree" and room is not None):
                 continue
             if only is not None and kind not in only:
+                continue
+            if skip and kind in skip:      # 3.64.60: the landscape's
                 continue
             if any(math.dist((cx, cy), s) < 0.15 for s in seen):
                 continue                       # the same block twice

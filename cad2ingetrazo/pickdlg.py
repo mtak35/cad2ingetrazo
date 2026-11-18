@@ -656,8 +656,9 @@ class PortionDialog(QDialog):
                              + others)
         else:
             self.tip.setText(("<b>Ready.</b> «Import to …» (this floor, "
-                              "imported now) or «Furniture & fixtures from "
-                              "CAD» (only them, on the level chosen) — or "
+                              "imported now), «Furniture & fixtures from "
+                              "CAD» or «Landscape from CAD» (only them, on "
+                              "the level chosen) — or "
                               "draw the box / pick the point again."
                               if getattr(self, "acts", None) else
                               "<b>Ready.</b> «Use this floor» — or draw the "
@@ -696,8 +697,8 @@ class PortionDialog(QDialog):
             for b in self.acts:
                 b.setEnabled(True)
             self.tip.setText("<b>The whole drawing</b> is this floor — "
-                             "«Import to …» or «Furniture & fixtures from "
-                             "CAD».")
+                             "«Import to …», «Furniture & fixtures from "
+                             "CAD» or «Landscape from CAD».")
             return
         self.accept()
 
