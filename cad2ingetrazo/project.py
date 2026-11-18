@@ -15748,6 +15748,43 @@ def _apply_materials(groups, mats):
                     f.attrs["color"] = tuple(m["color"][:3])
 
 
+def level_of_region(doc, path, region, least=0.6):
+    """3.64.63: the imported floor a part of the drawing is: the floor
+    read from the same file whose part covers it (or it covers) most —
+    by area, ``least`` of the smaller of the two. None when none."""
+    import os
+    if not region or not path:
+        return None
+
+    def norm(p_):
+        return os.path.normcase(os.path.abspath(str(p_)))
+    try:
+        x0, y0, x1, y1 = (float(v) for v in region)
+    except (TypeError, ValueError):
+        return None
+    a = max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+    if a <= 0:
+        return None
+    best, bv = None, least
+    ids = {lv["id"] for lv in doc["arch"]["levels"]}
+    for lid, how in (doc.get("imports") or {}).items():
+        if lid not in ids or not isinstance(how, dict):
+            continue
+        if not how.get("file") or norm(how["file"]) != norm(path):
+            continue
+        r = how.get("region")
+        if not r:
+            continue
+        X0, Y0, X1, Y1 = (float(v) for v in r)
+        b = max(X1 - X0, 0.0) * max(Y1 - Y0, 0.0)
+        ix = max(0.0, min(x1, X1) - max(x0, X0))
+        iy = max(0.0, min(y1, Y1) - max(y0, Y0))
+        v = ix * iy / max(min(a, b), 1e-9)
+        if v > bv:
+            best, bv = lid, v
+    return best
+
+
 def update_from_cad(doc, as_cad=False) -> list:
     """Every level read again from its CAD plan with the settings it was
     imported with (the file may have changed): [(level name, report)].

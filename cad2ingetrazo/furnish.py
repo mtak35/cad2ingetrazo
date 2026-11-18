@@ -645,8 +645,10 @@ def furnish(doc, lids=None, entries=None, only=None, skip=None) -> dict:
                 # (its canopy), its height in keeping — not the library
                 # model's own size (a 12 m tree over the house)
                 if kind == "tree":
-                    D_ = min(max(L, 1.2), 6.0)
-                    H_ = min(max(D_ * 1.3, 2.5), 7.5)
+                    # a plan's tree symbol is drawn small (1.5–2.5 m): a
+                    # grown garden tree, 3.5–6 m across, 5–8 m tall
+                    D_ = min(max(L * 2.0, 3.5), 6.0)
+                    H_ = min(max(D_ * 1.35, 5.0), 8.0)
                     try:
                         if wall_u is not None and wall_u.buffer(0.4).contains(
                                 Point(cx, cy)):

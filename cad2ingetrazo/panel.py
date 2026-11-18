@@ -918,6 +918,11 @@ class Panel(QWidget):
         self.commit(doc, "Furniture from the CAD: " + ", ".join(
             f"{n} {k}" for k, n in tot.most_common()))
 
+    def _select_level(self, lid):
+        i = self.level_box.findData(lid)
+        if i >= 0:
+            self.level_box.setCurrentIndex(i)
+
     def _furniture_only(self, path, what="furniture"):
         """3.64.60–61: only the furniture and fixtures (``what``
         "furniture") or only the landscape — lawns, pavers, trees, plants
@@ -930,25 +935,32 @@ class Panel(QWidget):
         here = self.level_box.currentData()
         arch = doc["arch"]
         ids = {lv["id"] for lv in arch["levels"]}
-        if here == NEW:                       # a new floor, empty: made
-            old_ = {x["id"] for x in arch["levels"]}
-            arch["levels"] = M.add_floor(arch["levels"])
-            here = next(x["id"] for x in arch["levels"]
-                        if x["id"] not in old_)
-            lv_ = PJ.level_by_id(arch, here)
-            if lv_ is not None:
-                lv_["height"] = round(float(self.i_floor_h.value()), 4)
-        elif here == SITE_LV and what == "landscape":
+        # 3.64.63: the floor this part of the drawing IS — the imported
+        # floor whose part it covers — whatever «Level» shows (a «new
+        # floor» there made an empty floor holding only furniture)
+        match = PJ.level_of_region(doc, path, self._region)
+        if match is not None:
+            here = match
+        elif what == "landscape" and here not in ids:
             here = next((lv["id"] for lv in arch["levels"]
                          if lv["kind"] == "ground"), None)
         elif here not in ids:
-            self.flash("Choose the floor in «Level» first (furniture and "
-                       "landscape go on a floor of the model)", 10000)
+            self.flash("This part of the drawing is no floor of the model "
+                       "yet — «Import to …» it first, then its furniture",
+                       10000)
             return
         if here is None:
             return
-        how = dict(self._how(), file=path)
-        doc.setdefault("extra_src", {}).setdefault(here, {})[what] = how
+        lvn = next((lv["name"] for lv in arch["levels"]
+                    if lv["id"] == here), "")
+        if match is not None:
+            # the floor's own import: its part, units and reference point
+            # (the same place as its walls) — no separate source kept
+            ex_ = (doc.get("extra_src") or {}).get(here) or {}
+            ex_.pop(what, None)
+        else:
+            how = dict(self._how(), file=path)
+            doc.setdefault("extra_src", {}).setdefault(here, {})[what] = how
         QApplication.setOverrideCursor(Qt.WaitCursor)
         n_green = 0
         try:
@@ -976,15 +988,18 @@ class Panel(QWidget):
                 self.flash("No lawns, pavers, trees or plants found in this "
                            "part of the CAD", 8000)
                 return
-            self.commit(doc, "Landscape from the CAD: " + ", ".join(parts))
+            self.commit(doc, f"Landscape from the CAD on {lvn}: " +
+                        ", ".join(parts))
+            self._select_level(here)
             return
         if not tot:
             self.flash("No furniture or fixture blocks recognised in this "
                        "part of the CAD", 8000)
             return
         doc["settings"]["cad_furniture"] = True
-        self.commit(doc, "Furniture & fixtures from the CAD: " + ", ".join(
-            f"{n} {k}" for k, n in tot.most_common()))
+        self.commit(doc, f"Furniture & fixtures from the CAD on {lvn}: " +
+                    ", ".join(f"{n} {k}" for k, n in tot.most_common()))
+        self._select_level(here)
 
     def _cad_furniture_off(self):
         from . import furnish as FU_
