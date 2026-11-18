@@ -640,6 +640,26 @@ def furnish(doc, lids=None, entries=None, only=None, skip=None) -> dict:
                    **({"fit": [round(fit[0], 4), round(fit[1], 4)]}
                       if fit and kind not in ("tree", "plant", "chair")
                       else {})}
+            if kind in ("tree", "plant"):
+                # 3.64.62: a tree / plant the size its CAD symbol draws
+                # (its canopy), its height in keeping — not the library
+                # model's own size (a 12 m tree over the house)
+                if kind == "tree":
+                    D_ = min(max(L, 1.2), 6.0)
+                    H_ = min(max(D_ * 1.3, 2.5), 7.5)
+                    try:
+                        if wall_u is not None and wall_u.buffer(0.4).contains(
+                                Point(cx, cy)):
+                            continue         # drawn on a wall: not planted
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    D_ = min(max(L, 0.3), 1.5)
+                    H_ = min(max(D_ * 1.3, 0.4), 1.6)
+                rec["fit"] = [round(D_, 3), round(D_, 3)]
+                rec["fit_free"] = True
+                rec["fit_h"] = round(H_, 3)
+                rec["sized"] = True
             doc["furniture"].append(rec)
             got[kind] = got.get(kind, 0) + 1
         try:                 # a bed turned by its bedside tables: its

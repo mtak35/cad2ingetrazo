@@ -3442,6 +3442,8 @@ def close_wall_corners(doc, lid, reach=0.45) -> int:
             ua = (A["b"][0] - A["a"][0], A["b"][1] - A["a"][1])
             ub = (B["b"][0] - B["a"][0], B["b"][1] - B["a"][1])
             la, lb = math.hypot(*ua), math.hypot(*ub)
+            if la < 1e-6 or lb < 1e-6:     # 3.64.62: a zero-length wall
+                continue
             ua, ub = (ua[0] / la, ua[1] / la), (ub[0] / lb, ub[1] / lb)
             sin_ = abs(ua[0] * ub[1] - ua[1] * ub[0])
             if sin_ < 0.5:

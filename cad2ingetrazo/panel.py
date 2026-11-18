@@ -4222,7 +4222,7 @@ class Panel(QWidget):
                 tag = PJ.tag_of(g) if g is not None else None
                 if tag:
                     break
-            if tag and tag.get("type") == "room":
+            if tag and tag.get("type") == "room" and tag.get("id"):
                 if tag["id"] not in rooms:
                     rooms.append(tag["id"])
                 continue
@@ -6953,7 +6953,8 @@ class Panel(QWidget):
         for e in list(self.vp.scene.selection):
             for g in (e, getattr(e, "owner", None)):
                 tag = PJ.tag_of(g) if g is not None else None
-                if tag and tag["type"] != "symbols":
+                if tag and tag.get("type") != "symbols" and \
+                        tag.get("id") is not None:     # 3.64.62: id-less
                     k = (tag["type"], tag["id"])
                     if k not in out:
                         out.append(k)
@@ -7011,7 +7012,8 @@ class Panel(QWidget):
                     if leg_:
                         self._sel_seg = None
                         return "wall", leg_
-                if tag and tag["type"] != "symbols":
+                if tag and tag.get("type") != "symbols" and \
+                        tag.get("id") is not None:
                     self._sel_seg = tag.get("seg")
                     return tag["type"], tag["id"]
         if floor:
@@ -7063,7 +7065,8 @@ class Panel(QWidget):
             if tag and str(tag.get("id") or "").startswith("merged|"):
                 wid = self._merged_wall_at(tag.get("merged") or [], pos)
                 return ("wall", wid, None) if wid else None
-            if tag and tag["type"] not in ("symbols", "levelgroup"):
+            if tag and tag.get("type") not in ("symbols", "levelgroup") \
+                    and tag.get("id") is not None:
                 return tag["type"], tag["id"], tag.get("seg")
             mesh = getattr(pl, "mesh", None)
             want = getattr(pl, "xform", None)
@@ -7833,7 +7836,8 @@ class Panel(QWidget):
                         tag.get("id") or "").startswith("merged|")):
                     floor = True
                     continue
-                if tag and tag["type"] != "symbols" and \
+                if tag and tag.get("type") != "symbols" and \
+                        tag.get("id") is not None and \
                         (tag["type"], tag["id"]) not in out:
                     out.append((tag["type"], tag["id"]))
         if floor and not out:
