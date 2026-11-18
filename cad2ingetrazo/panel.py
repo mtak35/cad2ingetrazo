@@ -1465,6 +1465,11 @@ class Panel(QWidget):
             "then roofs, window heads and frames, grilles, arcades, "
             "railings, columns, mouldings, front details and colours, each "
             "its own choice; made again at every «Update from CAD»"))
+        f.addRow("Lighting / render", _btn(
+            "Lights and Blender render…", self._lighting,
+            "3.64.56: lights for the whole model — the fittings it shows, "
+            "every room, facade up-lights, porches — put in IngeTrazo's "
+            "«Render with Blender» tab and rendered by your Blender"))
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -1793,6 +1798,10 @@ class Panel(QWidget):
         if self.i_munits.currentData() != "auto":
             self._apply_units()
             self.commit(self.doc(), "Units changed")
+
+    def _lighting(self):
+        from . import lighting as LT
+        LT.open_dialog(self)
 
     def _elev_design(self):
         from .elevdesign import ElevationDesigner
