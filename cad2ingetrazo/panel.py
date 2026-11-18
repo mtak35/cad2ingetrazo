@@ -1466,7 +1466,7 @@ class Panel(QWidget):
             "railings, columns, mouldings, front details and colours, each "
             "its own choice; made again at every «Update from CAD»"))
         f.addRow("Lighting / render", _btn(
-            "Lights and Blender render…", self._lighting,
+            "Lights, materials, environment (HDRI) — render…", self._lighting,
             "3.64.56: lights for the whole model — the fittings it shows, "
             "every room, facade up-lights, porches — put in IngeTrazo's "
             "«Render with Blender» tab and rendered by your Blender"))
