@@ -425,7 +425,18 @@ def drawn_centres(doc):
     if not kept:
         return None
     m = linemerge(unary_union(kept))
-    pcs = [g for g in getattr(m, "geoms", [m]) if g.length >= 1.5]
+    pcs = []
+    for g in getattr(m, "geoms", [m]):
+        if g.length < 3.0:              # (a scrap, a step's edge)
+            continue
+        c0, c1 = g.coords[0], g.coords[-1]
+        if math.dist(c0, c1) < 0.6:     # a closed outline: a bed, a
+            try:                        # planter — not the boundary
+                if Polygon(list(g.coords)).buffer(0).area < 200.0:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        pcs.append(g)
     if not pcs:
         return None
     from shapely.geometry import MultiLineString
@@ -466,9 +477,26 @@ def drawn_parts(doc, site, z0) -> list:
                 q = (a[0] + (b[0] - a[0]) * (j + 1) / k,
                      a[1] + (b[1] - a[1]) * (j + 1) / k)
                 runs.append(LineString([p, q]))
+    at = ground_fn(doc)
     out = []
     for k, ln in enumerate(runs, 1):
         body = ln.buffer(t / 2, cap_style=2, join_style=2)
+        # 3.64.69: on the upper ground's edge (the lower ground on its
+        # other side): a parapet over the retaining wall, not a boundary
+        (ax_, ay_), (bx_, by_) = ln.coords[0], ln.coords[-1]
+        L_ = max(math.dist((ax_, ay_), (bx_, by_)), 1e-6)
+        nx_, ny_ = -(by_ - ay_) / L_, (bx_ - ax_) / L_
+        mx_, my_ = (ax_ + bx_) / 2, (ay_ + by_) / 2
+        g1 = at(mx_ + nx_ * 2.0, my_ + ny_ * 2.0)
+        g2 = at(mx_ - nx_ * 2.0, my_ - ny_ * 2.0)
+        if abs(g1 - g2) > 1.0:
+            out.append((f"Parapet {k}", "boundary",
+                        PJ._prism(body, z0, z0 + 1.05, 1e-5), col))
+            cp = ln.buffer(t / 2 + 0.04, cap_style=2, join_style=2)
+            out.append((f"Parapet {k} coping", "boundary",
+                        PJ._prism(cp, z0 + 1.05, z0 + 1.12, 1e-5),
+                        SITE.CAP_COLOR))
+            continue
         out.append((f"Boundary wall {k}", "boundary",
                     PJ._prism(body, z0, solid_top, 1e-5), col))
         cp = ln.buffer(t / 2 + 0.04, cap_style=2, join_style=2)

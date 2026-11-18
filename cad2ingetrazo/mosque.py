@@ -192,12 +192,11 @@ def arches(doc) -> int:
 
 
 def crown(doc) -> int:
-    """3.64.67: the hall's upper tier as the perspective shows it — a row
-    of tall arched jali windows along the outside walls of the level
-    over the prayer hall (those round it, not the residences'), on walls
-    that have no openings yet."""
+    """The hall's upper tiers as the perspectives show them (3.64.69):
+    each tier wall over the prayer hall a row of tall arched jali
+    openings, side by side, as high as the wall lets (up to its curved
+    cornice) — on walls that have no openings yet."""
     from . import project as PJ
-    from .lookstyle import _outer_walls
     from shapely.geometry import Point
     lid, poly = hall(doc)
     if poly is None:
@@ -209,21 +208,62 @@ def crown(doc) -> int:
         return 0
     up = levels[i + 1]
     zone = poly.minimum_rotated_rectangle.buffer(9.0)
-    outer = _outer_walls(arch)
     busy = {o["wall"] for o in arch["openings"]}
-    ids = [w["id"] for w in arch["walls"] if w["level"] == up["id"]
-           and w["id"] in outer and w["id"] not in busy
-           and w.get("kind", "line") == "line" and "a" in w
-           and zone.contains(Point((w["a"][0] + w["b"][0]) / 2,
-                                   (w["a"][1] + w["b"][1]) / 2))
-           and math.dist(w["a"], w["b"]) >= 2.0]
-    if not ids:
+    named = [Point(t["x"], t["y"]) for t in doc.get("texts") or []
+             if t.get("level") == up["id"] and re.search(
+                 r"BED|BATH|KITCHEN|LOUNGE|RESIDENCE|DRAWING|DINING|TOILET",
+                 str(t.get("text", "")), re.I)]
+    n = 0
+    for w in arch["walls"]:
+        if w["level"] != up["id"] or w["id"] in busy or \
+                w.get("kind", "line") != "line" or "a" not in w:
+            continue
+        m = Point((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
+        if not zone.contains(m) or math.dist(w["a"], w["b"]) < 2.0 or \
+                any(p.distance(m) < 4.0 for p in named):
+            continue
+        hw = w.get("height", "level")
+        hw = float(up["height"]) if hw == "level" else float(hw)
+        h = hw - 0.3 - 0.55                        # (the cornice over it)
+        if h < 1.2:
+            continue
+        wd = 1.4 if hw < 5.0 else 1.8
+        n += PJ.openings_along(doc, [w["id"]], w=wd, h=round(h, 3),
+                               sill=0.3, pitch=wd + 0.4, group=1, gap=0.4,
+                               style="semi", grille="cnc")
+    return n
+
+
+def tall_arches(doc) -> int:
+    """The prayer hall's own outside windows as tall as its storey lets
+    (3.64.69): the arches rise to the curved cornice, tier over tier."""
+    from shapely.geometry import Point
+    lid, poly = hall(doc)
+    if poly is None:
         return 0
-    H = float(up["height"])
-    h = max(min(H - 0.9, 3.2), 1.2)
-    return PJ.openings_along(doc, ids, w=1.1, h=round(h, 3), sill=0.45,
-                             pitch=1.7, group=1, gap=0.6, style="semi",
-                             grille="cnc")
+    arch = doc["arch"]
+    lv = next(x for x in arch["levels"] if x["id"] == lid)
+    H = float(lv["height"])
+    zone = poly.minimum_rotated_rectangle.buffer(6.0)
+    ws = {w["id"]: w for w in arch["walls"] if w["level"] == lid
+          and "a" in w}
+    n = 0
+    for o in arch["openings"]:
+        w = ws.get(o["wall"])
+        if w is None or o["kind"] not in ("window", "void") or \
+                float(o["w"]) < 0.9:
+            continue
+        m = Point((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
+        if not zone.contains(m):
+            continue
+        sill = 0.0 if o["kind"] == "void" else \
+            min(float(o.get("sill", 0.9) or 0.9), 0.6)
+        h = round(H - sill - 0.75, 3)
+        if h > float(o["h"]) + 0.1:
+            o["sill"] = sill
+            o["h"] = h
+            n += 1
+    return n
 
 
 def hall_storey(doc) -> bool:
@@ -262,6 +302,11 @@ def apply(doc) -> dict:
         from .host import log_error
         log_error("mosque.apply_tiers")
     rep["arched"] = arches(doc)
+    try:
+        rep["tall"] = tall_arches(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.tall_arches")
     try:
         rep["crown"] = crown(doc)
     except Exception:  # noqa: BLE001
@@ -577,14 +622,23 @@ def groups(doc):
             if r >= 2:
                 gg = g if courts is None else g.difference(courts)
                 solid(gg, top - 0.15, top)
-            # the projecting slab round the tier (not over the ones above)
-            sl = g.buffer(ov, join_style=2).difference(g.buffer(-0.25,
-                                                               join_style=2))
-            if higher is not None:
-                sl = sl.difference(higher)
-            if courts is not None:
-                sl = sl.difference(courts)
-            solid(sl, top - FASCIA, top + 0.05)
+            # 3.64.69: the tier's edge a curved flare — the cornice sweeps
+            # out from the wall face up to the projecting lip (as the
+            # perspectives show), in slices; never over the tiers above
+            rise = max(1.2 * ov, 0.9)
+            N = 7
+            inner_ = g.buffer(-0.25, join_style=2)
+            for k_ in range(N):
+                t1 = (k_ + 1) / N
+                za = top - rise + rise * k_ / N
+                zb = top - rise + rise * t1 + (0.05 if k_ == N - 1 else 0.0)
+                off = ov * (t1 ** 2.2)
+                sl = g.buffer(max(off, 0.02), join_style=2).difference(inner_)
+                if higher is not None:
+                    sl = sl.difference(higher)
+                if courts is not None:
+                    sl = sl.difference(courts)
+                solid(sl, za, zb)
             higher = g if higher is None else unary_union([higher, g])
         PJ._soften(mesh)
         g_ = Group(mesh, name=f"Tiers — roofs and projecting slabs · "

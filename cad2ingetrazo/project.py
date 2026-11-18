@@ -13155,10 +13155,12 @@ def _site_groups(doc):
         log_error("project.hillside densify")
     parts, sym = None, []
     try:                    # 3.64.68: on a two-ground site, the boundary
-        from . import hillside as HS_      # walls the plans draw
+        # walls the plans draw — 3.64.69: only when asked (site
+        # «from_plan»); the plot's outline is the wall's limit
+        from . import hillside as HS_
         if HS_.on(doc) and doc.get("bound_lines") and \
                 not doc["site"].get("gates") and \
-                doc["site"].get("from_plan", True):
+                doc["site"].get("from_plan", False):
             parts = HS_.drawn_parts(doc, site_, z0) or None
     except Exception:  # noqa: BLE001
         from .host import log_error
