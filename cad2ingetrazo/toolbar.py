@@ -49,7 +49,7 @@ def install(app, dock, panel) -> None:
                           ("Plan", panel.show_plan,
                            "Plan of the current level"),
                           ("Sheets", panel.make_sheets, "Make the sheets"),
-                          ("SketchUp", panel.export_skp,
+                          ("Skp", panel.export_skp,
                            "Export the model to SketchUp (.skp)")):
         b = QAction(text, tb)
         b.setToolTip(tip)

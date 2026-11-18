@@ -918,6 +918,52 @@ class Panel(QWidget):
         self.commit(doc, "Furniture from the CAD: " + ", ".join(
             f"{n} {k}" for k, n in tot.most_common()))
 
+    def _furniture_only(self, path):
+        """3.64.60: only the furniture and fixtures of the part of the CAD
+        just selected, placed on the level chosen — no walls, slabs or
+        anything else imported (the level's own import is left as it was).
+        """
+        from . import furnish as FU
+        doc = self.doc()
+        here = self.level_box.currentData()
+        ids = {lv["id"] for lv in doc["arch"]["levels"]}
+        if here not in ids:
+            self.flash("Furniture goes on a floor of the model: choose that "
+                       "floor in «Level» (a new floor: import it first)",
+                       10000)
+            return
+        how = dict(self._how(), file=path)
+        imports = doc.setdefault("imports", {})
+        old = imports.get(here)
+        imports[here] = dict(old or {}, **how)     # read from here, this once
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            got = FU.furnish(doc, lids=[here])
+        except Exception as e:  # noqa: BLE001
+            log_error("panel._furniture_only")
+            self.flash(f"Furniture not read — {e}", 8000)
+            got = None
+        finally:
+            QApplication.restoreOverrideCursor()
+            if old is None:
+                imports.pop(here, None)
+            else:
+                imports[here] = old
+        if got is None:
+            return
+        from collections import Counter
+        tot = Counter()
+        for v_ in got.values():
+            tot.update(v_)
+        if not tot:
+            self.flash("No furniture or fixture blocks recognised in this "
+                       "part of the CAD", 8000)
+            return
+        if old is not None:
+            doc["settings"]["cad_furniture"] = True
+        self.commit(doc, "Furniture & fixtures from the CAD: " + ", ".join(
+            f"{n} {k}" for k, n in tot.most_common()))
+
     def _cad_furniture_off(self):
         from . import furnish as FU_
         doc = self.doc()
@@ -1744,13 +1790,7 @@ class Panel(QWidget):
         if act == "import":
             self._import()
         elif act == "furniture":
-            here = self.level_box.currentData()
-            done = here not in (NEW, NEW_BELOW, ROOF_NEW, FOUNDATION,
-                                SITE_LV) and here in (
-                self.doc().get("imports") or {})
-            if not done:
-                self._import()
-            self._cad_furniture()
+            self._furniture_only(path)
             try:
                 self.c_furn.blockSignals(True)
                 self.c_furn.setChecked(bool(

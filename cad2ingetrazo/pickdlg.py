@@ -513,7 +513,10 @@ class PortionDialog(QDialog):
         b_all = QPushButton("Whole drawing")
         b_all.setToolTip("The file holds only this floor")
         b_all.clicked.connect(self._whole)
-        for b in (self.b_box, self.b_base, self.b_ll, b_fit, b_all):
+        # 3.64.60: no «Use the plan's lower-left corner» / «Use this floor»
+        # buttons (kept unshown: their state still steers the others)
+        self.b_ll.setVisible(False)
+        for b in (self.b_box, self.b_base, b_fit, b_all):
             row.addWidget(b)
         row.addStretch(1)
         self.ok = QPushButton("Use this floor")
@@ -523,12 +526,17 @@ class PortionDialog(QDialog):
         self.ok.clicked.connect(self.accept)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        row.addWidget(self.ok)
+        if actions:
+            self.ok.setVisible(False)
+            self.ok.setDefault(False)
+        else:
+            row.addWidget(self.ok)
         self.acts = []
         for key, label, tip in actions or ():
             b = QPushButton(label)
             b.setToolTip(tip)
             if key == "import":
+                b.setDefault(True)
                 b.setStyleSheet("QPushButton { background: #1f9d55; color: "
                                 "white; font-weight: bold; padding: 4px "
                                 "12px; } QPushButton:disabled { background: "
@@ -542,7 +550,7 @@ class PortionDialog(QDialog):
 
     def _act(self, key):
         """Use this floor, then the panel does ``key`` (import, furniture)."""
-        if not self.ok.isEnabled():
+        if not (self.ok.isEnabled() or self.whole):
             return
         self.action = key
         self.accept()
@@ -647,13 +655,18 @@ class PortionDialog(QDialog):
                              "snaps to line ends and crossings (yellow)."
                              + others)
         else:
-            self.tip.setText("<b>Ready.</b> «Use this floor», «Import to …» "
-                             "(this floor, imported now) or «Furniture & "
-                             "fixtures from CAD» — or draw the box / pick "
-                             "the point again." + others)
+            self.tip.setText(("<b>Ready.</b> «Import to …» (this floor, "
+                              "imported now) or «Furniture & fixtures from "
+                              "CAD» (only them, on the level chosen) — or "
+                              "draw the box / pick the point again."
+                              if getattr(self, "acts", None) else
+                              "<b>Ready.</b> «Use this floor» — or draw the "
+                              "box / pick the point again.") + others)
         self.ok.setEnabled(c.region is not None and c.base is not None)
+        if self.ok.isEnabled():
+            self.whole = False             # a box drawn: not the whole file
         for b in getattr(self, "acts", ()):
-            b.setEnabled(self.ok.isEnabled())
+            b.setEnabled(self.ok.isEnabled() or self.whole)
         self.b_base.setEnabled(c.region is not None)
         self.b_ll.setEnabled(c.region is not None)
 
@@ -679,6 +692,13 @@ class PortionDialog(QDialog):
 
     def _whole(self):
         self.whole = True
+        if getattr(self, "acts", None):     # 3.64.60: then Import / Furniture
+            for b in self.acts:
+                b.setEnabled(True)
+            self.tip.setText("<b>The whole drawing</b> is this floor — "
+                             "«Import to …» or «Furniture & fixtures from "
+                             "CAD».")
+            return
         self.accept()
 
 
