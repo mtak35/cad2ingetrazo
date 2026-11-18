@@ -644,11 +644,20 @@ def furnish(doc, lids=None, entries=None, only=None, skip=None) -> dict:
                 # 3.64.62: a tree / plant the size its CAD symbol draws
                 # (its canopy), its height in keeping — not the library
                 # model's own size (a 12 m tree over the house)
+                # 3.64.64: no two alike — each its own size and turn, from
+                # its place in the plan (the same at every rebuild)
+                import random as _rnd
+                rg_ = _rnd.Random(f"{round(cx, 1)}|{round(cy, 1)}|{kind}")
                 if kind == "tree":
                     # a plan's tree symbol is drawn small (1.5–2.5 m): a
-                    # grown garden tree, 3.5–6 m across, 5–8 m tall
-                    D_ = min(max(L * 2.0, 3.5), 6.0)
-                    H_ = min(max(D_ * 1.35, 5.0), 8.0)
+                    # garden tree from a young one (3 m tall) to a big old
+                    # one (10 m), most of them in between
+                    age = rg_.betavariate(2.0, 2.0)          # 0 … 1
+                    D_ = min(max(L * 2.0, 3.5), 6.0) * (0.55 + 0.9 * age)
+                    H_ = (3.0 + 7.0 * age) * rg_.uniform(0.9, 1.1)
+                    D_ = min(max(D_, 2.0), 8.0)
+                    turn = rg_.uniform(0.0, 360.0)
+                    rec["rot"] = round(turn, 3)
                     try:
                         if wall_u is not None and wall_u.buffer(0.4).contains(
                                 Point(cx, cy)):
@@ -656,8 +665,10 @@ def furnish(doc, lids=None, entries=None, only=None, skip=None) -> dict:
                     except Exception:  # noqa: BLE001
                         pass
                 else:
-                    D_ = min(max(L, 0.3), 1.5)
-                    H_ = min(max(D_ * 1.3, 0.4), 1.6)
+                    k_ = rg_.uniform(0.7, 1.3)
+                    D_ = min(max(L, 0.3), 1.5) * k_
+                    H_ = min(max(D_ * 1.3, 0.4), 1.6) * rg_.uniform(0.85, 1.2)
+                    rec["rot"] = round(rg_.uniform(0.0, 360.0), 3)
                 rec["fit"] = [round(D_, 3), round(D_, 3)]
                 rec["fit_free"] = True
                 rec["fit_h"] = round(H_, 3)
