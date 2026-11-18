@@ -969,6 +969,22 @@ class Panel(QWidget):
                 got = FU.furnish(doc, lids=[here], only=FU.LANDSCAPE_KINDS)
             else:
                 got = FU.furnish(doc, lids=[here], skip=FU.LANDSCAPE_KINDS)
+                # 3.64.65: the fixtures the plan draws, not as blocks —
+                # shower cabins, kitchen counters, wardrobes (the floor's
+                # fit-out, made again)
+                if match is not None:
+                    try:
+                        from . import fitout as FO
+                        pl_, _P = PJ._placed_plan(doc, here)
+                        if pl_ is not None:
+                            fo_ = FO.analyze(doc, here, pl_)
+                            g_ = got.setdefault(here, {})
+                            for k_, n_ in (fo_ or {}).items():
+                                if k_ in ("shower cabins", "wardrobes",
+                                          "kitchen counters"):
+                                    g_[k_] = g_.get(k_, 0) + n_
+                    except Exception:  # noqa: BLE001
+                        log_error("panel._furniture_only fitout")
         except Exception as e:  # noqa: BLE001
             log_error("panel._furniture_only")
             self.flash(f"Not read — {e}", 8000)

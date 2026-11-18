@@ -1141,10 +1141,32 @@ def _showers(doc, lid, pl, rooms, entries) -> int:
             and f.get("kind") == "shower"]
     n = 0
     done = []
-    for t in pl.get("texts") or ():
-        if not SHOWER_TEXT.match(str(t.get("text", ""))):
+    # 3.64.65: where the plan writes S.C / SHOWER — and, in a bathroom
+    # whose shower carries no text (a floor copied without its notes), its
+    # floor drain: the tiny closed circle / square of the fixtures' layer
+    anchors = [(float(t["x"]), float(t["y"])) for t in pl.get("texts") or ()
+               if SHOWER_TEXT.match(str(t.get("text", "")))]
+    lay_ = pl.get("layers") or []
+    for lp in pl.get("loops") or ():
+        ln_ = lp.get("layer")
+        if isinstance(ln_, int):
+            ln_ = lay_[ln_] if ln_ < len(lay_) else ""
+        if not re.search(r"FIX|SANIT|PLUMB|DRAIN|TRAP", str(ln_ or ""), re.I):
             continue
-        x, y = float(t["x"]), float(t["y"])
+        pts = lp.get("pts") or []
+        if len(pts) < 3:
+            continue
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        if max(xs) - min(xs) > 0.08 or max(ys) - min(ys) > 0.08:
+            continue
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        r = _room_at(rooms, cx, cy)
+        if r is None or not BATH_ROOM.search(str(r["name"])):
+            continue
+        if any(_room_at(rooms, ax, ay) is r for ax, ay in anchors):
+            continue                       # its text marks it already
+        anchors.append((cx, cy))
+    for x, y in anchors:
         r = _room_at(rooms, x, y)
         if r is None or not BATH_ROOM.search(str(r["name"])) and \
                 r["area"] > 25.0:
