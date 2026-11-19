@@ -491,6 +491,96 @@ def _eave_brackets(doc, trim) -> list:
     return out
 
 
+# ---- 3.64.75: more window / facade detail ---------------------------------------------
+def _brise_soleil(doc, fcs, col) -> list:
+    """Vertical louvre fins (and top / bottom rails) in front of every
+    window."""
+    out = []
+    for fc in fcs:
+        f, L, face = fc["f"], fc["L"], fc["face"]
+        for a, b, za, zb, kind, o in fc["ops"]:
+            if kind != "window" or b - a < 0.6 or zb - za < 0.6:
+                continue
+            a0, b0 = max(a - 0.08, 0.02), min(b + 0.08, L - 0.02)
+            z0, z1 = za - 0.08, zb + 0.08
+            n = max(int((b0 - a0) / 0.22), 2)
+            for k in range(n + 1):
+                s0 = a0 + (b0 - a0 - 0.03) * k / n
+                out += f.box(s0, s0 + 0.03, face + 0.02, face + 0.30, z0, z1,
+                             col)
+            out += f.box(a0, b0, face + 0.02, face + 0.30, z1 - 0.04, z1, col)
+            out += f.box(a0, b0, face + 0.02, face + 0.30, z0, z0 + 0.04, col)
+    return out
+
+
+def _sills_lintels(doc, fcs, trim) -> list:
+    """A projecting sill under, a lintel over every window and door."""
+    out = []
+    for fc in fcs:
+        f, L, face = fc["f"], fc["L"], fc["face"]
+        for a, b, za, zb, kind, o in fc["ops"]:
+            if b - a < 0.4:
+                continue
+            a0, b0 = max(a - 0.08, 0.02), min(b + 0.08, L - 0.02)
+            if kind == "window":
+                out += f.box(a0, b0, face, face + 0.09, za - 0.07, za, trim)
+            if not (o.get("head") == "arch" or o.get("arch")):
+                out += f.box(a0, b0, face, face + 0.06, zb, zb + 0.12, trim)
+    return out
+
+
+def _jali(doc, fcs, col) -> list:
+    """A lattice screen (crossed slats) over every window."""
+    out = []
+    for fc in fcs:
+        f, L, face = fc["f"], fc["L"], fc["face"]
+        for a, b, za, zb, kind, o in fc["ops"]:
+            if kind != "window" or b - a < 0.5 or zb - za < 0.5:
+                continue
+            a0, b0 = max(a - 0.04, 0.02), min(b + 0.04, L - 0.02)
+            z0, z1 = za - 0.04, zb + 0.04
+            nv = max(int((b0 - a0) / 0.14), 2)
+            nh = max(int((z1 - z0) / 0.14), 2)
+            for k in range(nv + 1):
+                s0 = a0 + (b0 - a0 - 0.02) * k / nv
+                out += f.box(s0, s0 + 0.02, face + 0.03, face + 0.055, z0, z1,
+                             col)
+            for k in range(nh + 1):
+                zz = z0 + (z1 - z0 - 0.02) * k / nh
+                out += f.box(a0, b0, face + 0.015, face + 0.035, zz, zz + 0.02,
+                             col)
+            # the frame
+            for s0, s1 in ((a0, a0 + 0.04), (b0 - 0.04, b0)):
+                out += f.box(s0, s1, face, face + 0.07, z0, z1, col)
+            for za_, zb_ in ((z0, z0 + 0.04), (z1 - 0.04, z1)):
+                out += f.box(a0, b0, face, face + 0.07, za_, zb_, col)
+    return out
+
+
+def _pilasters(doc, fcs, trim) -> list:
+    """A shallow pilaster on every solid pier between the windows of the
+    front's upper floors, and at each end."""
+    out = []
+    for fc in fcs:
+        if not fc.get("front"):
+            continue
+        f, L, face = fc["f"], fc["L"], fc["face"]
+        ws = sorted((a, b) for a, b, za, zb, kind, o in fc["ops"]
+                    if kind == "window")
+        if len(ws) < 2:
+            continue
+        gaps = [(ws[k][1], ws[k + 1][0]) for k in range(len(ws) - 1)]
+        for g0, g1 in gaps:
+            if g1 - g0 < 0.35:
+                continue
+            c = (g0 + g1) / 2
+            out += f.box(c - 0.11, c + 0.11, face, face + 0.08,
+                         fc["z0"] + 0.1, fc["z1"] - 0.1, trim)
+            out += f.box(c - 0.14, c + 0.14, face, face + 0.11,
+                         fc["z1"] - 0.2, fc["z1"] - 0.1, trim)
+    return out
+
+
 # ---- all of it ---------------------------------------------------------------------
 def faces(doc) -> list:
     look = doc.get("look") or {}
@@ -498,7 +588,8 @@ def faces(doc) -> list:
         return []
     keys = ("pediment", "deco_fins", "deco_bands", "deco_crown",
             "window_boxes", "half_timber", "gf_clad", "shutters", "siding",
-            "eave_brackets")
+            "eave_brackets", "brise_soleil", "sills_lintels", "jali",
+            "pilasters")
     if not any(look.get(k) for k in keys):
         return []
     from .host import log_error
@@ -533,7 +624,15 @@ def faces(doc) -> list:
             ("deco_crown", "Look Deco crown",
              lambda: _deco_crown(doc, fcs, wall, accent)),
             ("eave_brackets", "Look eave brackets",
-             lambda: _eave_brackets(doc, trim))):
+             lambda: _eave_brackets(doc, trim)),
+            ("brise_soleil", "Look louvre fins",
+             lambda: _brise_soleil(doc, fcs, _c4(accent))),
+            ("sills_lintels", "Look sills and lintels",
+             lambda: _sills_lintels(doc, fcs, trim)),
+            ("jali", "Look jali screens",
+             lambda: _jali(doc, fcs, _c4(accent))),
+            ("pilasters", "Look pilasters",
+             lambda: _pilasters(doc, fcs, trim))):
         if not look.get(key):
             continue
         try:

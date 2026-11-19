@@ -260,6 +260,9 @@ KIT_DEFAULT = {
     "fascia_d": 0.30, "fascia_h": 0.55, "accent": [0.24, 0.16, 0.10],
     # 3.64.66: a mosque's own elements (mosque.py)
     "mosque": False,
+    # 3.64.75: more window / facade detail (stylekit.py)
+    "brise_soleil": False, "sills_lintels": False, "jali": False,
+    "pilasters": False,
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)
@@ -351,6 +354,85 @@ PRESETS = {
         "wall": [0.86, 0.74, 0.56], "trim": [0.95, 0.92, 0.84],
         "stone": [0.80, 0.72, 0.60], "roof_c": [0.70, 0.38, 0.26],
         "accent": [0.95, 0.92, 0.84], "gate_color": "black"}),
+    "georgian": ("Traditional — Georgian (red brick, white sashes, "
+                 "shutters)", {
+        **OFF, "roof": "hip", "roof_slope": 30.0, "roof_eave": 0.35,
+        "annex_roof": True, "win_head": "flat", "win_frame": "wood",
+        "win_style": "colonial", "rail": "ms_grill", "columns": "doric",
+        "plinth": True, "bands": True, "cornice": True, "surrounds": True,
+        "pediment": True, "shutters": True, "sills_lintels": True,
+        "lanterns": True, "light_style": "lantern",
+        "wall": [0.62, 0.34, 0.26], "trim": [0.97, 0.96, 0.93],
+        "stone": [0.80, 0.78, 0.72], "roof_c": [0.25, 0.26, 0.29],
+        "accent": [0.96, 0.95, 0.92], "gate_color": "black"}),
+    "victorian": ("Traditional — Victorian (steep gables, brackets, "
+                  "porch)", {
+        **OFF, "roof": "gable", "roof_slope": 42.0, "roof_eave": 0.45,
+        "annex_roof": True, "win_head": "arch", "win_frame": "wood",
+        "win_style": "double_hung", "rail": "wood", "columns": "round_smooth",
+        "bands": True, "cornice": True, "surrounds": True, "corbels": True,
+        "porch_canopy": True, "eave_brackets": True, "sills_lintels": True,
+        "lanterns": True, "light_style": "lantern",
+        "wall": [0.56, 0.64, 0.68], "trim": [0.95, 0.93, 0.86],
+        "stone": [0.55, 0.48, 0.42], "roof_c": [0.30, 0.22, 0.20],
+        "accent": [0.45, 0.22, 0.22], "gate_color": "black"}),
+    "farmhouse": ("Modern farmhouse (white siding, black frames, "
+                  "gables)", {
+        **OFF, "roof": "gable", "roof_slope": 33.0, "roof_eave": 0.40,
+        "annex_roof": True, "win_head": "flat", "win_frame": "black",
+        "win_style": "grid", "rail": "wood", "columns": "square_smooth",
+        "siding": True, "shutters": True, "entrance_canopy": True,
+        "lanterns": True, "light_style": "lantern", "sills_lintels": True,
+        "wall": [0.96, 0.96, 0.94], "trim": [0.99, 0.99, 0.98],
+        "stone": [0.55, 0.52, 0.48], "roof_c": [0.16, 0.17, 0.18],
+        "accent": [0.14, 0.14, 0.15], "gate_color": "black"}),
+    "midcentury": ("Mid-century modern (low lines, stone, "
+                   "screens)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "win_style": "side_lights", "rail": "glass", "columns": "square_smooth",
+        "fascia": True, "fascia_d": 0.45, "fascia_h": 0.30,
+        "slab_edges": True, "gf_clad": True, "brise_soleil": True,
+        "lanterns": True, "light_style": "sconce",
+        "wall": [0.90, 0.86, 0.78], "trim": [0.96, 0.95, 0.92],
+        "stone": [0.55, 0.45, 0.36], "metal": [0.14, 0.14, 0.15],
+        "accent": [0.45, 0.30, 0.18], "gate_color": "charcoal"}),
+    "tropical": ("Tropical (deep eaves, timber, louvres)", {
+        **OFF, "roof": "hip", "roof_slope": 26.0, "roof_eave": 1.0,
+        "annex_roof": True, "win_head": "flat", "win_frame": "wood",
+        "win_style": "transom_top", "rail": "wood",
+        "columns": "round_smooth", "shutters": True, "brise_soleil": True,
+        "plinth": True, "lanterns": True, "light_style": "lantern",
+        "wall": [0.94, 0.92, 0.86], "trim": [0.88, 0.84, 0.76],
+        "stone": [0.60, 0.55, 0.48], "roof_c": [0.55, 0.30, 0.20],
+        "accent": [0.40, 0.26, 0.16], "gate_color": "black"}),
+    "arabian": ("Arabian / Gulf villa (arches, jali screens, sand "
+                "tones)", {
+        **OFF, "roof": "asdrawn", "win_head": "arch", "win_frame": "aluminium",
+        "win_style": "asdrawn", "rail": "solid", "columns": "round_smooth",
+        "door_arch": True, "arcades": True, "plinth": True, "cornice": True,
+        "bands": True, "surrounds": True, "jali": True, "lanterns": True,
+        "light_style": "lantern", "medallions": True,
+        "wall": [0.91, 0.84, 0.70], "trim": [0.98, 0.95, 0.89],
+        "stone": [0.74, 0.62, 0.46], "metal": [0.20, 0.16, 0.12],
+        "accent": [0.42, 0.28, 0.16], "gate_color": "brown"}),
+    "hightech": ("High-tech (steel frame, glass, louvres)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "steel",
+        "win_style": "modern_grid", "rail": "glass_post",
+        "columns": "square_smooth", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.06, "fascia_h": 0.18, "brise_soleil": True,
+        "pilasters": True, "light_style": "sconce", "lanterns": True,
+        "wall": [0.80, 0.82, 0.84], "trim": [0.30, 0.32, 0.35],
+        "stone": [0.50, 0.52, 0.55], "metal": [0.55, 0.58, 0.62],
+        "accent": [0.55, 0.58, 0.62], "gate_color": "charcoal"}),
+    "bauhaus": ("Bauhaus / International (white cube, ribbon windows)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "steel",
+        "win_style": "side_lights", "rail": "ss_bars",
+        "columns": "round_smooth", "fascia": True, "fascia_d": 0.05,
+        "fascia_h": 0.14, "slab_edges": True, "sills_lintels": True,
+        "light_style": "sconce", "lanterns": True,
+        "wall": [0.96, 0.96, 0.95], "trim": [0.90, 0.90, 0.89],
+        "stone": [0.70, 0.70, 0.68], "metal": [0.18, 0.18, 0.20],
+        "gate_color": "charcoal"}),
     "mediterranean": ("Traditional — Mediterranean / Spanish villa", {}),
     "industrial": ("Industrial (metal-clad, flat roofs, plain openings)", {
         **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "flat",
@@ -395,6 +477,22 @@ STYLE_NOTES = {
                "white trims.",
     "italianate": "A low hip roof with wide eaves on paired brackets, "
                   "tall arched windows with hoods, quoins.",
+    "georgian": "Red brick, a pediment and Doric columns, white "
+                "six-over-six sashes with sills and lintels, shutters.",
+    "victorian": "Steep gables, eave brackets, a corbelled porch roof, "
+                 "arched sash windows, a painted-lady palette.",
+    "farmhouse": "White clapboard, black grid windows, shutters, a metal "
+                 "gable roof, a canopy over the door.",
+    "midcentury": "Low flat lines, a deep fascia, a stone ground floor, "
+                  "vertical fin screens, picture windows.",
+    "tropical": "Deep eaves on a hip roof, timber louvres and shutters, "
+                "round columns, warm earth colours.",
+    "arabian": "Sand walls, arches and arcades, jali screens over the "
+               "windows, cornice and floor bands, a bronze gate.",
+    "hightech": "Steel frame look: grey panels, black grid glazing, "
+                "louvre fins and pilasters, thin fascia.",
+    "bauhaus": "A white cube: thin fascia, ribbon windows, sills and "
+               "lintels, tubular railings.",
     "mediterranean": "Clay-tile hip roofs, arches and arcades, wrought "
                      "iron, mouldings, lanterns.",
 }
@@ -561,6 +659,25 @@ def apply_kit(doc, kit) -> dict:
             n_arch += 1
     rep["arched"] = n_arch
     rep["grilles"] = n_gr
+    # 2b. 3.64.75: the corner windows follow the style too (their frame and
+    # type — the loop above leaves their legs alone)
+    n_cw = 0
+    sty_ = k.get("win_style", "asdrawn")
+    cw_style = {"colonial": "casement", "double_hung": "sliding",
+                "diamond": "casement", "grid": "casement",
+                "transom_top": "casement", "modern_grid": "fixed",
+                "side_lights": "fixed"}.get(sty_)
+    for w in arch["walls"]:
+        if not w.get("cwin"):
+            continue
+        if k["win_frame"] in ("wood", "aluminium", "steel", "upvc", "black"):
+            w["cwin_frame"] = k["win_frame"]
+        elif k["win_frame"] == "asdrawn":
+            pass
+        if cw_style and w.get("cwin_style") != "void":
+            w["cwin_style"] = cw_style
+        n_cw += 1
+    rep["corner_windows"] = n_cw
     # 3. the front's wide upper windows as arcades
     if k["arcades"]:
         rep["arcades"] = front_arcades(doc, outer, gid)
@@ -802,3 +919,64 @@ def is_look_roof(e) -> bool:
         abs(float(e.get("slope", 0)) - SLOPE) \
         < 1e-3 and min(abs(float(e.get("overhang", 0)) - EAVE),
                        abs(float(e.get("overhang", 0)) - EAVE * 0.75)) < 1e-3
+
+
+# 3.64.75: every preset is a style a perspective / the dialog can name
+# (before, only five were: the others were silently ignored).
+STYLES = dict(STYLES, **{k: v[0] for k, v in PRESETS.items()})
+
+
+# 3.64.75: which elements belong to which style — the Design dialog greys
+# out the others (``relevant``). «all» = every style.
+_GENERAL = {"plinth", "bands", "cornice", "fascia", "surrounds", "lanterns",
+            "gf_grille", "door_arch", "arcades", "sills_lintels"}
+ELEMENT_STYLES = {
+    "quoins": {"classical", "neoclassical", "italianate", "mediterranean",
+               "georgian", "tudor"},
+    "corbels": {"mediterranean", "classical", "italianate", "victorian",
+                "arabian"},
+    "porch_canopy": {"mediterranean", "victorian", "tropical", "farmhouse",
+                     "capecod", "tudor"},
+    "entrance_canopy": {"mediterranean", "modern", "contemporary",
+                        "farmhouse", "victorian", "capecod", "classical",
+                        "neoclassical", "midcentury", "arabian"},
+    "medallions": {"classical", "neoclassical", "mediterranean", "arabian",
+                   "italianate", "georgian"},
+    "slab_edges": {"modern", "minimalist", "contemporary", "midcentury",
+                   "hightech", "bauhaus", "brutalist"},
+    "frame_box": {"modern", "contemporary", "midcentury", "hightech"},
+    "incline_panel": {"modern", "contemporary", "hightech"},
+    "entry_clad": {"modern", "contemporary", "midcentury"},
+    "pediment": {"classical", "neoclassical", "georgian", "italianate",
+                 "mediterranean"},
+    "deco_fins": {"artdeco"}, "deco_bands": {"artdeco"},
+    "deco_crown": {"artdeco"},
+    "window_boxes": {"brutalist", "contemporary"},
+    "half_timber": {"tudor"}, "gf_clad": {"tudor", "midcentury",
+                                         "contemporary", "mediterranean"},
+    "shutters": {"capecod", "georgian", "farmhouse", "tropical",
+                 "mediterranean", "tudor", "italianate", "victorian"},
+    "siding": {"capecod", "farmhouse", "victorian"},
+    "eave_brackets": {"italianate", "victorian", "tudor", "tropical"},
+    "brise_soleil": {"modern", "midcentury", "tropical", "hightech",
+                     "contemporary", "minimalist", "mosque", "arabian",
+                     "industrial"},
+    "jali": {"arabian", "mosque", "mediterranean", "contemporary",
+             "midcentury", "tropical"},
+    "pilasters": {"hightech", "classical", "neoclassical", "georgian",
+                  "artdeco", "modern", "contemporary", "mosque",
+                  "italianate"},
+}
+STYLE_ONLY = set(ELEMENT_STYLES)
+
+
+def relevant(style, key) -> bool:
+    """Is the element ``key`` one of the style's (else the dialog greys it
+    out)? What the style's own preset switches on always is."""
+    if key not in ELEMENT_STYLES:
+        return True
+    if style in (None, "", "auto", "custom"):
+        return True
+    if style in ELEMENT_STYLES[key]:
+        return True
+    return bool(PRESETS.get(style, ("", {}))[1].get(key))

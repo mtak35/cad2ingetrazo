@@ -16112,13 +16112,119 @@ MATERIAL_KINDS = [("wall", "Walls"), ("slab", "Slabs"), ("column", "Columns"),
                   ("stair", "Stairs"), ("opening", "Door / window frames"),
                   ("plot", "Plot (ground)"), ("site", "Boundary wall"),
                   ("ramp", "Car ramps"), ("parking", "Parking (paint, cars)"),
-                  ("room", "Floor finishes (rooms)")]
+                  ("room", "Floor finishes (rooms)"),
+                  # 3.64.75: the elevations' parts
+                  ("look_trim", "Mouldings, trims, sills, lintels"),
+                  ("dome", "Domes"), ("minaret", "Minarets"),
+                  ("chhatri", "Chhatris / kiosks"),
+                  ("coping", "Parapet coping"), ("gate", "Gate"),
+                  ("hill_fill", "Retaining walls / earth fill")]
+#: 3.64.75 — detailed finishes to pick from, per element: (name, colour)
+MATERIAL_CHOICES = {
+    "wall": [("Plaster, white", (0.93, 0.92, 0.89)),
+             ("Plaster, cream", (0.90, 0.86, 0.76)),
+             ("Plaster, sand", (0.88, 0.80, 0.66)),
+             ("Plaster, terracotta", (0.78, 0.50, 0.38)),
+             ("Plaster, grey", (0.62, 0.63, 0.64)),
+             ("Fair-faced concrete", (0.60, 0.60, 0.58)),
+             ("Board-marked concrete", (0.55, 0.55, 0.53)),
+             ("Exposed brick, red", (0.62, 0.32, 0.25)),
+             ("Exposed brick, buff", (0.78, 0.66, 0.48)),
+             ("Sandstone cladding", (0.80, 0.68, 0.52)),
+             ("Limestone cladding", (0.88, 0.85, 0.76)),
+             ("Travertine cladding", (0.86, 0.80, 0.68)),
+             ("Granite cladding, grey", (0.50, 0.50, 0.52)),
+             ("Marble cladding, white", (0.95, 0.95, 0.93)),
+             ("Timber cladding, teak", (0.55, 0.38, 0.22)),
+             ("Timber cladding, cedar", (0.62, 0.42, 0.28)),
+             ("Clapboard siding, white", (0.96, 0.96, 0.94)),
+             ("Metal cladding, grey", (0.62, 0.64, 0.66)),
+             ("Metal cladding, zinc", (0.55, 0.58, 0.60)),
+             ("ACP panel, anthracite", (0.22, 0.23, 0.25)),
+             ("GRC panel, white", (0.94, 0.94, 0.92)),
+             ("Stucco, ochre", (0.84, 0.68, 0.40))],
+    "look_trim": [("Painted white", (0.97, 0.96, 0.93)),
+                  ("Cream stucco", (0.93, 0.89, 0.80)),
+                  ("GRC moulding, white", (0.95, 0.94, 0.91)),
+                  ("Cast stone", (0.82, 0.79, 0.72)),
+                  ("Limestone", (0.88, 0.85, 0.76)),
+                  ("Concrete", (0.62, 0.62, 0.60)),
+                  ("Timber, painted dark", (0.24, 0.16, 0.10)),
+                  ("Aluminium, anodised", (0.70, 0.72, 0.74))],
+    "roof": [("Clay tiles, terracotta", (0.78, 0.38, 0.24)),
+             ("Clay tiles, red", (0.66, 0.28, 0.20)),
+             ("Concrete tiles, grey", (0.45, 0.45, 0.47)),
+             ("Slate, dark", (0.25, 0.26, 0.29)),
+             ("Metal standing seam, grey", (0.50, 0.52, 0.55)),
+             ("Metal standing seam, black", (0.14, 0.14, 0.15)),
+             ("Zinc", (0.55, 0.58, 0.60)),
+             ("Copper (new)", (0.72, 0.45, 0.30)),
+             ("Copper (patina)", (0.35, 0.58, 0.52)),
+             ("Thatch", (0.62, 0.52, 0.32)),
+             ("Flat roof, white membrane", (0.92, 0.92, 0.90)),
+             ("Flat roof, gravel", (0.58, 0.56, 0.54))],
+    "dome": [("Dome, white GRC", (0.96, 0.95, 0.92)),
+             ("Dome, white mosaic", (0.93, 0.94, 0.95)),
+             ("Dome, copper patina", (0.35, 0.58, 0.52)),
+             ("Dome, blue tile", (0.20, 0.40, 0.62)),
+             ("Dome, gold leaf", (0.80, 0.65, 0.25)),
+             ("Dome, stone", (0.84, 0.80, 0.72))],
+    "minaret": [("Minaret, white stone", (0.95, 0.94, 0.91)),
+                ("Minaret, sandstone", (0.82, 0.70, 0.54)),
+                ("Minaret, brick", (0.64, 0.34, 0.26)),
+                ("Minaret, concrete", (0.64, 0.64, 0.62))],
+    "chhatri": [("Chhatri, white", (0.96, 0.95, 0.92)),
+                ("Chhatri, sandstone", (0.82, 0.70, 0.54)),
+                ("Chhatri, copper", (0.35, 0.58, 0.52))],
+    "coping": [("Coping, cast stone", (0.82, 0.79, 0.72)),
+               ("Coping, white", (0.96, 0.95, 0.92)),
+               ("Coping, concrete", (0.62, 0.62, 0.60)),
+               ("Coping, aluminium", (0.70, 0.72, 0.74))],
+    "opening": [("Aluminium frame, white", (0.94, 0.94, 0.94)),
+                ("Aluminium frame, black", (0.10, 0.10, 0.11)),
+                ("Aluminium frame, bronze", (0.30, 0.22, 0.16)),
+                ("Aluminium frame, grey", (0.40, 0.42, 0.45)),
+                ("uPVC, white", (0.95, 0.95, 0.93)),
+                ("Timber, oak", (0.60, 0.44, 0.28)),
+                ("Timber, walnut", (0.35, 0.24, 0.16)),
+                ("Steel, black", (0.12, 0.12, 0.13))],
+    "gate": [("Wrought iron, black", (0.10, 0.10, 0.11)),
+             ("Powder-coated, charcoal", (0.22, 0.24, 0.27)),
+             ("Powder-coated, white", (0.92, 0.92, 0.90)),
+             ("Timber, dark", (0.30, 0.20, 0.13)),
+             ("Brass / bronze", (0.70, 0.56, 0.24))],
+    "site": [("Brick, plastered", (0.88, 0.84, 0.76)),
+             ("Brick, exposed", (0.62, 0.32, 0.25)),
+             ("Stone, rubble", (0.62, 0.58, 0.50)),
+             ("Concrete block, painted", (0.90, 0.90, 0.88)),
+             ("Precast concrete panel", (0.70, 0.70, 0.68)),
+             ("Sandstone", (0.80, 0.68, 0.52))],
+    "hill_fill": [("Retaining wall, concrete", (0.62, 0.62, 0.60)),
+                  ("Retaining wall, stone", (0.64, 0.60, 0.52)),
+                  ("Retaining wall, plastered", (0.88, 0.84, 0.76)),
+                  ("Earth / grass bank", (0.55, 0.65, 0.40))],
+    "plot": [("Lawn", (0.62, 0.70, 0.52)), ("Gravel", (0.70, 0.66, 0.58)),
+             ("Paving, grey", (0.66, 0.66, 0.65)),
+             ("Paving, red brick", (0.62, 0.34, 0.28)),
+             ("Sand", (0.86, 0.78, 0.60))],
+    "column": [("RCC", (0.75, 0.75, 0.73)),
+               ("Plastered, white", (0.94, 0.93, 0.90)),
+               ("Stone clad", (0.80, 0.68, 0.52)),
+               ("Marble clad", (0.95, 0.95, 0.93)),
+               ("Timber", (0.58, 0.40, 0.25)),
+               ("Steel, painted", (0.35, 0.37, 0.40))],
+}
 DEFAULT_MATERIAL = {"wall": "Plaster, white", "slab": "RCC slab",
                     "column": "RCC", "core": "RCC", "beam": "RCC", "footing": "PCC / RCC",
                     "roof": "Roof finish", "stair": "RCC, terrazzo",
                     "opening": "Aluminium frame", "plot": "Lawn",
                     "site": "Brick, plastered", "ramp": "RCC, broom finish",
-                    "parking": "Road paint", "room": "Floor tiles"}
+                    "parking": "Road paint", "room": "Floor tiles",
+                    "look_trim": "Painted white", "dome": "Dome, white GRC",
+                    "minaret": "Minaret, white stone",
+                    "chhatri": "Chhatri, white", "coping": "Coping, cast stone",
+                    "gate": "Wrought iron, black",
+                    "hill_fill": "Retaining wall, concrete"}
 
 
 def material_of(doc, kind):
@@ -16143,6 +16249,7 @@ def _apply_materials(groups, mats):
         if not m:
             continue
         mat = dict(g.material or {})
+        old_ = mat.get("color")
         if m.get("color"):
             mat["color"] = tuple(m["color"][:3])
         if m.get("name"):
@@ -16152,6 +16259,14 @@ def _apply_materials(groups, mats):
             for f in g.mesh.faces:
                 c = f.attrs.get("color")
                 if c is None or t == "wall":
+                    f.attrs["color"] = tuple(m["color"][:3])
+        elif t in ("look_trim", "dome", "minaret", "chhatri", "coping",
+                   "gate", "hill_fill", "site") and m.get("color") \
+                and old_ is not None:         # 3.64.75: parts of the look
+            for f in g.mesh.faces:
+                c = f.attrs.get("color")
+                if c is None or all(abs(float(c[k]) - float(old_[k])) < 0.03
+                                    for k in range(3)):
                     f.attrs["color"] = tuple(m["color"][:3])
         elif t == "roof" and m.get("color"):     # 3.64.55: the tiles' own
             from .engine.structure import ROOF_COLOR as RC_

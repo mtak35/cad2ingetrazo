@@ -6664,14 +6664,25 @@ class Panel(QWidget):
         self.mt_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch)
         self.mt_table.verticalHeader().setVisible(False)
-        self.mt_table.setMinimumHeight(200)
+        self.mt_table.setMinimumHeight(260)
         self._mt_cols = {}
         for i, (k, label) in enumerate(PJ.MATERIAL_KINDS):
             it = QTableWidgetItem(label)
             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             it.setData(Qt.UserRole, k)
             self.mt_table.setItem(i, 0, it)
-            self.mt_table.setItem(i, 1, QTableWidgetItem(""))
+            ch_ = PJ.MATERIAL_CHOICES.get(k)
+            if ch_:                 # 3.64.75: detailed finishes to pick
+                cb_ = QComboBox()
+                cb_.setEditable(True)
+                cb_.addItem("")
+                for nm_, c_ in ch_:
+                    cb_.addItem(nm_, list(c_))
+                cb_.activated.connect(
+                    lambda _i, k=k, cb=cb_: self._pick_material(k, cb))
+                self.mt_table.setCellWidget(i, 1, cb_)
+            else:
+                self.mt_table.setItem(i, 1, QTableWidgetItem(""))
             b = QPushButton("")
             b.clicked.connect(lambda _c=False, k=k: self._pick_colour(k))
             self.mt_table.setCellWidget(i, 2, b)
@@ -6685,11 +6696,27 @@ class Panel(QWidget):
             m = PJ.material_of(doc, k)
             self._mt_cols[k] = list(m["color"])
             it = self.mt_table.item(i, 1)
-            if it is not None and not self.mt_table.isPersistentEditorOpen(it):
+            cw_ = self.mt_table.cellWidget(i, 1)
+            if cw_ is not None:
+                if not cw_.lineEdit().hasFocus():
+                    cw_.setEditText(m["name"])
+            elif it is not None and not self.mt_table.isPersistentEditorOpen(
+                    it):
                 it.setText(m["name"])
             b = self.mt_table.cellWidget(i, 2)
             c = [int(255 * x) for x in m["color"]]
             b.setStyleSheet(f"background: rgb({c[0]},{c[1]},{c[2]});")
+
+    def _pick_material(self, k, cb):
+        """A detailed finish chosen: its name and its colour."""
+        c = cb.currentData()
+        if not c:
+            return
+        self._mt_cols[k] = [float(v) for v in c[:3]]
+        i = [kk for kk, _l in PJ.MATERIAL_KINDS].index(k)
+        b = self.mt_table.cellWidget(i, 2)
+        q = [int(255 * v) for v in c[:3]]
+        b.setStyleSheet(f"background: rgb({q[0]},{q[1]},{q[2]});")
 
     def _pick_colour(self, k):
         from PySide6.QtGui import QColor
@@ -6707,7 +6734,10 @@ class Panel(QWidget):
         doc = self.doc()
         mats = {}
         for i, (k, _l) in enumerate(PJ.MATERIAL_KINDS):
-            mats[k] = {"name": self.mt_table.item(i, 1).text().strip(),
+            cw_ = self.mt_table.cellWidget(i, 1)
+            nm_ = (cw_.currentText() if cw_ is not None
+                   else self.mt_table.item(i, 1).text()).strip()
+            mats[k] = {"name": nm_,
                        "color": self._mt_cols.get(k)}
         doc["materials"] = mats
         self.commit(doc, "Materials applied")
@@ -7115,7 +7145,7 @@ class Panel(QWidget):
                     t = dict(t, id=wid)
                 d = _xf_gap(xf, want)
                 if best is None or d < best[0]:
-                    best = (d, (t["type"], t["id"], t.get("seg")))
+                    best = (d, (t["type"], t.get("id", t["type"]), t.get("seg")))
             return best[1] if best else self._ray_hit(pos)
         except Exception:  # noqa: BLE001
             log_error("panel._under_cursor")
@@ -7144,7 +7174,7 @@ class Panel(QWidget):
                 if getattr(g, "hidden", False):
                     continue
                 k = len(tags)
-                tags.append((t["type"], t["id"], t.get("seg")))
+                tags.append((t["type"], t.get("id", t["type"]), t.get("seg")))
                 for f in m.faces:
                     try:
                         for a, b, c in f.triangulate():

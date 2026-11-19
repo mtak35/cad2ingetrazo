@@ -48,6 +48,13 @@ CHECKS = [("Mouldings", [("plinth", "Stone plinth round the ground floor"),
               ("gf_grille", "Grilles on the ground floor's windows"),
               ("door_arch", "Outside doors arched"),
               ("arcades", "Front's wide upper windows as arcades")]),
+          ("Window detail", [
+              ("sills_lintels", "Projecting sills and lintels on every "
+               "window"),
+              ("brise_soleil", "Vertical louvre fins (brise-soleil) in "
+               "front of windows"),
+              ("jali", "Jali / lattice screens over windows"),
+              ("pilasters", "Pilasters between the front's windows")]),
           ("Front details", [
               ("corbels", "Corbels under balconies and terraces"),
               ("porch_canopy", "Clay-tile roof along the terrace over the "
@@ -129,6 +136,18 @@ class ElevationDesigner(QDialog):
             self.style.addItem(label, k)
         self.style.activated.connect(lambda _i: self._load_preset())
         f0.addRow("Style", self.style)
+        self.auto = QCheckBox("Apply to the model as soon as the style is "
+                              "chosen")
+        self.auto.setChecked(True)
+        self.auto.setToolTip("Off: the style only fills the choices, "
+                             "«Apply design» puts it on the model")
+        f0.addRow(self.auto)
+        self.showall = QCheckBox("Show every element (unlock the greyed "
+                                 "ones)")
+        self.showall.setToolTip("Elements that do not belong to the "
+                                "chosen style are greyed out")
+        self.showall.toggled.connect(lambda _c: self._relevance())
+        f0.addRow(self.showall)
         self.note = QLabel("")
         self.note.setWordWrap(True)
         self.note.setStyleSheet("color: #8a94a3;")
@@ -144,6 +163,7 @@ class ElevationDesigner(QDialog):
         f1 = QFormLayout(g1)
         self.roof = _combo(ROOFS)
         f1.addRow("Roof", self.roof)
+        self.roof.currentIndexChanged.connect(lambda _i: self._relevance())
         self.slope = QDoubleSpinBox()
         self.slope.setRange(10.0, 60.0)
         self.slope.setSuffix(" °")
@@ -262,12 +282,31 @@ class ElevationDesigner(QDialog):
         _set(self.gate, k.get("gate_color", "black"))
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
+        self._relevance()
         for key, (b, _c) in self.cols.items():
             c = list(k.get(key) or LS.KIT_DEFAULT[key])
             self.cols[key] = (b, c)
             q = QColor.fromRgbF(*[min(max(float(v), 0.0), 1.0)
                                   for v in c[:3]])
             b.setStyleSheet(f"background: {q.name()};")
+
+    def _relevance(self):
+        """Grey out what the chosen style does not use (3.64.75)."""
+        st = self.style.currentData()
+        unlock = self.showall.isChecked()
+        for key, ch in self.checks.items():
+            ok = unlock or LS.relevant(st, key)
+            ch.setEnabled(ok)
+            ch.setToolTip("" if ok else "Not part of this style — tick "
+                          "«Show every element» to use it anyway")
+        tiled = self.roof.currentData() in ("hip", "gable")
+        for w in (self.slope, self.eave, self.annex):
+            w.setEnabled(tiled or unlock)
+        flat = self.roof.currentData() == "asdrawn"
+        for w in (self.fd, self.fh):
+            w.setEnabled(flat or unlock)
+        arch = LS.PRESETS.get(st, ("", {}))[1]
+        self.head.setEnabled(unlock or not arch.get("mosque"))
 
     def _kit(self) -> dict:
         k = {"style": self.style.currentData(),
@@ -298,6 +337,8 @@ class ElevationDesigner(QDialog):
 
     def _load_preset(self):
         self._fill(LS.preset(self.style.currentData()))
+        if self.auto.isChecked():
+            self._apply()
 
     def _pick(self, key):
         b, c = self.cols[key]
