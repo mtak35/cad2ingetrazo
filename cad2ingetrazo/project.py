@@ -11381,8 +11381,15 @@ def ramp_solids(doc) -> list:
             continue
         z = z_of[lid] + open_offset(doc, lid) + float(rs_.get("z_base", 0.0)
                                                       or 0.0)
+        zs_ = [z + v for v in PK.ramp_z(ramp_as_built(r, rs_))]
+        try:                     # 3.64.72: on a slope, end to end
+            from . import hillside as HS_
+            zs_ = HS_.ramp_zs(doc, r, zs_)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.hillside ramp")
         out.append({"sections": ramp_fitted(doc, r)["sections"],
-                    "zs": [z + v for v in PK.ramp_z(ramp_as_built(r, rs_))],
+                    "zs": zs_,
                     "t": float(r.get("t", st.get("ramp_t", 0.2)))})
     return out
 
@@ -11537,6 +11544,14 @@ def _parking_groups(doc):
             log_error("project parking floor top")
         if (doc.get("hill") or {}).get("lower") == lid:
             z = _hill_low(doc)       # 3.64.67: on the lower road's ground
+            try:                     # 3.64.72: the road's level there
+                from . import hillside as HS_
+                cs_ = [c_["c"] for c_ in (pk.get("cars") or [])]
+                if cs_:
+                    tf_ = HS_.low_terrain_fn(doc)
+                    z = sum(tf_(c_[0], c_[1]) for c_ in cs_) / len(cs_)
+            except Exception:  # noqa: BLE001
+                pass
         faces = []
         # the bay lines painted as one clean, joined shape
         faces += PK.paint_union(pk.get("bays") or [], z + 0.004)
@@ -11625,6 +11640,12 @@ def _parking_groups(doc):
                     tops_ = [zt_]
                     lowg_ = (doc.get("hill") or {}).get("lower") == lid
                     gfn_ = None
+                    if lowg_:          # 3.64.72: on the lower ground's slope
+                        try:
+                            from . import hillside as HS_
+                            gfn_ = HS_.low_terrain_fn(doc)
+                        except Exception:  # noqa: BLE001
+                            gfn_ = None
                     if (doc.get("hill") or {}).get("upper") == lid:
                         try:          # 3.64.71: each bed on its terrace
                             from . import hillside as HS_
@@ -14826,7 +14847,20 @@ def _plot_groups(doc):
         from .host import log_error
         log_error("project._plot_groups hill")
     fs_ = []
-    for outer, hs in plates:
+    hill_tin_ = False
+    try:                       # 3.64.72: the lower ground a surface on its
+        from . import hillside as HS_      # spot levels (roads, forecourts)
+        if HS_.on(doc) and HS_.lower_spots(doc):
+            from shapely.geometry import Polygon as _PgT
+            fs_ = HS_.terrain_faces(
+                [_PgT(o_, [list(h_) for h_ in hs_]).buffer(0)
+                 for o_, hs_ in plates], HS_.low_terrain_fn(doc))
+            hill_tin_ = bool(fs_)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._plot_groups terrain")
+        fs_ = []
+    for outer, hs in ([] if hill_tin_ else plates):
         fs_ += W.solid({"outer": outer, "holes": hs}, z_pl - 0.10, z_pl)
     for f in fs_:
         if isinstance(f, dict):
@@ -15104,6 +15138,7 @@ def commit(viewport, doc, opts=None) -> None:
         try:                       # 3.64.66: the earth under the upper
             from . import hillside as HS_     # ground floor, retained
             new_groups += HS_.fill_groups(doc)
+            new_groups += HS_.steps_groups(doc)     # 3.64.72: its steps
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.hillside fill")

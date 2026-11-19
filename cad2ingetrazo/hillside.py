@@ -360,6 +360,73 @@ def terraces(doc, H=None) -> list:
     return [(unary_union(cs), z) for z, cs in sorted(by.items())]
 
 
+def lower_spots(doc) -> list:
+    """3.64.72: the lower ground's spot levels — the road levels noted
+    and the lower floor's notes out on its open ground: [(x, y, z)]."""
+    from shapely.geometry import Point
+    if not on(doc):
+        return []
+    fp = lower_footprint(doc)
+    out = [(float(r[0]), float(r[1]), float(r[2]))
+           for r in (doc["hill"].get("roads") or [])]
+    for m in (doc.get("marks") or {}).get(doc["hill"]["lower"]) or []:
+        if m.get("v") is None:
+            continue
+        if fp is not None and fp.buffer(0.3).contains(Point(m["x"], m["y"])):
+            continue
+        out.append((float(m["x"]), float(m["y"]), float(m["v"])))
+    return out
+
+
+def low_terrain_fn(doc):
+    """fn(x, y) → the lower ground's level: the spot levels blended
+    (inverse distance, the nearest four) — the road rising along the
+    site, the forecourts at their notes."""
+    low = float((doc.get("hill") or {}).get("low", 0.0) or 0.0)
+    sp = lower_spots(doc)
+    if not sp:
+        return lambda x, y: low
+
+    def at(x, y):
+        ds = sorted(((x - a) ** 2 + (y - b) ** 2, z) for a, b, z in sp)[:4]
+        if ds[0][0] < 0.04:
+            return ds[0][1]
+        w = [1.0 / d for d, _z in ds]
+        return sum(wi * z for wi, (_d, z) in zip(w, ds)) / sum(w)
+    return at
+
+
+def level_ground_fn(doc, lid):
+    """fn(x, y) → what one stands on at (x, y) on a two-ground site, for
+    the steps and ramps of level ``lid``: its floor where it builds, else
+    the ground there (the upper plaza's terraces, the lower ground)."""
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+    from . import project as PJ
+    arch = doc["arch"]
+    el = PJ.elevations(arch)
+    i = next(k for k, lv in enumerate(arch["levels"]) if lv["id"] == lid)
+    if lid == doc["hill"].get("lower"):
+        fp = lower_footprint(doc)
+    else:
+        from shapely.ops import unary_union
+        gs = [g for s_ in arch["structure"] if s_["type"] == "slab"
+              and s_["level"] == lid and not s_.get("roof")
+              for g in [_polys(s_)] if g is not None]
+        fp = unary_union(gs) if gs else None
+    pf = prep(fp.buffer(-0.05)) if fp is not None else None
+    gfn = ground_fn(doc)
+
+    def at(x, y):
+        if pf is not None and pf.contains(Point(x, y)):
+            try:
+                return el[i] + PJ.floor_offset_at(doc, lid, (x, y))
+            except Exception:  # noqa: BLE001
+                return el[i]
+        return gfn(x, y)
+    return at
+
+
 def ground_fn(doc):
     """fn(x, y) → the ground's level there: the upper ground (the plot's
     top) on the upper plaza (with 1.5 m round it), else the lower road."""
@@ -369,20 +436,175 @@ def ground_fn(doc):
     top = PJ.plot_top(doc)
     if not on(doc):
         return lambda x, y: top
-    low = low_z(doc)
+    lowf = low_terrain_fn(doc)        # 3.64.72: the lower ground sloped
     H = high_area(doc)
     if H is None:
-        return lambda x, y: low
+        return lowf
     pH = prep(H.buffer(1.5))
     ms = plaza_marks(doc, H)
     if not ms:
-        return lambda x, y: top if pH.contains(Point(x, y)) else low
+        return lambda x, y: top if pH.contains(Point(x, y)) else lowf(x, y)
 
     def at(x, y):                 # (the nearest terrace's level)
         if not pH.contains(Point(x, y)):
-            return low
+            return lowf(x, y)
         return min(ms, key=lambda m: (m[0] - x) ** 2 + (m[1] - y) ** 2)[2]
     return at
+
+
+def terrain_faces(polys, fn, cell=3.0) -> list:
+    """The ground as a surface over ``polys`` (shapely), each point at
+    fn(x, y): cut on a ``cell`` grid, each piece fanned / triangulated —
+    [[(x, y, z)…]] faces, upward."""
+    import shapely
+    from shapely.geometry import box
+    out = []
+    for g in polys:
+        for q in getattr(g, "geoms", [g]):
+            if q.geom_type != "Polygon" or q.area < 0.05:
+                continue
+            x0, y0, x1, y1 = q.bounds
+            nx = max(int((x1 - x0) / cell) + 1, 1)
+            ny = max(int((y1 - y0) / cell) + 1, 1)
+            for i in range(nx):
+                for j in range(ny):
+                    c = box(x0 + i * cell, y0 + j * cell,
+                            x0 + (i + 1) * cell, y0 + (j + 1) * cell)
+                    pc = q.intersection(c)
+                    for r in getattr(pc, "geoms", [pc]):
+                        if r.geom_type != "Polygon" or r.area < 1e-4:
+                            continue
+                        try:
+                            tris = shapely.constrained_delaunay_triangles(r)
+                        except Exception:  # noqa: BLE001
+                            tris = None
+                        for t in (getattr(tris, "geoms", []) if tris
+                                  is not None else []):
+                            cs = list(t.exterior.coords)[:3]
+                            a = (cs[1][0] - cs[0][0]) * (cs[2][1] - cs[0][1]) \
+                                - (cs[1][1] - cs[0][1]) * (cs[2][0] - cs[0][0])
+                            if abs(a) < 1e-8:
+                                continue
+                            if a < 0:
+                                cs = [cs[0], cs[2], cs[1]]
+                            out.append([(x, y, fn(x, y)) for x, y in cs])
+    return out
+
+
+def steps_groups(doc) -> list:
+    """3.64.72: the steps the plans draw (their STEPS layer) on a two-ground
+    site, each run between what is at its two ends — the floor, a terrace,
+    the lower ground — one riser for each line."""
+    if not on(doc):
+        return []
+    from PySide6.QtGui import QVector3D
+    from shapely.geometry import Point
+    from core.group import Group
+    from core.mesh import Mesh
+    from . import project as PJ
+    from .host import KEY, level_layer
+    out = []
+    for lid in (doc["hill"]["lower"], doc["hill"]["upper"]):
+        try:
+            sets = PJ.cad_steps(doc, lid)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("hillside.steps cad_steps")
+            continue
+        if not sets:
+            continue
+        G = level_ground_fn(doc, lid)
+        mesh = Mesh()
+        n = 0
+        for cs in sets:
+            try:
+                if cs.get("own") and cs.get("plines"):
+                    ps = list(cs["plines"])
+                    tread = float(cs.get("tread", 0.3) or 0.3)
+                    st = PJ.step_strips(ps, tread)
+                    # the two ends: past the first riser up-side, past the
+                    # last one down-side
+                    up = ps[0].buffer(st[0][1] * (tread + 0.6),
+                                      single_sided=True).difference(
+                        ps[0].buffer(st[0][1] * (tread + 0.05),
+                                     single_sided=True))
+                    dn = ps[-1].buffer(-st[-1][1] * 0.6,
+                                       single_sided=True)
+                    cu, cd = up.representative_point(), \
+                        dn.representative_point()
+                    za, zb = G(cu.x, cu.y), G(cd.x, cd.y)
+                    strips = [(pg, k) for k, (pg, _sg) in enumerate(st)]
+                    if za < zb:          # (drawn from the foot up)
+                        za, zb = zb, za
+                        strips = [(pg, len(st) - 1 - k) for pg, k in strips]
+                    ztop, zfoot = za, zb
+                else:
+                    strips = list(cs.get("strips") or [])
+                    if not strips:
+                        continue
+                    c = cs["zone"].representative_point()
+                    ztop = G(c.x, c.y)
+                    foot = max(strips, key=lambda q: q[1])[0]
+                    fc = foot.centroid
+                    zfoot = G(fc.x, fc.y)
+                    if ztop - zfoot < 0.05:
+                        zfoot = ztop - 0.1524 * int(cs.get("n") or
+                                                    len(strips))
+                nr = max(max(k for _p, k in strips) + 1, 1)
+                H = ztop - zfoot
+                if H < 0.05 or H > 6.0:
+                    continue
+                r = H / nr
+                for pg, k in strips:
+                    zt = ztop - k * r
+                    for f in PJ._prism(pg, zfoot - 0.05, zt, 1e-4):
+                        PJ._safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
+                                     [[QVector3D(*q) for q in h]
+                                      for h in f.get("holes") or []])
+                n += 1
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("hillside.steps")
+        if not n:
+            continue
+        PJ._soften(mesh)
+        lv = next(x for x in doc["arch"]["levels"] if x["id"] == lid)
+        g = Group(mesh, name=f"Steps (CAD) · {n} runs · {lv['name']}")
+        g.component = False
+        g.material = {"color": (0.86, 0.84, 0.80), "opacity": 1.0}
+        g.layer = level_layer(lv["name"])
+        g.ifc = {"class": "IfcStair", "name": "Steps"}
+        g.ext = {KEY: {"type": "hill_steps", "id": "hill-steps-" + lid,
+                       "level": lid}}
+        out.append(g)
+        _ = Point
+    return out
+
+
+def ramp_zs(doc, r, zs):
+    """3.64.72: a ramp on a two-ground site from what is at its low end to
+    what is at its high end (its sections' levels, evenly between)."""
+    if not on(doc) or r.get("level") not in (doc["hill"].get("lower"),
+                                             doc["hill"].get("upper")):
+        return zs
+    secs = r.get("sections") or []
+    if len(secs) < 2:
+        return zs
+    G = level_ground_fn(doc, r["level"])
+
+    def mid(sc):
+        return ((sc[0][0] + sc[1][0]) / 2, (sc[0][1] + sc[1][1]) / 2)
+    a, b = mid(secs[0]), mid(secs[-1])
+    L = math.dist(a, b)
+    if L < 0.3:
+        return zs
+    ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+    za = G(a[0] - ux * 0.8, a[1] - uy * 0.8)
+    zb = G(b[0] + ux * 0.8, b[1] + uy * 0.8)
+    if abs(za - zb) < 0.05:
+        return zs
+    n = len(zs)
+    return [za + (zb - za) * k / max(n - 1, 1) for k in range(n)]
 
 
 def fill_groups(doc):
