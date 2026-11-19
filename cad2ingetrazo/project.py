@@ -276,7 +276,8 @@ def load(raw) -> dict:
     # 3.64.66: two ground levels (a site on a slope)
     hl_ = raw.get("hill") if isinstance(raw.get("hill"), dict) else {}
     doc["hill"] = {k: v for k, v in hl_.items()
-                   if k in ("on", "lower", "upper", "low", "roads", "manual")}
+                   if k in ("on", "lower", "upper", "low", "roads", "manual",
+                            "plaza")}
     # 3.64.46: a perspective's look (its trims made at every rebuild)
     lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
     from .lookstyle import KIT_DEFAULT as KD_
@@ -11623,11 +11624,28 @@ def _parking_groups(doc):
                                   for f in _prism(q_, zb_, zt_ + 0.012)]
                     tops_ = [zt_]
                     lowg_ = (doc.get("hill") or {}).get("lower") == lid
+                    gfn_ = None
+                    if (doc.get("hill") or {}).get("upper") == lid:
+                        try:          # 3.64.71: each bed on its terrace
+                            from . import hillside as HS_
+                            if HS_.on(doc):
+                                gfn_ = HS_.ground_fn(doc)
+                        except Exception:  # noqa: BLE001
+                            gfn_ = None
                     for a in areas_:
                         pg_ = _Pg(a).buffer(0)
                         if pvu_ is not None:
                             pg_ = pg_.difference(pvu_)
                         za_ = zt_
+                        zb2_ = zb_
+                        if gfn_ is not None:
+                            try:
+                                c_ = pg_.representative_point()
+                                zb2_ = gfn_(c_.x, c_.y)
+                                za_ = zb2_ + (zt_ - zb_)
+                                tops_.append(za_)
+                            except Exception:  # noqa: BLE001
+                                pass
                         if lowg_:     # 3.64.67: a garden on a slope: at the
                             try:      # level its note gives (raised bed)
                                 from shapely.geometry import Point as _PtL
@@ -11644,7 +11662,7 @@ def _parking_groups(doc):
                                     tops_.append(za_)
                             except Exception:  # noqa: BLE001
                                 pass
-                        for f in _prism(pg_, zb_, za_):
+                        for f in _prism(pg_, min(zb_, zb2_), za_):
                             top_ = all(abs(q[2] - za_) < 1e-6
                                        for q in f["loop"])
                             faces.append(dict(f, color=LS.GREEN[:3] if top_
@@ -13947,7 +13965,13 @@ def _hill_low(doc) -> float:
 
 
 def plot_top(doc) -> float:
-    """The plot's ground: under the ground floor by the plinth."""
+    """The plot's ground: under the ground floor by the plinth (3.64.71:
+    on a two-ground site, the upper plaza's lowest noted terrace)."""
+    hl_ = doc.get("hill") or {}
+    if hl_.get("on") and hl_.get("plaza") is not None:
+        ids_ = {lv["id"] for lv in doc["arch"]["levels"]}
+        if hl_.get("upper") in ids_ and hl_.get("lower") in ids_:
+            return float(hl_["plaza"])
     arch = doc["arch"]
     elev = elevations(arch)
     g = next(i for i, lv in enumerate(arch["levels"]) if lv["kind"] == "ground")

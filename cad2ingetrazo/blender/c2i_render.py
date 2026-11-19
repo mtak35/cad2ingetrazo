@@ -437,7 +437,12 @@ def environment(scene, job, c2i):
     if sky.startswith("hdri"):
         path = env.get("hdri")
         builtin = bool(path and str(path).startswith("builtin:"))
-        if builtin:
+        if builtin and not any(k in str(path) for k in ("night", "sunset",
+                                                        "sunrise")):
+            # 3.64.71: Blender's little studio HDRIs light a building flat
+            # and dull: a clear day's physical sky and its sun instead
+            path = None
+        elif builtin:
             path = os.path.join(bpy.utils.system_resource(
                 "DATAFILES", path="studiolights/world"),
                 str(path).split(":", 1)[1] + ".exr")
@@ -472,9 +477,12 @@ def environment(scene, job, c2i):
             say("environment", "hdri", os.path.basename(path), bg_mode)
         else:
             say("environment", "hdri missing:", path, "- a physical sky")
+            if sun_dir[2] < 0.35:           # (a clear day: the sun well up)
+                sun_dir = _sun_dir(float(env.get("sun_az", 135.0)), 42.0)
             set_world(scene, sun_dir)
             if sun_dir[2] > 0:
-                add_sun(scene, sun_dir, 4.0 * sun_k)
+                add_sun(scene, sun_dir, 4.5 * sun_k)
+            lights_k = 0.03
     elif sky == "night":
         set_plain_world(scene, (0.008, 0.013, 0.03), 1.0 * sky_k, "night")
         add_moon(scene)
@@ -631,7 +639,7 @@ def set_hdri(scene, img, strength, rot_deg, bg_mode="hdri", sun=None):
     if hasattr(sky, "sun_disc"):
         sky.sun_disc = False
     links.new(sky.outputs["Color"], sky_bg.inputs["Color"])
-    sky_bg.inputs["Strength"].default_value = 0.12
+    sky_bg.inputs["Strength"].default_value = 0.35
     lp = nodes.new("ShaderNodeLightPath")
     mix = nodes.new("ShaderNodeMixShader")
     links.new(lp.outputs["Is Camera Ray"], mix.inputs[0])

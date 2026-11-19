@@ -151,6 +151,16 @@ def minarets(doc, b=1.5) -> int:
     cs = list(rr.exterior.coords)[:4]
     ang = math.degrees(math.atan2(cs[1][1] - cs[0][1], cs[1][0] - cs[0][0]))
     cx, cy = rr.centroid.x, rr.centroid.y
+    # 3.64.71: on the stair cores the plans draw (the stairs up to the roof
+    # and the minarets' own): one minaret on each, as the plans place them
+    cores = stair_cores(doc, lid, poly)
+    if len(cores) >= 2:
+        for x, y, a_ in cores:
+            rec = MN.new_minaret(doc, lid, x, y, b=b, h=H, galleries=1,
+                                 cupola="modern", rot=a_ % 90.0,
+                                 color="white")
+            rec["id"] = "auto-" + rec["id"]
+        return len(cores)
     for x, y in cs:                    # just outside the hall's corner
         d = math.hypot(x - cx, y - cy)
         k = (d + b * 0.35) / max(d, 1e-6)
@@ -159,6 +169,35 @@ def minarets(doc, b=1.5) -> int:
                              cupola="modern", rot=ang % 90.0, color="white")
         rec["id"] = "auto-" + rec["id"]     # (the look's: gone with it)
     return 4
+
+
+def stair_cores(doc, lid, poly) -> list:
+    """The stair cores near the prayer hall that climb to the roof (its
+    level's and the next one's stairs, one per place): [(x, y, angle)]."""
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    i = ids.index(lid)
+    ups = set(ids[i:i + 2])
+    zone = poly.minimum_rotated_rectangle.buffer(30.0)
+    out = []
+    for st in doc.get("stairs") or []:
+        if st.get("level") not in ups or len(st.get("corners") or []) < 3:
+            continue
+        try:
+            g = Polygon(st["corners"]).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        c = g.centroid
+        if not zone.contains(c):
+            continue
+        if any(math.hypot(c.x - x, c.y - y) < 5.0 for x, y, _a in out):
+            continue
+        r = g.minimum_rotated_rectangle
+        q = list(r.exterior.coords)
+        a = math.degrees(math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]))
+        out.append((c.x, c.y, a))
+    return out
 
 
 # ---- arches, storey, boundary wall ------------------------------------------------
@@ -196,7 +235,6 @@ def crown(doc) -> int:
     each tier wall over the prayer hall a row of tall arched jali
     openings, side by side, as high as the wall lets (up to its curved
     cornice) — on walls that have no openings yet."""
-    from . import project as PJ
     from shapely.geometry import Point
     lid, poly = hall(doc)
     if poly is None:
@@ -208,6 +246,13 @@ def crown(doc) -> int:
         return 0
     up = levels[i + 1]
     zone = poly.minimum_rotated_rectangle.buffer(9.0)
+    from .engine import model as M
+    jali = doc["settings"].get("jali_style", "cnc") or "cnc"
+    upw = {w["id"] for w in arch["walls"] if w["level"] == up["id"]}
+    # (the arches made at an earlier look: made again as now)
+    arch["openings"] = [o for o in arch["openings"] if not (
+        o["wall"] in upw and o["kind"] == "void" and o.get("head") == "arch"
+        and o.get("grille") and float(o.get("sill", 0) or 0) == 0.3)]
     busy = {o["wall"] for o in arch["openings"]}
     named = [Point(t["x"], t["y"]) for t in doc.get("texts") or []
              if t.get("level") == up["id"] and re.search(
@@ -227,10 +272,28 @@ def crown(doc) -> int:
         h = hw - 0.3 - 0.55                        # (the cornice over it)
         if h < 1.2:
             continue
-        wd = 1.4 if hw < 5.0 else 1.8
-        n += PJ.openings_along(doc, [w["id"]], w=wd, h=round(h, 3),
-                               sill=0.3, pitch=wd + 0.4, group=1, gap=0.4,
-                               style="semi", grille="cnc")
+        # 3.64.71: arches side by side the wall's whole length, slim piers
+        # between them and at the corners (the arches meet round the
+        # corner), each in a deep wall with its arched frame
+        L = math.dist(w["a"], w["b"])
+        pier = 0.35
+        w0 = 1.5 if hw < 5.0 else 1.9
+        k = max(int(round((L - pier) / (w0 + pier))), 1)
+        wd = (L - pier * (k + 1)) / k
+        while k > 1 and wd < 0.8:
+            k -= 1
+            wd = (L - pier * (k + 1)) / k
+        if wd < 0.6:
+            continue
+        w["t"] = max(float(w.get("t", 0.2)), 0.45)
+        recs = [{"kind": "void", "wall": w["id"],
+                 "pos": round(pier + wd / 2 + j * (wd + pier), 4),
+                 "w": round(wd, 3), "h": round(h, 3), "sill": 0.3,
+                 "swing": "left", "face": 1, "style": "", "head": "arch",
+                 "arch": "semi", "grille": jali, "ring": "plain"}
+                for j in range(k)]
+        arch["openings"] += M.new_openings(arch["openings"], recs)
+        n += k
     return n
 
 
@@ -259,6 +322,8 @@ def tall_arches(doc) -> int:
         sill = 0.0 if o["kind"] == "void" else \
             min(float(o.get("sill", 0.9) or 0.9), 0.6)
         h = round(H - sill - 0.75, 3)
+        if o.get("head") == "arch":
+            o["ring"] = "plain"          # 3.64.71: the arch's frame
         if h > float(o["h"]) + 0.1:
             o["sill"] = sill
             o["h"] = h
@@ -626,13 +691,17 @@ def groups(doc):
             # out from the wall face up to the projecting lip (as the
             # perspectives show), in slices; never over the tiers above
             rise = max(1.2 * ov, 0.9)
-            N = 7
-            inner_ = g.buffer(-0.25, join_style=2)
-            for k_ in range(N):
-                t1 = (k_ + 1) / N
-                za = top - rise + rise * k_ / N
-                zb = top - rise + rise * t1 + (0.05 if k_ == N - 1 else 0.0)
-                off = ov * (t1 ** 2.2)
+            N = 12              # 3.64.71: a cove (quarter ellipse) — up
+            inner_ = g.buffer(-0.25, join_style=2)     # the wall's face,
+            for k_ in range(N):                        # out to the lip
+                th0 = (math.pi / 2) * k_ / N
+                th1 = (math.pi / 2) * (k_ + 1) / N
+                za = top - rise * (1 - math.sin(th0))
+                zb = top - rise * (1 - math.sin(th1)) + \
+                    (0.05 if k_ == N - 1 else 0.0)
+                if zb - za < 0.01:
+                    zb = za + 0.01
+                off = ov * (1 - math.cos(th1))
                 sl = g.buffer(max(off, 0.02), join_style=2).difference(inner_)
                 if higher is not None:
                     sl = sl.difference(higher)
@@ -650,4 +719,83 @@ def groups(doc):
         g_.ext = {KEY: {"type": "tiers", "id": "tiers-" + lid,
                         "level": lid}}
         out.append(g_)
+    try:
+        out += frame_groups(doc, col)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.frame_groups")
     return out
+
+
+def frame_groups(doc, col) -> list:
+    """3.64.71: each arched opening of the prayer hall and its tiers
+    framed as the perspectives show it — a deep plain arched surround
+    standing proud of the wall's outside face (jambs and the arch)."""
+    from PySide6.QtGui import QVector3D
+    from shapely.geometry import Point
+    from core.group import Group
+    from core.mesh import Mesh
+    from . import project as PJ
+    from .engine import structure as S
+    from .host import KEY
+    lid, poly = hall(doc)
+    if poly is None:
+        return []
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    i = ids.index(lid)
+    lvls = set(ids[i:i + 2])
+    el = PJ.elevations(arch)
+    zone = poly.minimum_rotated_rectangle.buffer(9.0)
+    cen = poly.centroid
+    ws = {w["id"]: w for w in arch["walls"] if w["level"] in lvls
+          and "a" in w and zone.contains(Point(
+              (w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2))}
+    mesh = Mesh()
+    n = 0
+    F, D = 0.16, 0.20                       # frame width, its depth
+    for o in arch["openings"]:
+        w = ws.get(o["wall"])
+        if w is None or o.get("head") != "arch" or float(o["w"]) < 0.6:
+            continue
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 0.1:
+            continue
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        nx, ny = -uy, ux
+        mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        if (mx + nx - cen.x) ** 2 + (my + ny - cen.y) ** 2 < \
+                (mx - nx - cen.x) ** 2 + (my - ny - cen.y) ** 2:
+            nx, ny = -nx, -ny               # (the face away from the hall)
+        t = float(w.get("t", 0.2))
+        z0 = el[ids.index(w["level"])] + float(w.get("base", 0.0) or 0.0)
+        wd, h = float(o["w"]), float(o["h"])
+        s0, s1 = float(o["pos"]) - wd / 2, float(o["pos"]) + wd / 2
+        zs = z0 + float(o.get("sill", 0.0) or 0.0)
+        zt = zs + h
+        zsp = max(zs + 0.05, zt - wd / 2)
+        inner = S.arch_pts(s0, s1, zsp, zt, 14, "semi")      # s1 → s0
+        outer = S.arch_pts(s0 - F, s1 + F, zsp, zt + F, 14, "semi")
+        prof = [(s1 + F, zs)] + outer + [(s0 - F, zs), (s0, zs)] + \
+            list(reversed(inner)) + [(s1, zs)]
+
+        def P(sz, off):
+            return QVector3D(a[0] + ux * sz[0] + nx * off,
+                             a[1] + uy * sz[0] + ny * off, sz[1])
+        f0, f1 = t / 2, t / 2 + D
+        PJ._safe_add(mesh, [P(q, f1) for q in prof])
+        PJ._safe_add(mesh, [P(q, f0) for q in reversed(prof)])
+        for q0, q1 in zip(prof, prof[1:] + prof[:1]):
+            PJ._safe_add(mesh, [P(q0, f0), P(q1, f0), P(q1, f1),
+                                P(q0, f1)])
+        n += 1
+    if not n:
+        return []
+    PJ._soften(mesh)
+    g = Group(mesh, name=f"Arch surrounds ({n})")
+    g.component = False
+    g.material = {"color": col, "opacity": 1.0}
+    g.ext = {KEY: {"type": "arch_frames", "id": "arch-frames",
+                   "level": lid}}
+    return [g]

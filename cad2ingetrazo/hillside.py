@@ -140,6 +140,11 @@ def finish(doc) -> None:
               if lv["id"] == h["lower"])
     low = min([r[2] for r in roads] or [el[il] - 0.15])
     h["low"] = round(min(low, el[il]), 4)
+    try:                      # 3.64.71: the upper plaza's lowest terrace
+        ms_ = plaza_marks(doc)
+        h["plaza"] = round(min(m[2] for m in ms_), 4) if ms_ else None
+    except Exception:  # noqa: BLE001
+        h["plaza"] = None
 
 
 
@@ -303,6 +308,58 @@ def high_area(doc):
     return g if not g.is_empty and g.area > 1.0 else None
 
 
+def plaza_marks(doc, H=None) -> list:
+    """3.64.71: the upper plaza's own levels — the upper floor's notes
+    out on its open ground (below the floor, «LEV.+13'-6"», «+16'-0"»…):
+    [(x, y, z)]."""
+    from shapely.geometry import Point
+    from . import project as PJ
+    if not on(doc):
+        return []
+    H = high_area(doc) if H is None else H
+    if H is None:
+        return []
+    arch = doc["arch"]
+    up = doc["hill"]["upper"]
+    el = PJ.elevations(arch)
+    iu = next(i for i, lv in enumerate(arch["levels"]) if lv["id"] == up)
+    Hb = H.buffer(1.0)
+    out = []
+    for m in (doc.get("marks") or {}).get(up) or []:
+        v = m.get("v")
+        if v is None or float(v) > el[iu] - 0.1 or \
+                float(v) < low_z(doc) + 0.3:
+            continue
+        if Hb.contains(Point(m["x"], m["y"])):
+            out.append((float(m["x"]), float(m["y"]), float(v)))
+    return out
+
+
+def terraces(doc, H=None) -> list:
+    """The upper ground cut into its terraces, each at its note's level
+    (the nearest note) — [(polygon, z)]; [] with no notes."""
+    from shapely.geometry import MultiPoint, Point
+    from shapely.ops import unary_union, voronoi_diagram
+    H = high_area(doc) if H is None else H
+    ms = plaza_marks(doc, H)
+    if H is None or not ms:
+        return []
+    if len(ms) == 1:
+        return [(H, ms[0][2])]
+    vd = voronoi_diagram(MultiPoint([(x, y) for x, y, _z in ms]),
+                         envelope=H.envelope.buffer(50.0))
+    by = {}
+    for cell in vd.geoms:
+        k = next((m for m in ms if cell.contains(Point(m[0], m[1]))), None)
+        if k is None:
+            continue
+        c = cell.intersection(H)
+        if c.is_empty:
+            continue
+        by.setdefault(round(k[2], 3), []).append(c)
+    return [(unary_union(cs), z) for z, cs in sorted(by.items())]
+
+
 def ground_fn(doc):
     """fn(x, y) → the ground's level there: the upper ground (the plot's
     top) on the upper plaza (with 1.5 m round it), else the lower road."""
@@ -317,7 +374,15 @@ def ground_fn(doc):
     if H is None:
         return lambda x, y: low
     pH = prep(H.buffer(1.5))
-    return lambda x, y: top if pH.contains(Point(x, y)) else low
+    ms = plaza_marks(doc, H)
+    if not ms:
+        return lambda x, y: top if pH.contains(Point(x, y)) else low
+
+    def at(x, y):                 # (the nearest terrace's level)
+        if not pH.contains(Point(x, y)):
+            return low
+        return min(ms, key=lambda m: (m[0] - x) ** 2 + (m[1] - y) ** 2)[2]
+    return at
 
 
 def fill_groups(doc):
@@ -342,15 +407,17 @@ def fill_groups(doc):
         return []
     mesh = Mesh()
     n = 0
-    for q in getattr(H, "geoms", [H]):
-        if q.geom_type != "Polygon" or q.area < 0.5:
+    parts = terraces(doc, H) or [(H, top)]      # 3.64.71: each terrace at
+    for q, ztop in [(q_, z_) for g_, z_ in parts     # its own level
+                    for q_ in getattr(g_, "geoms", [g_])]:
+        if q.geom_type != "Polygon" or q.area < 0.5 or ztop - low < 0.2:
             continue
         q = q.simplify(0.02)
         outer = S._ccw([tuple(c) for c in list(q.exterior.coords)[:-1]])
         holes = [list(reversed(S._ccw([tuple(c) for c in
                                        list(r.coords)[:-1]])))
                  for r in q.interiors]
-        for f in W.solid({"outer": outer, "holes": holes}, low, top):
+        for f in W.solid({"outer": outer, "holes": holes}, low, ztop):
             if isinstance(f, dict):
                 PJ._safe_add(mesh, [QVector3D(*c) for c in f["loop"]],
                              [[QVector3D(*c) for c in hh]

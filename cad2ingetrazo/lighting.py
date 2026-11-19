@@ -1196,9 +1196,20 @@ def _dialog_class():
         def _hdri_path(self):
             k = self.sky.currentData() or ""
             if k == "hdri_ph":
-                return hdri_cached(self.ph.currentData(),
-                                   self.ph_res.currentData()) or \
-                    "builtin:courtyard"
+                have = hdri_cached(self.ph.currentData(),
+                                   self.ph_res.currentData())
+                if have:
+                    return have
+                # 3.64.71: not downloaded yet — fetched now (2k is quick);
+                # offline: the physical clear-day sky, not Blender's dull
+                # little studio HDRI
+                for res_ in (self.ph_res.currentData(), "2k"):
+                    try:
+                        return polyhaven_fetch(self.ph.currentData(), res_,
+                                               timeout=25)
+                    except Exception:  # noqa: BLE001
+                        continue
+                return None
             if k == "hdri_file":
                 t = self.hfile.text()
                 import os
