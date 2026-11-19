@@ -6059,7 +6059,9 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             log_error("project.apply_hidden_lines")
     try:                    # 3.64.66: what the plan covers (a site's two
         from . import hillside as HS_            # grounds: the upper one)
-        doc.setdefault("plan_area", {})[lid] = HS_.plan_area(pl)
+        if not isinstance(doc.get("plan_area"), dict):
+            doc["plan_area"] = {}
+        doc["plan_area"][lid] = HS_.plan_area(pl)
         bl_ = HS_.bound_lines(pl)
         if bl_:
             doc.setdefault("bound_lines", {})[lid] = bl_
