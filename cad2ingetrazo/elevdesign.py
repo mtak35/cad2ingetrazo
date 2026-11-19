@@ -290,7 +290,11 @@ class ElevationDesigner(QDialog):
             k[key] = ch.isChecked()
         for key, (_b, c) in self.cols.items():
             k[key] = [round(float(v), 3) for v in c[:3]]
-        return k
+        # 3.64.72: what the dialog has no field for comes from the style
+        # (a mosque's domes, minarets, tiers stay: «mosque» was dropped)
+        base = {kk: v for kk, v in LS.preset(k["style"]).items()
+                if kk not in k}
+        return dict(base, **k)
 
     def _load_preset(self):
         self._fill(LS.preset(self.style.currentData()))

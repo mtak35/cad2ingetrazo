@@ -473,6 +473,8 @@ def apply_kit(doc, kit) -> dict:
     and positions stay): roofs, windows, doors, railings, columns,
     colours; its mouldings are drawn at every rebuild (ornament.py)."""
     k = dict(KIT_DEFAULT, **(kit or {}))
+    if k.get("style") == "mosque":    # 3.64.72: a hand design saved by the
+        k["mosque"] = True            # dialog lost it (no field for it)
     if isinstance(k.get("roof"), list):      # a look saved by 3.64.49/50:
         k["roof_c"], k["roof"] = k["roof"], "hip"     # «roof» its colour
     arch = doc["arch"]

@@ -153,6 +153,16 @@ def minarets(doc, b=1.5) -> int:
     cx, cy = rr.centroid.x, rr.centroid.y
     # 3.64.71: on the stair cores the plans draw (the stairs up to the roof
     # and the minarets' own): one minaret on each, as the plans place them
+    for tl in (doc.get("tiers") or {}):        # 3.64.72: where the roof
+        mp = marks_plan(doc, tl)               # plan writes «MINARET»
+        if mp and mp.get("minarets"):
+            for x, y, side, a_ in mp["minarets"]:
+                rec = MN.new_minaret(doc, lid, x, y, b=min(max(side, 1.2),
+                                                           3.0),
+                                     h=H, galleries=1, cupola="modern",
+                                     rot=a_ % 90.0, color="white")
+                rec["id"] = "auto-" + rec["id"]
+            return len(mp["minarets"])
     cores = stair_cores(doc, lid, poly)
     if len(cores) >= 2:
         for x, y, a_ in cores:
@@ -469,7 +479,182 @@ def read_tiers(doc, lid, pl, wall_match) -> int:
     dsh = pl.get("dashed") or []
     lay = pl["layers"]
     t = doc.setdefault("tiers", {})
+    if not isinstance(t, dict):
+        t = doc["tiers"] = {}
     t.pop(lid, None)
+    n = _read_tiers_colours(doc, lid, pl, wall_match, cols, dsh, lay, t)
+    if not n:
+        try:
+            n = _read_tiers_marks(doc, lid, pl, wall_match, t)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("mosque.read_tiers marks")
+            n = 0
+    return n
+
+
+PARAPET_RX = re.compile(r"PARAPET|PARAPIT|ROOF\s*EDGE|FASCIA", re.I)
+OTHER_ROOM_RX = re.compile(r"BED|BATH|KITCHEN|LOUNGE|TERRACE|TOILET|"
+                           r"STORE|LOBBY|DRAWING|DINING|RESIDENCE|ROOM", re.I)
+
+
+def _read_tiers_marks(doc, lid, pl, wall_match, t) -> int:
+    """3.64.72: a roof plan drawn in one colour, each roof's level written
+    in it («LEV.+45'-0"», the levels over the datum the floors' notes use):
+    its wall / parapet lines, its level notes and its «MINARET» notes kept
+    as ``doc["tiers"][lid]`` = {"mode": "marks", …} (two levels or more
+    over the floor)."""
+    from . import project as PJ
+    lay = pl["layers"]
+    marks, mins, others = [], [], []
+    for tx in pl.get("texts") or []:
+        s_ = str(tx.get("text", ""))
+        v = PJ._feet_level(s_)
+        if v is not None:
+            marks.append([round(tx["x"], 4), round(tx["y"], 4),
+                          round(v * 0.3048, 4)])
+        elif re.search(r"MINAR", s_, re.I):
+            mins.append([round(tx["x"], 4), round(tx["y"], 4)])
+        elif OTHER_ROOM_RX.search(s_):
+            others.append([round(tx["x"], 4), round(tx["y"], 4)])
+    zs_ = sorted({m[2] for m in marks})
+    if len(zs_) < 3 or zs_[-1] - zs_[0] < 5.0:   # (roofs a storey and more
+        return 0                                  # apart: not a floor's)
+    if sum(1 for z in zs_ if z >= zs_[0] + 2.5) < 2:
+        return 0
+    from shapely.geometry import MultiPoint, Point
+    zone = MultiPoint([(m[0], m[1]) for m in marks] +
+                      [tuple(m) for m in mins]).convex_hull.buffer(7.0)
+    lines = []
+    for s in pl["segs"]:
+        name = str(lay[s[4]])
+        if not (wall_match(name) or PARAPET_RX.search(name)):
+            continue
+        if not (zone.contains(Point(s[0], s[1])) or
+                zone.contains(Point(s[2], s[3]))):
+            continue
+        lines.append([[round(s[0], 3), round(s[1], 3)],
+                      [round(s[2], 3), round(s[3], 3)]])
+    if len(lines) < 8:
+        return 0
+    t[lid] = {"mode": "marks", "lines": lines, "marks": marks,
+              "minarets": mins, "others": others}
+    return len({m[2] for m in marks})
+
+
+_MP_CACHE = {}
+
+
+def marks_plan(doc, lid):
+    """3.64.72: the roof plan's masses from its level notes — the faces its
+    lines close, each the level noted in it (a face noted twice over:
+    shared out by the nearer note); a face with no note: a thin one (the
+    projecting slab round a roof) the higher roof's beside it, a wide one
+    the roof it shares the most edge with. {"masses": [(z, core polygons,
+    overhang m)] low → high, "holes": [polygons] (the voids noted at the
+    floor below), "minarets": [(x, y, side, angle)]} or None."""
+    rec = (doc.get("tiers") or {}).get(lid)
+    if not rec or rec.get("mode") != "marks":
+        return None
+    key = (lid, len(rec["lines"]), round(sum(m[2] for m in rec["marks"]), 3),
+           round(sum(a[0] + b[1] for a, b in rec["lines"]), 2))
+    hit = _MP_CACHE.get(key)
+    if hit is not None:
+        return hit
+    from shapely.geometry import LineString, Point, MultiPoint
+    from shapely.ops import polygonize, unary_union, voronoi_diagram
+    ext = 0.8
+    ls = []
+    for a, b in rec["lines"]:
+        L = math.dist(a, b)
+        if L < 0.05:
+            continue
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        ls.append(LineString([(a[0] - ux * ext, a[1] - uy * ext),
+                              (b[0] + ux * ext, b[1] + uy * ext)]))
+    faces = [f for f in polygonize(unary_union(ls)) if f.area >= 0.3]
+    zone = MultiPoint([(m[0], m[1]) for m in rec["marks"]]).convex_hull \
+        .buffer(7.0)
+    faces = [f for f in faces if zone.contains(f.representative_point())]
+    others = [Point(*p) for p in rec.get("others") or []]
+    faces = [f for f in faces if not any(f.contains(p) for p in others)]
+    minp = [Point(*p) for p in rec.get("minarets") or []]
+    mins, cells = [], []                      # cells: [poly, z or None]
+    for f in faces:
+        if any(f.contains(p) for p in minp) and f.area < 30.0:
+            r = f.minimum_rotated_rectangle
+            q = list(r.exterior.coords)
+            e0, e1 = math.dist(q[0], q[1]), math.dist(q[1], q[2])
+            a_ = math.degrees(math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]))
+            mins.append((r.centroid.x, r.centroid.y,
+                         round(min(max((e0 + e1) / 2, 1.0), 4.0), 3), a_))
+            continue
+        ms = [m for m in rec["marks"] if f.contains(Point(m[0], m[1]))]
+        zs = sorted({m[2] for m in ms})
+        if len(zs) <= 1:
+            cells.append([f, zs[0] if zs else None])
+            continue
+        vd = voronoi_diagram(MultiPoint([(m[0], m[1]) for m in ms]),
+                             envelope=f.envelope.buffer(5.0))
+        for c in getattr(vd, "geoms", [vd]):
+            part = c.intersection(f)
+            m_ = next((m for m in ms if c.contains(Point(m[0], m[1]))), None)
+            for q in getattr(part, "geoms", [part]):
+                if q.geom_type == "Polygon" and q.area >= 0.3 and m_:
+                    cells.append([q, m_[2]])
+    if not any(c[1] is not None for c in cells):
+        return None
+
+    def width(g):
+        return 2.0 * g.area / max(g.length, 1e-6)
+    for _ in range(12):                    # the faces with no note
+        changed = False
+        for c in cells:
+            if c[1] is not None:
+                continue
+            nb = []
+            for o in cells:
+                if o is c or o[1] is None:
+                    continue
+                sh = c[0].boundary.intersection(o[0].buffer(0.05)).length
+                if sh > 0.3:
+                    nb.append((sh, o[1]))
+            if not nb:
+                continue
+            c[1] = max(z for _s, z in nb) if width(c[0]) < 1.4 else \
+                max(nb)[1]
+            c.append("thin" if width(c[0]) < 1.4 else "wide")
+            changed = True
+        if not changed:
+            break
+    zs = sorted({c[1] for c in cells if c[1] is not None})
+    if len(zs) < 2:
+        return None
+    lo = zs[0]
+    holes, masses = [], []
+    roofs = [z for z in zs if z > lo + 2.0] or zs
+    floor_z = min(roofs)
+    for z in zs:
+        mine = [c for c in cells if c[1] == z]
+        if z < floor_z - 2.0:              # a void down to the floor below
+            holes += [c[0] for c in mine]
+            continue
+        core = [c[0] for c in mine if not (len(c) > 2 and c[2] == "thin")]
+        thin = [c[0] for c in mine if len(c) > 2 and c[2] == "thin"]
+        ws = sorted(width(g) for g in thin)
+        ov = ws[len(ws) // 2] if ws else 0.6
+        g = unary_union(core or thin)
+        ps = [q for q in getattr(g, "geoms", [g])
+              if q.geom_type == "Polygon" and q.area >= 1.0]
+        if ps:
+            masses.append((z, ps, round(min(max(ov, 0.3), 2.5), 3)))
+    out = {"masses": masses, "holes": holes, "minarets": mins}
+    _MP_CACHE.clear()
+    _MP_CACHE[key] = out
+    return out
+
+
+def _read_tiers_colours(doc, lid, pl, wall_match, cols, dsh, lay, t) -> int:
     if len(cols) != len(pl["segs"]):
         return 0
     by = {}
@@ -504,6 +689,11 @@ def tier_plan(doc, lid):
     arch = doc["arch"]
     i = next((k for k, lv in enumerate(arch["levels"]) if lv["id"] == lid),
              None)
+    if rec and rec.get("mode") == "marks":
+        mp = marks_plan(doc, lid)
+        if not mp:
+            return []
+        return [(r, ps, z, ov) for r, (z, ps, ov) in enumerate(mp["masses"])]
     if not rec or i is None or "groups" not in rec or \
             "lines" not in (rec["groups"] or [{}])[0]:
         return []
@@ -561,7 +751,16 @@ def apply_tiers(doc) -> dict:
     from .engine import model as M
     arch = doc["arch"]
     rep = {"removed": 0, "raised": 0}
+    arch["walls"] = [w for w in arch["walls"]
+                     if not str(w.get("id", "")).startswith("tierw-")]
     for lid in list((doc.get("tiers") or {}).keys()):
+        if (doc["tiers"][lid] or {}).get("mode") == "marks":
+            try:
+                rep.update(_apply_tiers_marks(doc, lid))
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("mosque.apply_tiers marks")
+            continue
         plan = tier_plan(doc, lid)
         if not plan:
             continue
@@ -622,6 +821,134 @@ def apply_tiers(doc) -> dict:
     return rep
 
 
+TIER_T = 0.23                       # the tiers' walls (9")
+
+
+def _apply_tiers_marks(doc, lid) -> dict:
+    """3.64.72: the tiers of a roof plan whose roofs' levels are written:
+    the floor under it raised / lowered to the lowest roof's level (the
+    prayer hall's height as drawn), each higher roof's walls made on its
+    outline (where no higher roof stands) up to its level, the level's
+    own roofs off the tiers, the voids noted at the floor below cut from
+    its floor, the domes set on the roof under them."""
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+    from .engine import model as M
+    from . import project as PJ
+    mp = marks_plan(doc, lid)
+    rep = {"tiers_marks": 0}
+    if not mp or not mp["masses"]:
+        return rep
+    arch = doc["arch"]
+    levels = arch["levels"]
+    el = PJ.elevations(arch)
+    i = next(k for k, lv in enumerate(levels) if lv["id"] == lid)
+    lo_z = mp["masses"][0][0]
+    j = next((k for k in range(len(levels)) if k != i and
+              abs(el[k] + float(levels[k]["height"]) - el[i]) < 0.02), None)
+    if j is not None and 0.02 < abs(lo_z - el[i]) < 1.6:
+        levels[j]["height"] = round(lo_z - el[j], 4)    # (as the roofs say)
+        rep["hall_h"] = levels[j]["height"]
+        el = PJ.elevations(arch)
+    E = el[i]
+    h = float(levels[i]["height"])
+    tmpl = next((w for w in arch["walls"] if w.get("level") == lid), {})
+    n = 0
+    for k, (z, ps, _ov) in enumerate(mp["masses"]):
+        if z <= E + 0.3:
+            continue
+        g = unary_union(ps)
+        hi = [unary_union(p2) for z2, p2, _o in mp["masses"] if z2 > z + 0.1]
+        higher = unary_union(hi).buffer(TIER_T) if hi else None
+        inner = g.buffer(-TIER_T / 2, join_style=2)
+        rings = []
+        for q in getattr(inner, "geoms", [inner]):
+            if q.geom_type != "Polygon":
+                continue
+            rings.append(q.exterior)
+            rings += list(q.interiors)
+        for r_ in rings:
+            ln = r_ if higher is None else r_.difference(higher)
+            for piece in getattr(ln, "geoms", [ln]):
+                if piece.geom_type not in ("LineString", "LinearRing"):
+                    continue
+                cs = list(piece.simplify(0.05).coords)
+                for a, b in zip(cs, cs[1:]):
+                    if math.dist(a, b) < 0.4:
+                        continue
+                    n += 1
+                    arch["walls"].append({
+                        "kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+                        "b": [round(b[0], 4), round(b[1], 4)], "t": TIER_T,
+                        "type": "solid",
+                        "cw_low": tmpl.get("cw_low", 0.9),
+                        "cw_up": tmpl.get("cw_up", 0.6),
+                        "cw_fill": tmpl.get("cw_fill", "glass"),
+                        "grid": tmpl.get("grid", 1.5),
+                        "tgrid": tmpl.get("tgrid", 1.5),
+                        "height": round(z - E, 4), "base": 0.0,
+                        "align": "centre", "side": 1, "level": lid,
+                        "id": f"tierw-{lid}-{n}", "name": f"Tier wall {n}"})
+    rep["tiers_marks"] = n
+    # the level's own roofs off the tiers (each tier has its own roof)
+    allu = unary_union([unary_union(ps) for _z, ps, _o in mp["masses"]] +
+                       list(mp["holes"])).buffer(0.05)
+    keep, add = [], []
+    for s in arch["structure"]:
+        if s.get("type") == "slab" and s.get("level") == lid and \
+                s.get("roof"):
+            try:
+                g = Polygon(s["corners"]).buffer(0).difference(allu)
+            except Exception:  # noqa: BLE001
+                keep.append(s)
+                continue
+            pcs = [q for q in getattr(g, "geoms", [g])
+                   if q.geom_type == "Polygon" and q.area > 0.5]
+            for k, q in enumerate(pcs):
+                rec = dict(s, corners=[[round(x, 4), round(y, 4)] for
+                                       x, y in list(q.exterior.coords)[:-1]],
+                           holes=[])
+                if k == 0:
+                    keep.append(rec)
+                else:
+                    rec.pop("id", None)
+                    add.append(rec)
+            continue
+        keep.append(s)
+    arch["structure"] = keep
+    if add:
+        arch["structure"] += M.new_elements(arch["structure"], add)
+    # the voids down to the floor below: open in this level's floor
+    for hp in mp["holes"]:
+        c = hp.representative_point()
+        for s in arch["structure"]:
+            if s.get("type") != "slab" or s.get("level") != lid or \
+                    s.get("roof"):
+                continue
+            try:
+                if not Polygon(s["corners"]).buffer(0).contains(c):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            hs = s.setdefault("holes", [])
+            if any(Polygon(x).buffer(0).contains(c) for x in hs
+                   if len(x) >= 3):
+                continue
+            hs.append([[round(x, 4), round(y, 4)] for x, y in
+                       list(hp.simplify(0.05).exterior.coords)[:-1]])
+            rep["voids"] = rep.get("voids", 0) + 1
+    # the domes on the roof under them
+    for d in doc.get("domes") or []:
+        if d.get("level") != lid:
+            continue
+        p = Point(d["x"], d["y"])
+        zs = [z for z, ps, _o in mp["masses"]
+              if unary_union(ps).buffer(0.3).contains(p)]
+        if zs:
+            d["z_off"] = round(max(zs) - (E + h), 3)
+    return rep
+
+
 def _court_holes(doc, lid):
     """The open courts the level's floor leaves (X-marked shafts ≥ 4 m²)."""
     from shapely.geometry import Polygon
@@ -659,8 +986,13 @@ def groups(doc):
         if not plan:
             continue
         lv = next(x for x in doc["arch"]["levels"] if x["id"] == lid)
-        courts = unary_union(_court_holes(doc, lid)) if \
-            _court_holes(doc, lid) else None
+        ch_ = list(_court_holes(doc, lid))
+        mk_ = rec.get("mode") == "marks" if isinstance(rec, dict) else False
+        if mk_:                          # 3.64.72: the voids noted
+            ch_ += list((marks_plan(doc, lid) or {}).get("holes") or [])
+        courts = unary_union(ch_) if ch_ else None
+        E_ = PJ.elevations(doc["arch"])[[x["id"] for x in
+                                         doc["arch"]["levels"]].index(lid)]
         mesh = Mesh()
 
         def solid(g, z0, z1):
@@ -684,7 +1016,7 @@ def groups(doc):
         higher = None
         for r, ps, top, ov in reversed(plan):
             g = unary_union(ps)
-            if r >= 2:
+            if r >= 2 if not mk_ else top > E_ + 0.3:
                 gg = g if courts is None else g.difference(courts)
                 solid(gg, top - 0.15, top)
             # 3.64.69: the tier's edge a curved flare — the cornice sweeps
