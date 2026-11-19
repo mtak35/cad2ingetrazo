@@ -607,6 +607,40 @@ def ramp_zs(doc, r, zs):
     return [za + (zb - za) * k / max(n - 1, 1) for k in range(n)]
 
 
+APRON = 2.5      # m — the forecourt kept low round the lower floor
+
+
+def _apron(doc, parts):
+    """3.64.74 — the earth beside the lower ground floor was as high as its
+    walls (the upper terraces' levels), burying its doors and windows.
+    Within APRON of its walls the earth stays at the lower floor's own level
+    (a forecourt), the terraces rising beyond it."""
+    L = lower_footprint(doc)
+    if L is None or L.is_empty:
+        return parts
+    try:
+        from . import project as PJ
+        h = doc["hill"]
+        ev = PJ.elevations(doc["arch"])
+        zf = ev.get(h["lower"]) if isinstance(ev, dict) else None
+        if zf is None:
+            zf = next((e for lv, e in zip(doc["arch"]["levels"], ev)
+                       if lv["id"] == h["lower"]), None)
+        zf = float(zf) if zf is not None else 0.0
+    except Exception:  # noqa: BLE001
+        return parts
+    ring = L.buffer(APRON).difference(L)
+    out = []
+    for g, z in parts:
+        near = g.intersection(ring)
+        far = g.difference(ring)
+        if not far.is_empty:
+            out.append((far, z))
+        if not near.is_empty:
+            out.append((near, min(z, zf + 0.05)))
+    return out
+
+
 def fill_groups(doc):
     """The earth of the upper ground (where the lower floor is not), from
     the lower road up to the upper plaza — its top the plaza, its sides
@@ -630,6 +664,7 @@ def fill_groups(doc):
     mesh = Mesh()
     n = 0
     parts = terraces(doc, H) or [(H, top)]      # 3.64.71: each terrace at
+    parts = _apron(doc, parts)                  # 3.64.74: lower-floor forecourt
     for q, ztop in [(q_, z_) for g_, z_ in parts     # its own level
                     for q_ in getattr(g_, "geoms", [g_])]:
         if q.geom_type != "Polygon" or q.area < 0.5 or ztop - low < 0.2:

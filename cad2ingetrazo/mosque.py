@@ -156,13 +156,33 @@ def minarets(doc, b=1.5) -> int:
     for tl in (doc.get("tiers") or {}):        # 3.64.72: where the roof
         mp = marks_plan(doc, tl)               # plan writes «MINARET»
         if mp and mp.get("minarets"):
-            for x, y, side, a_ in mp["minarets"]:
+            pts = [(x, y, side, a_) for x, y, side, a_ in mp["minarets"]]
+            if len(pts) == 2 and doc["settings"].get("rear_minarets", True):
+                # 3.64.74: the perspectives show four — the pair the plan
+                # marks at the front's ends, its twin at the back's ends
+                # (the building's centre through)
+                from shapely.ops import unary_union
+                from shapely.geometry import Point as _Pt
+                mass_ = unary_union([unary_union(ps_) for _z, ps_, _o in
+                                     mp["masses"]])
+                c_ = mass_.centroid
+                near_ = mass_.buffer(0.4)
+                for x, y, side, a_ in list(pts):
+                    qx, qy = 2 * c_.x - x, 2 * c_.y - y
+                    d_ = math.hypot(qx - c_.x, qy - c_.y) or 1.0
+                    ux, uy = (qx - c_.x) / d_, (qy - c_.y) / d_
+                    for _ in range(40):      # out of the building's mass
+                        if not near_.contains(_Pt(qx, qy)):
+                            break
+                        qx, qy = qx + ux * 0.3, qy + uy * 0.3
+                    pts.append((qx, qy, side, a_))
+            for x, y, side, a_ in pts:
                 rec = MN.new_minaret(doc, lid, x, y, b=min(max(side, 1.2),
                                                            3.0),
                                      h=H, galleries=1, cupola="modern",
                                      rot=a_ % 90.0, color="white")
                 rec["id"] = "auto-" + rec["id"]
-            return len(mp["minarets"])
+            return len(pts)
     cores = stair_cores(doc, lid, poly)
     if len(cores) >= 2:
         for x, y, a_ in cores:
@@ -258,7 +278,8 @@ def crown(doc) -> int:
     zone = poly.minimum_rotated_rectangle.buffer(9.0)
     from .engine import model as M
     jali = doc["settings"].get("jali_style", "cnc") or "cnc"
-    upw = {w["id"] for w in arch["walls"] if w["level"] == up["id"]}
+    upw = {w["id"] for w in arch["walls"] if w["level"] == up["id"] or
+           str(w["id"]).startswith("courtw-")}
     # (the arches made at an earlier look: made again as now)
     arch["openings"] = [o for o in arch["openings"] if not (
         o["wall"] in upw and o["kind"] == "void" and o.get("head") == "arch"
@@ -270,7 +291,8 @@ def crown(doc) -> int:
                  str(t.get("text", "")), re.I)]
     n = 0
     for w in arch["walls"]:
-        if w["level"] != up["id"] or w["id"] in busy or \
+        court_ = str(w["id"]).startswith("courtw-")
+        if (w["level"] != up["id"] and not court_) or w["id"] in busy or \
                 w.get("kind", "line") != "line" or "a" not in w:
             continue
         m = Point((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2)
@@ -279,7 +301,7 @@ def crown(doc) -> int:
             continue
         hw = w.get("height", "level")
         hw = float(up["height"]) if hw == "level" else float(hw)
-        h = hw - 0.3 - 0.55                        # (the cornice over it)
+        h = hw - 0.3 - (0.3 if court_ else 0.55)   # (the cornice over it)
         if h < 1.2:
             continue
         # 3.64.71: arches side by side the wall's whole length, slim piers
@@ -752,7 +774,8 @@ def apply_tiers(doc) -> dict:
     arch = doc["arch"]
     rep = {"removed": 0, "raised": 0}
     arch["walls"] = [w for w in arch["walls"]
-                     if not str(w.get("id", "")).startswith("tierw-")]
+                     if not str(w.get("id", "")).startswith(
+                         ("tierw-", "courtw-"))]
     for lid in list((doc.get("tiers") or {}).keys()):
         if (doc["tiers"][lid] or {}).get("mode") == "marks":
             try:
@@ -907,7 +930,9 @@ def _apply_tiers_marks(doc, lid) -> dict:
             for k, q in enumerate(pcs):
                 rec = dict(s, corners=[[round(x, 4), round(y, 4)] for
                                        x, y in list(q.exterior.coords)[:-1]],
-                           holes=[])
+                           holes=[[[round(x, 4), round(y, 4)] for x, y in
+                                   list(r_.coords)[:-1]]
+                                  for r_ in q.interiors])
                 if k == 0:
                     keep.append(rec)
                 else:
@@ -918,25 +943,71 @@ def _apply_tiers_marks(doc, lid) -> dict:
     arch["structure"] = keep
     if add:
         arch["structure"] += M.new_elements(arch["structure"], add)
-    # the voids down to the floor below: open in this level's floor
+    # 3.64.74: the voids (the court) open down to the hall's floor: cut
+    # from every slab over that floor — the hall's roof, this level's
+    # floor, the roofs between — and walled all the way down (the court's
+    # arcade runs from the hall's floor to the top roof)
+    hi_ = j if j is not None else max(i - 1, 0)
+    z_floor = el[hi_]
     for hp in mp["holes"]:
-        c = hp.representative_point()
-        for s in arch["structure"]:
-            if s.get("type") != "slab" or s.get("level") != lid or \
-                    s.get("roof"):
+        for s in list(arch["structure"]):
+            if s.get("type") != "slab" or not s.get("corners"):
+                continue
+            idx = next((k for k, lv_ in enumerate(levels)
+                        if lv_["id"] == s.get("level")), None)
+            if idx is None:
+                continue
+            ztop = el[idx] + (float(levels[idx]["height"])
+                              if s.get("roof") else 0.0)
+            if ztop <= z_floor + 0.3:
                 continue
             try:
-                if not Polygon(s["corners"]).buffer(0).contains(c):
+                P_ = Polygon(s["corners"]).buffer(0)
+                holes_ = [Polygon(x).buffer(0) for x in s.get("holes") or []
+                          if len(x) >= 3]
+                if P_.is_empty or not P_.intersects(hp):
                     continue
+                g = P_.difference(unary_union(holes_ + [hp]) if holes_
+                                  else hp)
             except Exception:  # noqa: BLE001
                 continue
-            hs = s.setdefault("holes", [])
-            if any(Polygon(x).buffer(0).contains(c) for x in hs
-                   if len(x) >= 3):
+            if g.is_empty:
+                arch["structure"].remove(s)
                 continue
-            hs.append([[round(x, 4), round(y, 4)] for x, y in
-                       list(hp.simplify(0.05).exterior.coords)[:-1]])
+            pcs_ = [q for q in getattr(g, "geoms", [g])
+                    if q.geom_type == "Polygon" and q.area > 0.3]
+            for k, q in enumerate(pcs_):
+                rr = dict(s, corners=[[round(x, 4), round(y, 4)] for x, y in
+                                      list(q.exterior.coords)[:-1]],
+                          holes=[[[round(x, 4), round(y, 4)] for x, y in
+                                  list(r_.coords)[:-1]]
+                                 for r_ in q.interiors])
+                if k == 0:
+                    s.clear()
+                    s.update(rr)
+                else:
+                    rr.pop("id", None)
+                    add2 = arch.setdefault("_add2", [])
+                    add2.append(rr)
             rep["voids"] = rep.get("voids", 0) + 1
+        ring = hp.buffer(TIER_T / 2, join_style=2).exterior
+        cs = list(ring.simplify(0.05).coords)
+        hall_h = el[i] - el[hi_]
+        for a_, b_ in zip(cs, cs[1:]):
+            if math.dist(a_, b_) < 0.4 or hall_h < 1.0:
+                continue
+            n += 1
+            arch["walls"].append({
+                "kind": "line", "a": [round(a_[0], 4), round(a_[1], 4)],
+                "b": [round(b_[0], 4), round(b_[1], 4)], "t": TIER_T,
+                "type": "solid", "cw_low": 0.9, "cw_up": 0.6,
+                "cw_fill": "glass", "grid": 1.5, "tgrid": 1.5,
+                "height": round(hall_h, 4), "base": 0.0, "align": "centre",
+                "side": 1, "level": levels[hi_]["id"],
+                "id": f"courtw-{lid}-{n}", "name": f"Court wall {n}"})
+    add2 = arch.pop("_add2", [])
+    if add2:
+        arch["structure"] += M.new_elements(arch["structure"], add2)
     # the domes on the roof under them
     for d in doc.get("domes") or []:
         if d.get("level") != lid:

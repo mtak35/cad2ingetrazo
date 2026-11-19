@@ -10255,6 +10255,11 @@ def levels_from_cad(doc) -> list:
     want = {}
     abs_ = {}
     for i, lv in enumerate(levels):
+        if ((doc.get("tiers") or {}).get(lv["id"]) or {}).get("mode") == \
+                "marks":
+            continue            # 3.64.74: a roof plan's level notes are its
+                                # roofs', not the floor's (the hall's
+                                # storey is set from them: mosque.py)
         f = cad_floor(doc["marks"].get(lv["id"]),
                       note_weight(doc, lv["id"]))
         if f and f[0] == "rel":
@@ -13609,6 +13614,9 @@ PITCH_WORDS = re.compile(r"KHAPRA?IL|\bTILES?\b|\bSLOPE|\bSLOPING|PITCH|"
 def _feet_level(txt: str):
     """«LEVEL.+27'-10''» → 27.833 (feet), or None."""
     m = re.search(r"([+-]?)\s*(\d+)\s*'\s*-?\s*(\d+(?:\.\d+)?)?", txt)
+    if not m:                    # 3.64.74: «LEV.+16-6"» (no foot mark)
+        m = re.search(r"([+-])\s*(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*(?:\"|'')",
+                      txt)
     if not m or not re.search(r"LEV|LVL|\bEL\b|F\.?F\.?L|T\.?O\.?S",
                               txt, re.I):
         return None

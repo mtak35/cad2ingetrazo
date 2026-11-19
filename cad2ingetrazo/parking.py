@@ -40,8 +40,11 @@ _LEV = re.compile(r"^\s*(?:LEV(?:EL)?|LVL|F\.?F\.?L|S\.?S\.?L|T\.?O\.?S|EL)"
 def feet(txt):
     """Metres from «11'-0"», «0'-9"», «22'»; None when there is none."""
     m = _FI.search(txt or "")
-    if not m:
-        return None
+    if not m:                    # 3.64.74: «16-6"» (the foot mark left out)
+        m = re.match(r"^\s*(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*(?:\"|'')\s*$",
+                     txt or "")
+        if not m:
+            return None
     return (float(m.group(1)) + float(m.group(2) or 0) / 12.0) * FT
 
 
