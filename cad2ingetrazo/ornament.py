@@ -47,7 +47,19 @@ def _ccw(pts):
 
 
 def _ring(poly, z0, z1, d, col, inset=0.0) -> list:
-    """A band round an outline (outside it, ``d`` out), z0..z1."""
+    """A band round an outline (outside it, ``d`` out), z0..z1.
+    3.64.76: one mitred solid — the corners meet exactly (the old boxes
+    overran each other at every corner: overlapping faces)."""
+    try:
+        from . import modern as MD
+        band = poly.buffer(d, join_style=2, mitre_limit=3.0).difference(
+            poly.buffer(-float(inset), join_style=2, mitre_limit=3.0)
+            if inset else poly)
+        fs = MD._solid(band, z0, z1, col)
+        if fs:
+            return fs
+    except Exception:  # noqa: BLE001
+        pass
     out = []
     for ring in [poly.exterior]:
         pts = _ccw([(x, y) for x, y in list(ring.coords)[:-1]])

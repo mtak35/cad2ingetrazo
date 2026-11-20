@@ -748,7 +748,20 @@ class Panel(QWidget):
         if msg:
             self.flash(msg + "  ·  Ctrl+Z undoes it", 7000)
         self.refresh()
+        try:        # 3.64.76: the right-click's pick cache made now, at rest
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(400, self._warm_pick)
+        except Exception:  # noqa: BLE001
+            pass
         return True
+
+    def _warm_pick(self):
+        try:
+            self._tri_cache = None
+            from PySide6.QtCore import QPointF
+            self._ray_hit(QPointF(1.0, 1.0))
+        except Exception:  # noqa: BLE001
+            pass
 
     def flash(self, text, ms=5000):
         try:
@@ -2517,6 +2530,15 @@ class Panel(QWidget):
         self.ex_info.setStyleSheet("color: #8a94a3;")
         f.addRow(self.ex_info)
         f.addRow(QLabel("<i>Boundary wall and gates (ground level):</i>"))
+        self.bw_auto = QCheckBox("Make the boundary wall and the gate "
+                                 "when the plot is found (default)")
+        self.bw_auto.setToolTip(
+            "On: «Site · ground» / a new plot builds the boundary wall and "
+            "the main gate (in front of the car porch) at once. Off: the "
+            "plot only — add them yourself below.")
+        self.bw_auto.setChecked(True)
+        self.bw_auto.toggled.connect(self._auto_site_flag)
+        f.addRow(self.bw_auto)
         self.bw_on = QCheckBox("Boundary wall on the plot's edge")
         f.addRow(self.bw_on)
         row = QHBoxLayout()
@@ -2750,6 +2772,20 @@ class Panel(QWidget):
                             "side_gate": True})
         self.commit(doc, "4'-0\" side gate added, with its columns")
 
+    def _auto_site_flag(self, on):
+        if getattr(self, "_building", False):
+            return
+        doc = self.doc()
+        if bool(doc["settings"].get("auto_site", True)) == bool(on):
+            return
+        doc["settings"]["auto_site"] = bool(on)
+        if on and doc["arch"].get("plot"):
+            PJ.auto_site(doc)
+            self.commit(doc, "Boundary wall and gate made with the plot")
+        else:
+            self.commit(doc, "Boundary wall and gate: " + (
+                "made with the plot" if on else "not made with the plot"))
+
     def _boundary(self):
         doc = self.doc()
         if not doc["arch"].get("plot"):
@@ -2783,6 +2819,9 @@ class Panel(QWidget):
 
     def _fill_site(self, doc):
         st = doc["site"]
+        self.bw_auto.blockSignals(True)
+        self.bw_auto.setChecked(bool(doc["settings"].get("auto_site", True)))
+        self.bw_auto.blockSignals(False)
         self.bw_on.setChecked(st["wall"])
         self.bw_h.setValue(st["h"])
         self.bw_t.setValue(st["t"])
@@ -7177,7 +7216,23 @@ class Panel(QWidget):
                 tags.append((t["type"], t.get("id", t["type"]), t.get("seg")))
                 for f in m.faces:
                     try:
-                        for a, b, c in f.triangulate():
+                        # 3.64.76: a plain tri / quad is fanned at once (the
+                        # general triangulation took seconds on a big model
+                        # — IngeTrazo then left our right-click out)
+                        vs_ = f.vertices
+                        if len(vs_) in (3, 4) and not f.holes:
+                            trs_ = [(vs_[0], vs_[i_], vs_[i_ + 1])
+                                    for i_ in range(1, len(vs_) - 1)]
+                        elif not f.holes and len(vs_) <= 40:
+                            trs_ = f.triangulate()
+                        else:
+                            # pierced / many-sided faces: the outline only
+                            # (fanned from its centre) — a pick through an
+                            # opening still meets the wall; quick
+                            cen_ = f.centroid
+                            trs_ = [(cen_, vs_[i_], vs_[(i_ + 1) % len(vs_)])
+                                    for i_ in range(len(vs_))]
+                        for a, b, c in trs_:
                             pts = []
                             for q in (a, b, c):
                                 if xf is not None:
@@ -8086,8 +8141,11 @@ class Panel(QWidget):
         if hit:
             kinds.add(hit[0])
         doc = getattr(self, "_doc_memo", None) or self.doc()
-        if kinds & {"platform", "landscape", "walkway", "site", "gate"} or \
-                not kinds:
+        # 3.64.76: also on a room's / slab's / ramp's / stair's floor — the
+        # car porch's own floor is one of these, so its finish was missing
+        if kinds & {"platform", "landscape", "walkway", "site", "gate",
+                    "room", "slab", "plot", "ramp", "stair", "parking",
+                    "floor"} or not kinds:
             flo = FN.groups_menu(floor=True)
             if flo:
                 mo = menu.addMenu("CAD2IngeTrazo · Outside floor finish "
@@ -8684,6 +8742,11 @@ class Panel(QWidget):
             except Exception:  # noqa: BLE001
                 log_error("panel.context_menu wall openings")
             if rec.get("kind", "line") == "line":
+                # 3.64.76: the niche straight in the menu (it sat three
+                # menus deep, under «Add a door / window / opening»)
+                sub.addAction("Niche in this wall (recess)",
+                              lambda w_=sel[1]: self._add_in_wall(
+                                  w_, "void_niche"))
                 sub.addAction("Edit part of this wall…",
                               lambda: self.split_wall_dialog(sel[1]))
                 # 3.62: join / split with the walls round it

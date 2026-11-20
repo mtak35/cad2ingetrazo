@@ -45,7 +45,8 @@ PLOT_KEY = "__plot__"            # the import that gave the plot
 DEFAULTS = {
     # 3.64.34 / 3.64.35: the car porch at the lawn, the annexes' roofs, the
     # entrance floor's finish, the building's elevation finish
-    "porch_at_ground": True, "annex_roof": True, "entrance_fin": "",
+    "porch_at_ground": True, "annex_roof": True, "auto_site": True,
+    "auto_site_done": False, "entrance_fin": "",
     "elev_fin": "", "fin_porch": "", "fin_entrance": "", "fin_veranda": "",
     "fin_terrace": "",
     "walls": "*WALL*, A-WALL*, *MUR*",
@@ -9997,14 +9998,30 @@ def _parapet_groups(doc, groups):
         # slivers at the corners closed, no spike out of the mitre)
         foot = _uuc([p_.buffer(0.003, join_style=2) for p_ in fp]) \
             .buffer(-0.003, join_style=2).simplify(0.004)
-        faces = _prism(foot.buffer(0.04, join_style=2, mitre_limit=1.5),
+        # 3.64.76: a taller wall meeting this one at a corner swallows the
+        # corner: the coping stops at its face (no board through the wall)
+        cut_ = None
+        try:
+            tall_ = [p_ for m_, (t_, _g) in tops.items()
+                     if m_ not in mates and walls[m_]["level"] == w["level"]
+                     and t_ > top + 0.02 for p_ in feet.get(m_, [])]
+            if tall_:
+                cut_ = _uuc(tall_).buffer(0.045, join_style=2)
+                if not cut_.intersects(foot):
+                    cut_ = None
+        except Exception:  # noqa: BLE001
+            cut_ = None
+
+        def _cp(g_):
+            return g_.difference(cut_) if cut_ is not None else g_
+        faces = _prism(_cp(foot.buffer(0.04, join_style=2, mitre_limit=1.5)),
                        top, top + 0.075)
         if style == "band":
-            faces += _prism(foot.buffer(0.02, join_style=2), top - 0.20,
+            faces += _prism(_cp(foot.buffer(0.02, join_style=2)), top - 0.20,
                             top - 0.14)
         if style == "bands2":
             for z0_, z1_ in ((top - 0.20, top - 0.14), (top - 0.38, top - 0.34)):
-                faces += _prism(foot.buffer(0.02, join_style=2), z0_, z1_)
+                faces += _prism(_cp(foot.buffer(0.02, join_style=2)), z0_, z1_)
         if style == "dentil":
             # small blocks along the wall's faces under the coping
             c_ = W.centre(w)
@@ -14035,7 +14052,75 @@ def set_plot(doc, corners, front=None, dist=None) -> str | None:
            {"front": 3.0, "back": 1.5, "sides": 1.0}}
     arch = dict(doc["arch"], plot=raw)
     doc["arch"]["plot"] = M.load(arch)["plot"]
+    try:
+        auto_site(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.auto_site")
     return None
+
+
+_PORCH_RX = re.compile(r"PORCH|CAR\s*PORT|CARPORT|GARAGE|CAR\s*PARK|"
+                       r"PARKING", re.I)
+
+
+def auto_site(doc, force=False) -> bool:
+    """3.64.76 — «Site · ground»: the plot found, its boundary wall and its
+    main gate are made at once (the gate on the front side, in front of the
+    car porch when the plan has one). Off with the panel's «Boundary wall
+    and gates made with the plot» option; once made they are the user's —
+    his removals are not undone."""
+    st = doc["settings"]
+    if not st.get("auto_site", True) and not force:
+        return False
+    if st.get("auto_site_done") and not force:
+        return False
+    plot = doc["arch"].get("plot")
+    if not plot or len(plot.get("corners") or []) < 3:
+        return False
+    from . import site as SITE_
+    site = doc["site"]
+    if site.get("gates") and not force:
+        st["auto_site_done"] = True
+        return False
+    from .engine import plotgeo
+    cn = plotgeo.clean(plot["corners"])
+    n = len(cn)
+    fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
+    side = fr[0] if fr else 0
+    a, u, _nrm, L = SITE_.side_frame(cn, side)
+    w = 3.6576                                   # 12'-0" double swing
+    m = 0.6 + float(site.get("pillar", 0.35))
+    pos = L / 2
+    try:                                         # in front of the car porch
+        ground = next(lv["id"] for lv in doc["arch"]["levels"]
+                      if lv["kind"] == "ground")
+        ps = [r for r in doc["arch"]["rooms"] if r["level"] == ground
+              and _PORCH_RX.search(r["name"])]
+        if ps:
+            r = min(ps, key=lambda q: _dist_to_side(
+                (q["x"], q["y"]), a, u, L))
+            pos = (r["x"] - a[0]) * u[0] + (r["y"] - a[1]) * u[1]
+    except Exception:  # noqa: BLE001
+        pass
+    lo, hi = m + w / 2, L - m - w / 2
+    if hi < lo:
+        w = max(min(L - 2 * m, 3.6576), 1.2)
+        lo, hi = m + w / 2, L - m - w / 2
+        if hi < lo:
+            lo = hi = L / 2
+    pos = min(max(pos, lo), hi)
+    site["wall"] = True
+    site["gates"] = [{"side": side, "pos": round(pos, 3), "w": round(w, 3),
+                      "kind": "double"}]
+    st["auto_site_done"] = True
+    return True
+
+
+def _dist_to_side(p, a, u, L) -> float:
+    t = min(max((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1], 0.0), L)
+    q = (a[0] + u[0] * t, a[1] + u[1] * t)
+    return math.dist(p, q)
 
 
 def _not_wall_gaps(arch, lid, boxes) -> list:
@@ -16394,6 +16479,12 @@ def update_from_cad(doc, as_cad=False) -> list:
         from .host import log_error
         log_error("project.update_from_cad stairs")
     recut_ramps(doc)
+    try:                      # 3.64.76: the plot's boundary wall and gate
+        if auto_site(doc):
+            out.append(("Site", {"boundary wall and gate": True}))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.update_from_cad auto_site")
     return out
 
 
