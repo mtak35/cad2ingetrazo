@@ -33,7 +33,7 @@ from .engine import structure as S
 from .engine import walldetect
 from .engine import walls as W
 from . import site as SITE_
-from .host import (BOUNDARY_LAYER, FOUNDATION, KEY, LAYER_PREFIX, SITE,
+from .host import (PLOT_LIMIT_LAYER, PLOT_PARTS_LAYER, BOUNDARY_LAYER, FOUNDATION, KEY, LAYER_PREFIX, SITE,
                    SYMBOL_LAYER,
                    TERRAIN_LAYER, ann_layer, dim_layer, is_ann_layer,
                    level_layer, text_layer)
@@ -13329,8 +13329,23 @@ def _site_groups(doc):
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.hillside drawn walls")
+    zones_ = []
     if parts is None:
-        parts, sym = SITE_.build(corners, site_, z0)
+        try:                # 3.64.81: a plot of several level parts — the
+            from . import hillside as HS_       # wall built part by part,
+            zones_ = [] if HS_.on(doc) else plot_zones(doc)   # each on its
+        except Exception:  # noqa: BLE001      # own level
+            zones_ = []
+        if len(zones_) > 1:
+            parts, sym = [], []
+            for zg_, dz_ in zones_:
+                p_, s_ = SITE_.build(corners, dict(site_, _clip=zg_),
+                                     z0 + dz_)
+                parts += p_
+                sym += s_
+        else:
+            zones_ = []
+            parts, sym = SITE_.build(corners, site_, z0)
     try:                    # 3.64.66: on a slope, on the ground it crosses
         from . import hillside as HS_
         parts = HS_.lift(doc, parts, z0)
@@ -13407,10 +13422,12 @@ def _site_groups(doc):
                                (c0[0] + uu[0] * ln + nn[0] * 0.12,
                                 c0[1] + uu[1] * ln + nn[1] * 0.12),
                                (c0[0] + nn[0] * 0.12, c0[1] + nn[1] * 0.12)]
+                        gz_ = z0 + (zone_dz(zones_, mid[0], mid[1])
+                                    if zones_ else 0.0)
                         bf = W.solid({"outer": S._ccw(box), "holes": []},
-                                     z0 + 0.02, z0 + 0.02 + gh)
+                                     gz_ + 0.02, gz_ + 0.02 + gh)
                         ang = math.degrees(math.atan2(uu[1], uu[0]))
-                        fr = (box[0][0], box[0][1], z0, ang)
+                        fr = (box[0][0], box[0][1], gz_, ang)
                         try:
                             from . import library as LB
                             lf = CP.local_faces([f if isinstance(f, dict) else
@@ -13457,7 +13474,10 @@ def _site_groups(doc):
         gk = doc["site"]["gates"][gi]
         fr_ = SITE_.gate_frame(corners, gk, float(doc["site"]["t"]))
         at = [round((fr_[0][0] + fr_[1][0]) / 2, 4),
-              round((fr_[0][1] + fr_[1][1]) / 2, 4), round(z0, 4)] \
+              round((fr_[0][1] + fr_[1][1]) / 2, 4),
+              round(z0 + (zone_dz(zones_, (fr_[0][0] + fr_[1][0]) / 2,
+                                  (fr_[0][1] + fr_[1][1]) / 2)
+                          if zones_ else 0.0), 4)] \
             if fr_ else [0.0, 0.0, z0]
         blk = Group(Mesh(), name=f"Gate {gi + 1} (with its pillars)")
         blk.adopt(kids)
@@ -14127,7 +14147,45 @@ def plot_top(doc) -> float:
     return elev[g] - float(doc["settings"].get("plinth", 0.15))
 
 
-def set_plot(doc, corners, front=None, dist=None) -> str | None:
+def plot_zones(doc) -> list:
+    """3.64.81 — the plot cut in its level parts: [(Polygon, dz)] that tile
+    the plot (each part clipped to the plot and to the parts before it; the
+    rest of the plot stays at the main ground, dz 0). [] with no parts."""
+    plot = doc["arch"].get("plot") or {}
+    parts = plot.get("parts") or []
+    if not parts or len(plot.get("corners") or []) < 3:
+        return []
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    pl = Polygon(plot["corners"]).buffer(0)
+    out, used = [], None
+    for pt in parts:
+        g = Polygon(pt["poly"]).buffer(0).intersection(pl)
+        if used is not None:
+            g = g.difference(used)
+        if g.is_empty or g.area < 0.01:
+            continue
+        out.append((g, float(pt.get("z", 0.0))))
+        used = g if used is None else unary_union([used, g])
+    rest = pl if used is None else pl.difference(used)
+    if not rest.is_empty and rest.area > 0.01:
+        out.append((rest, 0.0))
+    return out
+
+
+def zone_dz(zones, x, y) -> float:
+    """The level part's height over the main ground at a point."""
+    from shapely.geometry import Point
+    p = Point(x, y)
+    best, bd = 0.0, 1e9
+    for g, dz in zones:
+        d = g.distance(p)
+        if d < bd:
+            best, bd = dz, d
+    return best
+
+
+def set_plot(doc, corners, front=None, dist=None, parts=None) -> str | None:
     """The plot from its corners (m); None, or why not."""
     from .engine import plotgeo
     pts = plotgeo.clean([[float(p[0]), float(p[1])] for p in corners])
@@ -14150,7 +14208,8 @@ def set_plot(doc, corners, front=None, dist=None) -> str | None:
            "breaks": [], "sb_front": fr, "sb_custom": [None] * n,
            "sb_role": [None] * n,
            "sb_dist": dist or old.get("sb_dist") or
-           {"front": 3.0, "back": 1.5, "sides": 1.0}}
+           {"front": 3.0, "back": 1.5, "sides": 1.0},
+           "parts": parts if parts is not None else old.get("parts") or []}
     arch = dict(doc["arch"], plot=raw)
     doc["arch"]["plot"] = M.load(arch)["plot"]
     try:
@@ -15056,8 +15115,30 @@ def _plot_groups(doc):
         from .host import log_error
         log_error("project._plot_groups terrain")
         fs_ = []
-    for outer, hs in ([] if hill_tin_ else plates):
-        fs_ += W.solid({"outer": outer, "holes": hs}, z_pl - 0.10, z_pl)
+    zones_ = []
+    try:
+        zones_ = plot_zones(doc) if not hill_tin_ else []
+    except Exception:  # noqa: BLE001
+        zones_ = []
+    if len(zones_) > 1:        # 3.64.81: each level part its own plate
+        from shapely.geometry import Polygon as _Pz
+        for outer, hs in plates:
+            pg_ = _Pz(outer, [list(h) for h in hs]).buffer(0)
+            for zg_, dz_ in zones_:
+                for q in getattr(pg_.intersection(zg_), "geoms",
+                                 [pg_.intersection(zg_)]):
+                    if q.geom_type != "Polygon" or q.area < 0.01:
+                        continue
+                    fs_ += W.solid({
+                        "outer": S._ccw([tuple(c) for c in
+                                         list(q.exterior.coords)[:-1]]),
+                        "holes": [list(reversed(S._ccw(
+                            [tuple(c) for c in list(h.coords)[:-1]])))
+                            for h in q.interiors]},
+                        z_pl + dz_ - 0.10, z_pl + dz_)
+    else:
+        for outer, hs in ([] if hill_tin_ else plates):
+            fs_ += W.solid({"outer": outer, "holes": hs}, z_pl - 0.10, z_pl)
     for f in fs_:
         if isinstance(f, dict):
             _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
@@ -15072,6 +15153,32 @@ def _plot_groups(doc):
     g.ifc = {"class": "IfcSite", "name": "Plot"}
     g.ext = {KEY: {"type": "plot", "id": "plot", "level": low}}
     out.append(g)
+    # 3.64.81: the plot limit — a line of its own, on its own layer (not
+    # the boundary wall's); the level parts' outlines on another
+    from .host import PLOT_LIMIT_LAYER, PLOT_PARTS_LAYER
+    for nm_, ly_, loops_, zs_ in (
+            ("Plot limit", PLOT_LIMIT_LAYER, [pts], [0.0]),
+            ("Plot level parts", PLOT_PARTS_LAYER,
+             [list(g_.exterior.coords)[:-1] for g_, _d in zones_
+              if g_.geom_type == "Polygon"] if len(zones_) > 1 else [],
+             [dz_ for g_, dz_ in zones_ if g_.geom_type == "Polygon"])):
+        if not loops_:
+            continue
+        mesh = Mesh()
+        for lp_, dz_ in zip(loops_, zs_):
+            for i in range(len(lp_)):
+                a, b = lp_[i], lp_[(i + 1) % len(lp_)]
+                try:
+                    mesh.add_edge(QVector3D(a[0], a[1], top + dz_ + 0.03),
+                                  QVector3D(b[0], b[1], top + dz_ + 0.03))
+                except ValueError:
+                    pass
+        g = Group(mesh, name=nm_)
+        g.component = False
+        g.layer = ly_
+        g.ext = {KEY: {"type": "symbols", "id": nm_.lower().replace(
+            " ", "_"), "level": low}}
+        out.append(g)
     _roles, _d, area = plotgeo.setbacks_of(plot)
     if area:
         mesh = Mesh()
@@ -15524,7 +15631,8 @@ def commit(viewport, doc, opts=None) -> None:
         [ann_layer(lv["name"]) for lv in arch["levels"]] + \
         [text_layer(lv["name"]) for lv in arch["levels"]] + \
         [dim_layer(lv["name"]) for lv in arch["levels"]] + \
-        ([TERRAIN_LAYER, ann_layer(SITE)] if arch.get("plot") else []) + \
+        ([TERRAIN_LAYER, ann_layer(SITE), PLOT_LIMIT_LAYER, PLOT_PARTS_LAYER]
+         if arch.get("plot") else []) + \
         ([BOUNDARY_LAYER] if arch.get("plot") and doc["site"]["wall"] else [])
 
     class _Rebuild(Command):

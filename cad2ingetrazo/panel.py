@@ -2488,6 +2488,7 @@ class Panel(QWidget):
         row.addWidget(_btn("Apply setbacks", self._plot_setbacks,
                            primary=True))
         row.addWidget(_btn("Site plan", self.show_site))
+        row.addWidget(_btn("Remove level parts", self._parts_remove))
         row.addWidget(_btn("Remove plot", self._plot_remove))
         f.addRow(row)
         # excavations and fills — ArchXQ's terrain cuts
@@ -2914,6 +2915,9 @@ class Panel(QWidget):
                             "keeps the setbacks</span>" if ok else
                             "<br><span style='color:#c0392b'>⚠ The building "
                             "crosses a setback line</span>")
+        if plot.get("parts"):
+            txt += "<br>Level parts: " + ", ".join(
+                f"{p['name']} {p['z']:+.2f} m" for p in plot["parts"])
         self.pl_info.setText(txt)
 
     def _apply_lawn(self):
@@ -2925,12 +2929,13 @@ class Panel(QWidget):
         self.commit(doc, "Landscape level: " + len_txt(
             doc["settings"]["landscape_h"]) + " over the ground")
 
-    def _plot_store(self, corners, msg):
+    def _plot_store(self, corners, msg, parts=None):
         doc = self.doc()
         doc["settings"]["plinth"] = self.pl_plinth.value()
         why = PJ.set_plot(doc, corners, dist={"front": self.sb_front.value(),
                                               "back": self.sb_back.value(),
-                                              "sides": self.sb_sides.value()})
+                                              "sides": self.sb_sides.value()},
+                          parts=parts or [])
         if why:
             self.flash(f"No plot — {why}", 8000)
             return
@@ -2974,8 +2979,14 @@ class Panel(QWidget):
         pts = cadread.to_model(d, base, (how.get("ix", 0.0),
                                          how.get("iy", 0.0)),
                                how.get("rot", 0.0), dlg.poly)
+        parts = []
+        for k, (pg, z) in enumerate(dlg.parts, 1):
+            parts.append({"poly": [list(q) for q in cadread.to_model(
+                d, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
+                how.get("rot", 0.0), pg)], "z": z, "name": f"Part {k}"})
         self._plot_store(pts, f"Plot of {len(pts)} corners taken from the "
-                              "drawing")
+                              "drawing" + (f", in {len(parts)} level parts"
+                                           if parts else ""), parts)
 
     def _plot_setbacks(self):
         doc = self.doc()
@@ -2992,6 +3003,12 @@ class Panel(QWidget):
                           "back": self.sb_back.value(),
                           "sides": self.sb_sides.value()})
         self.commit(doc, "Setbacks applied")
+
+    def _parts_remove(self):
+        doc = self.doc()
+        if doc["arch"].get("plot"):
+            doc["arch"]["plot"]["parts"] = []
+            self.commit(doc, "Plot level parts removed")
 
     def _plot_remove(self):
         doc = self.doc()

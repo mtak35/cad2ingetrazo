@@ -10,7 +10,7 @@ import math
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTransform
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QDoubleSpinBox, QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QHeaderView, QLabel, QPushButton, QSplitter,
                                QTableWidget, QVBoxLayout, QWidget)
 
@@ -44,6 +44,8 @@ class Canvas(QWidget):
         self.mode = "box" if not self.region else "base"
         self.poly = []                          # plot corners (drawing)
         self.closed = False
+        self.outline = []                       # the plot limit, once set
+        self.parts = []                         # [(poly, z)] level parts
         self.lines = [QLineF(s[0], s[1], s[2], s[3]) for s in drawing["segs"]]
         # the drawing as AutoCAD shows it: each line's colour, line weight
         # and line type (by entity, layer or block)
@@ -334,6 +336,23 @@ class Canvas(QWidget):
                       "this level", fill=True)
         if self.base:
             self._cross(p, self.base, QColor("#ff4040"), big=True)
+        if self.outline:
+            from PySide6.QtGui import QPolygonF
+            p.setPen(QPen(QColor("#e8a317"), 2, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(QPolygonF([self.view.map(QPointF(*q))
+                                     for q in self.outline]))
+            pal = ("#3b82f6", "#a855f7", "#14b8a6", "#f43f5e", "#84cc16")
+            for i, (pg, zz) in enumerate(self.parts):
+                c = QColor(pal[i % len(pal)])
+                p.setPen(QPen(c, 2))
+                c.setAlpha(70)
+                p.setBrush(c)
+                qp = QPolygonF([self.view.map(QPointF(*q)) for q in pg])
+                p.drawPolygon(qp)
+                p.setPen(QPen(QColor("#111"), 1))
+                p.drawText(qp.boundingRect().center(),
+                           f"Part {i + 1}: {zz:+.2f} m")
         if self.poly:
             from PySide6.QtGui import QPolygonF
             pts = [self.view.map(QPointF(*q)) for q in self.poly]
@@ -735,6 +754,38 @@ class PlotDialog(QDialog):
         for b in (b1, b2, b2b, b3, b4):
             row.addWidget(b)
         row.addStretch(1)
+        row2 = QHBoxLayout()
+        self.b_part = QPushButton("Level parts…")
+        self.b_part.setToolTip(
+            "A plot on more than one level: after the plot limit, pick its "
+            "parts one by one — each with its own level — until the whole "
+            "plot limit is covered. The boundary wall follows each part's "
+            "level.")
+        self.b_part.clicked.connect(self._start_parts)
+        self.zsp = QDoubleSpinBox()
+        self.zsp.setRange(-50.0, 50.0)
+        self.zsp.setDecimals(3)
+        self.zsp.setSingleStep(0.15)
+        self.zsp.setSuffix(" m")
+        self.zsp.setToolTip("This part's ground level over (+) or under (−) "
+                            "the building's main ground")
+        self.b_keep = QPushButton("Keep this part")
+        self.b_keep.clicked.connect(self._keep_part)
+        self.b_rest = QPushButton("The rest is one part")
+        self.b_rest.setToolTip("What is not yet in a part becomes the last "
+                               "part, at the level above")
+        self.b_rest.clicked.connect(self._rest_part)
+        self.b_undo = QPushButton("Remove last part")
+        self.b_undo.clicked.connect(self._undo_part)
+        self.cov = QLabel()
+        for w in (self.b_part, QLabel("Level of this part:"), self.zsp,
+                  self.b_keep, self.b_rest, self.b_undo, self.cov):
+            row2.addWidget(w)
+        row2.addStretch(1)
+        v.addLayout(row2)
+        self._phase = "plot"
+        self._plot_poly = []
+        self._parts = []                         # [(poly, z)] in drawing units
         self.ok = QPushButton("Use this plot")
         self.ok.setStyleSheet("QPushButton { background: #2f6fdd; color: "
                               "white; font-weight: bold; padding: 4px 12px; }")
@@ -748,7 +799,78 @@ class PlotDialog(QDialog):
 
     @property
     def poly(self):
-        return list(self.canvas.poly)
+        return list(self._plot_poly if self._phase == "parts"
+                    else self.canvas.poly)
+
+    @property
+    def parts(self):
+        """[(poly, z m)] — the level parts, clipped to the plot and to each
+        other (empty: one level)."""
+        return [(list(p), z) for p, z in self._parts]
+
+    def _geo(self, poly):
+        from shapely.geometry import Polygon
+        return Polygon(poly).buffer(0)
+
+    def _left(self):
+        from shapely.ops import unary_union
+        g = self._geo(self._plot_poly)
+        if self._parts:
+            g = g.difference(unary_union([self._geo(p) for p, _z in
+                                          self._parts]))
+        return g
+
+    def _start_parts(self):
+        c = self.canvas
+        if not (c.closed and len(c.poly) >= 3):
+            return
+        self._phase = "parts"
+        self._plot_poly = list(c.poly)
+        c.outline = list(c.poly)
+        c.poly, c.closed = [], False
+        c.mode = "poly"
+        c.update()
+        self._changed()
+
+    def _add(self, poly, z):
+        from shapely.geometry import Polygon
+        g = self._geo(poly).intersection(self._left())
+        if g.is_empty:
+            return False
+        for q in getattr(g, "geoms", [g]):
+            if q.geom_type == "Polygon" and q.area > 1e-6:
+                self._parts.append(([tuple(x) for x in
+                                     list(q.exterior.coords)[:-1]], z))
+        self.canvas.parts = list(self._parts)
+        return True
+
+    def _keep_part(self):
+        c = self.canvas
+        if c.closed and len(c.poly) >= 3 and self._add(c.poly,
+                                                       self.zsp.value()):
+            c.poly, c.closed = [], False
+            c.update()
+        self._changed()
+
+    def _rest_part(self):
+        g = self._left()
+        if g.is_empty:
+            return
+        for q in getattr(g, "geoms", [g]):
+            if q.geom_type == "Polygon" and q.area > 1e-6:
+                self._parts.append(([tuple(x) for x in
+                                     list(q.exterior.coords)[:-1]],
+                                    self.zsp.value()))
+        self.canvas.parts = list(self._parts)
+        self.canvas.update()
+        self._changed()
+
+    def _undo_part(self):
+        if self._parts:
+            self._parts.pop()
+            self.canvas.parts = list(self._parts)
+            self.canvas.update()
+        self._changed()
 
     def _mode(self, m):
         self.canvas.mode = m
@@ -761,6 +883,29 @@ class PlotDialog(QDialog):
 
     def _changed(self):
         c = self.canvas
+        parts_ = self._phase == "parts"
+        for w in (self.zsp, self.b_keep, self.b_rest, self.b_undo):
+            w.setEnabled(parts_)
+        self.b_part.setEnabled(not parts_ and c.closed and len(c.poly) >= 3)
+        if parts_:
+            tot = self._geo(self._plot_poly).area or 1.0
+            left = self._left().area
+            self.cov.setText(f"{len(self._parts)} parts · "
+                             f"{100 * (1 - left / tot):.0f}% of the plot "
+                             "covered")
+            if left < 1e-6 * tot or left / tot < 0.002:
+                self.tip.setText("<b>The whole plot limit is covered.</b> "
+                                 "«Use this plot».")
+            else:
+                self.tip.setText(
+                    "<b>Level parts</b> — click one part's corners (or "
+                    "inside / on its outline), set its level, «Keep this "
+                    "part»; repeat until the plot limit is covered "
+                    "(«The rest is one part» closes it). What is left "
+                    "stays on the main ground.")
+            self.ok.setEnabled(True)
+            return
+        self.cov.setText("")
         if c.closed:
             self.tip.setText(f"<b>Plot closed — {len(c.poly)} corners.</b> "
                              "«Use this plot», or Clear to start again.")

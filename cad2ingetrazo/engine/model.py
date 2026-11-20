@@ -144,6 +144,7 @@ def load(raw) -> dict:
                            "breaks": breaks}
             doc["plot"].update(_setbacks(plot, n))
             doc["plot"]["survey"] = _survey(plot.get("survey"))
+            doc["plot"]["parts"] = _plot_parts(plot.get("parts"))
             try:                             # contour lines every … m
                 step = float(plot.get("contour", CONTOUR_STEP))
             except (TypeError, ValueError):
@@ -831,6 +832,22 @@ def _setbacks(plot: dict, n: int) -> dict:
                 pass
     return {"sb_front": front, "sb_custom": custom, "sb_role": role,
             "sb_dist": dist}
+
+
+def _plot_parts(raw) -> list:
+    """3.64.81 — the plot's level parts: [{"poly": [[x, y]…], "z": m over
+    the main ground, "name"}]; bad entries dropped."""
+    out = []
+    for p in raw if isinstance(raw, list) else []:
+        try:
+            poly = [[float(q[0]), float(q[1])] for q in p["poly"]]
+            z = min(max(float(p.get("z", 0.0)), -50.0), 50.0)
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        if len(poly) >= 3:
+            out.append({"poly": poly, "z": round(z, 3),
+                        "name": str(p.get("name") or f"Part {len(out) + 1}")})
+    return out
 
 
 def _survey(raw) -> list:

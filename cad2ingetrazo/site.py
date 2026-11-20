@@ -192,10 +192,16 @@ def build(corners, site, z0):
         plot = plot.buffer(0)
     inner = plot.buffer(-t, join_style=2)
     ring = plot.difference(inner)
+    clip = site.get("_clip")           # 3.64.81: one level part of the plot
+    if clip is not None:
+        ring = ring.intersection(clip)
     gates = []
     for g in site["gates"]:
         if 0 <= g["side"] < len(corners):
             quad, frame = gate_box(corners, g, t)
+            if clip is not None and not clip.buffer(0.01).contains(
+                    Polygon(quad).centroid):
+                continue
             gates.append((g, frame))
             ring = ring.difference(Polygon(quad))
     # 3.64.34: the sides by group — the front (its gates / the plot's
@@ -284,6 +290,8 @@ def build(corners, site, z0):
             mid = plot.buffer(-t / 2, join_style=2)
             line = mid.exterior.intersection(band_) if not mid.is_empty \
                 else None
+            if line is not None and clip is not None:
+                line = line.intersection(clip)
             if line is not None and not line.is_empty:
                 cut = line
                 for g, (p0, p1, u, nv) in gates:
@@ -341,13 +349,15 @@ def build(corners, site, z0):
             p = inner.exterior.interpolate(inner.exterior.project(
                 _pt(b))) if not inner.is_empty else None
             mid = ((b[0] + p.x) / 2, (b[1] + p.y) / 2) if p else b
-            spots.append((mid, _angle(b, c)))
+            if clip is None or clip.buffer(0.01).contains(_pt(mid)):
+                spots.append((mid, _angle(b, c)))
         if pier_sides and pil_:         # piers along the sides too
             for q_, ang_ in pier_pts:    # (the design's own bays)
                 if any(Polygon(gate_box(corners, g, t)[0]).buffer(0.5)
                        .contains(_pt(q_)) for g, _f in gates):
                     continue
-                spots.append((q_, ang_))
+                if clip is None or clip.buffer(0.01).contains(_pt(q_)):
+                    spots.append((q_, ang_))
         n_c = len(spots)
         gi_of = {}
         for gi_, (g, (p0, p1, u, nv)) in enumerate(gates):   # the jambs

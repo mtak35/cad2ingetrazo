@@ -1210,7 +1210,9 @@ def swap_command(viewport, planes, views, sheets, bbox=None,
         # the plot's ground: the site plan and the 3D only
         if v["name"] != f"{PREFIX}Site plan":
             from .host import BOUNDARY_LAYER as _BND
-            hidden += [_TER, _BND]
+            from .host import PLOT_LIMIT_LAYER as _PLL
+            from .host import PLOT_PARTS_LAYER as _PPL
+            hidden += [_TER, _BND, _PLL, _PPL]
         hidden = [n for n in hidden if n not in v.get("show", ())]
         sv = SavedView(v["name"], target=tuple(v["target"]), distance=30.0,
                        yaw=v["yaw"], pitch=v["pitch"], perspective=False,
