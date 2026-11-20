@@ -157,7 +157,7 @@ FIELDS = {
                "blue_ref", "silver_ref", "frosted")),
              ("rail", "Build as railing", "choice",
               ("solid", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
-               "wood", "wall_rail")),
+               "wood", "wall_rail", "baluster")),
              ("t", "Thickness", "len", (0.02, 3.0)),
              ("grid", "Curtain wall: mullions every", "len", (0.3, 6.0)),
              ("tgrid", "Curtain wall: transoms every", "len", (0.3, 6.0)),
@@ -266,7 +266,7 @@ FIELDS = {
                 "strip")),
               ("rail", "Railing", "choice",
                ("none", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
-                "wood", "wall_rail", "solid")),
+                "wood", "wall_rail", "solid", "baluster")),
               ("rail_h", "Railing height", "len", (0.3, 2.0)),
               ("rail_sides", "Railing sides", "choice",
                ("inner", "outer", "both", "none")),
@@ -278,7 +278,7 @@ FIELDS = {
                (0.0, 1.0))],
     "stairrail": [("rail", "Railing type", "choice",
                    ("none", "ss_bars", "ms_grill", "glass", "glass_post",
-                    "pipe", "wood", "wall_rail", "solid")),
+                    "pipe", "wood", "wall_rail", "solid", "baluster")),
                   ("rail_h", "Railing height", "len", (0.3, 2.0)),
                   ("rail_sides", "Railing sides", "choice",
                    ("inner", "outer", "both", "none")),
@@ -6130,8 +6130,9 @@ class Panel(QWidget):
             fp = self._floor_pick()
             r0 = {"name": fp[1] if fp else "the room"}
         now = r0.get("mat_floor")
-        what = f"{len(rids)} rooms" if len(rids) > 1 else \
-            str(r0.get("name") or "the room")
+        from . import areas as AR_
+        what = f"{len(rids)} areas" if len(rids) > 1 else \
+            AR_.title(r0.get("name") or "the room", "the room")
         m_ = menu.addMenu(f"CAD2IngeTrazo · Floor finish — {what}")
         for title, ks in groups_:
             mg = m_.addMenu(title)

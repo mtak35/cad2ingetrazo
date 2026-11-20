@@ -85,6 +85,36 @@ def _outline(arch, lid):
     return poly.simplify(0.03)
 
 
+def _floor_outline(arch, lid, fallback):
+    """3.64.77: a floor band follows the FLOOR slab's edge (balconies and
+    terraces that project, the slab as cast), not the walls below it; the
+    walls' outline when that level has no slab."""
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        ps = []
+        for e in arch.get("structure") or []:
+            if e.get("type") != "slab" or e.get("level") != lid or \
+                    e.get("roof") or e.get("auto_roof"):
+                continue
+            c = e.get("corners") or []
+            if len(c) >= 3:
+                q = Polygon([tuple(v[:2]) for v in c]).buffer(0)
+                if not q.is_empty:
+                    ps.append(q)
+        if not ps:
+            return fallback
+        u = unary_union(ps + [fallback]).buffer(0.02).buffer(-0.02)
+        if u.geom_type != "Polygon":
+            u = max(u.geoms, key=lambda g: g.area)
+        u = Polygon(u.exterior).simplify(0.03)
+        if u.is_empty or u.area < 0.8 * fallback.area:
+            return fallback
+        return u
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def _corners(poly) -> list:
     """The outline's outside (convex) corners: [(p, u_prev, u_next)]."""
     poly = poly.simplify(0.15)
@@ -277,7 +307,8 @@ def faces(doc) -> list:
         nxt = [j for j in order if el[j] > z0 + 0.5]
         if nxt and nxt[0] in polys and on("bands"):  # a floor band over it
             zb = el[nxt[0]]
-            fs += _ring(p, zb - 0.10, zb - 0.10 + STRING_H, STRING_D, trim)
+            pb = _floor_outline(arch, levels[nxt[0]]["id"], p)
+            fs += _ring(pb, zb - 0.10, zb - 0.10 + STRING_H, STRING_D, trim)
         if levels[i]["id"] in roofed and on("cornice"):  # the eaves' cornice
             zc = z1
             for h_, d_ in CORNICE:

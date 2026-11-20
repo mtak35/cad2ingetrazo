@@ -282,6 +282,34 @@ PRESETS = {
         "pediment": True, "lanterns": True, "light_style": "lantern",
         "wall": [0.96, 0.95, 0.92], "trim": [1.0, 1.0, 0.98],
         "stone": [0.84, 0.82, 0.78], "gate_color": "black"}),
+    "royal": ("Royal — palace / grand building (cream stone, gold trim, "
+              "balustrades, pediment, Corinthian columns)", {
+        **OFF, "roof": "asdrawn", "win_head": "arch", "win_frame": "wood",
+        "win_style": "colonial", "rail": "baluster",
+        "columns": "corinthian", "plinth": True, "bands": True,
+        "cornice": True, "quoins": True, "surrounds": True,
+        "corbels": True, "medallions": True, "pediment": True,
+        "pilasters": True, "sills_lintels": True, "lanterns": True,
+        "entrance_canopy": True, "door_arch": True, "arcades": True,
+        "light_style": "lantern", "fascia": True, "fascia_d": 0.22,
+        "fascia_h": 0.45,
+        "wall": [0.94, 0.90, 0.80], "trim": [0.99, 0.97, 0.90],
+        "stone": [0.86, 0.80, 0.66], "accent": [0.78, 0.62, 0.24],
+        "metal": [0.62, 0.48, 0.16], "gate_color": "gold"}),
+    "royal_villa": ("Royal villa (white stone, tiled hip roof, balustraded "
+                    "balconies, arched openings)", {
+        **OFF, "roof": "hip", "roof_slope": 24.0, "roof_eave": 0.75,
+        "annex_roof": True, "win_head": "arch", "win_frame": "wood",
+        "win_style": "colonial", "rail": "baluster", "columns": "composite",
+        "plinth": True, "bands": True, "cornice": True, "quoins": True,
+        "surrounds": True, "corbels": True, "medallions": True,
+        "pediment": True, "pilasters": True, "lanterns": True,
+        "porch_canopy": True, "entrance_canopy": True, "door_arch": True,
+        "arcades": True, "shutters": True, "light_style": "lantern",
+        "wall": [0.97, 0.95, 0.90], "trim": [1.0, 0.99, 0.95],
+        "stone": [0.90, 0.85, 0.74], "roof_c": [0.55, 0.28, 0.20],
+        "accent": [0.80, 0.64, 0.26], "metal": [0.64, 0.50, 0.18],
+        "gate_color": "gold"}),
     "modern": ("Modern (clean box, glass railings, black frames)", {
         **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
         "rail": "glass", "columns": "asdrawn", "win_style": "modern_grid",
@@ -453,6 +481,12 @@ PRESETS = {
 }
 #: a line on what each style is, under the designer's choice
 STYLE_NOTES = {
+    "royal": "A palace front: cream stone, gold trim, Corinthian columns "
+             "and a pediment, pilasters, quoins and corbels, a cornice, "
+             "stone balustrades on every balcony and terrace.",
+    "royal_villa": "A villa with royal detail: white stone, a tiled hip "
+                   "roof, balustraded balconies, arched openings, "
+                   "pilasters and a pedimented entrance.",
     "industrial": "Grey metal-clad walls, flat roofs with a thin fascia, "
                   "plain flat-headed openings, no ornament.",
     "mosque": "White, every opening arched, deep white slab edges on the "
@@ -931,30 +965,30 @@ STYLES = dict(STYLES, **{k: v[0] for k, v in PRESETS.items()})
 _GENERAL = {"plinth", "bands", "cornice", "fascia", "surrounds", "lanterns",
             "gf_grille", "door_arch", "arcades", "sills_lintels"}
 ELEMENT_STYLES = {
-    "quoins": {"classical", "neoclassical", "italianate", "mediterranean",
+    "quoins": {"royal", "royal_villa", "classical", "neoclassical", "italianate", "mediterranean",
                "georgian", "tudor"},
-    "corbels": {"mediterranean", "classical", "italianate", "victorian",
+    "corbels": {"royal", "royal_villa", "mediterranean", "classical", "italianate", "victorian",
                 "arabian"},
-    "porch_canopy": {"mediterranean", "victorian", "tropical", "farmhouse",
+    "porch_canopy": {"royal", "royal_villa", "mediterranean", "victorian", "tropical", "farmhouse",
                      "capecod", "tudor"},
-    "entrance_canopy": {"mediterranean", "modern", "contemporary",
+    "entrance_canopy": {"royal", "royal_villa", "mediterranean", "modern", "contemporary",
                         "farmhouse", "victorian", "capecod", "classical",
                         "neoclassical", "midcentury", "arabian"},
-    "medallions": {"classical", "neoclassical", "mediterranean", "arabian",
+    "medallions": {"royal", "royal_villa", "classical", "neoclassical", "mediterranean", "arabian",
                    "italianate", "georgian"},
     "slab_edges": {"modern", "minimalist", "contemporary", "midcentury",
                    "hightech", "bauhaus", "brutalist"},
     "frame_box": {"modern", "contemporary", "midcentury", "hightech"},
     "incline_panel": {"modern", "contemporary", "hightech"},
     "entry_clad": {"modern", "contemporary", "midcentury"},
-    "pediment": {"classical", "neoclassical", "georgian", "italianate",
+    "pediment": {"royal", "royal_villa", "classical", "neoclassical", "georgian", "italianate",
                  "mediterranean"},
     "deco_fins": {"artdeco"}, "deco_bands": {"artdeco"},
     "deco_crown": {"artdeco"},
     "window_boxes": {"brutalist", "contemporary"},
     "half_timber": {"tudor"}, "gf_clad": {"tudor", "midcentury",
                                          "contemporary", "mediterranean"},
-    "shutters": {"capecod", "georgian", "farmhouse", "tropical",
+    "shutters": {"royal", "royal_villa", "capecod", "georgian", "farmhouse", "tropical",
                  "mediterranean", "tudor", "italianate", "victorian"},
     "siding": {"capecod", "farmhouse", "victorian"},
     "eave_brackets": {"italianate", "victorian", "tudor", "tropical"},
@@ -963,7 +997,7 @@ ELEMENT_STYLES = {
                      "industrial"},
     "jali": {"arabian", "mosque", "mediterranean", "contemporary",
              "midcentury", "tropical"},
-    "pilasters": {"hightech", "classical", "neoclassical", "georgian",
+    "pilasters": {"royal", "royal_villa", "hightech", "classical", "neoclassical", "georgian",
                   "artdeco", "modern", "contemporary", "mosque",
                   "italianate"},
 }

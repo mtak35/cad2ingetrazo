@@ -175,6 +175,21 @@ def _gross_of(walls: list[dict]) -> float:
     return sum(Polygon(g.exterior).area for g in getattr(u, "geoms", [u]))
 
 
+#: {level id: [(x, y, name)]} — the CAD's outside-area words (TERRACE, CAR
+#: PORCH …), set when a document is read: an unnamed space with one in it
+#: takes its name (not «Room N»)
+HINTS: dict = {}
+
+
+def _hint_name(level_id, poly):
+    from shapely.geometry import Point
+    big = None
+    for x, y, nm in HINTS.get(level_id, ()):
+        if poly.buffer(1.5).contains(Point(x, y)):
+            return nm
+    return big
+
+
 def of_level(doc: dict, level_id: str) -> list[dict]:
     """The level's rooms with their names: [{"name", "area", "perimeter",
     "at", "poly", "rec" (the record, or None)}]. Unnamed: «Room N»."""
@@ -193,10 +208,13 @@ def of_level(doc: dict, level_id: str) -> list[dict]:
     for room in found(walls, sol):
         rec = next((r for r in recs
                     if room["poly"].contains(Point(r["x"], r["y"]))), None)
+        nm = rec["name"] if rec else None
         if rec is None:
-            n += 1
-        out.append(dict(room, rec=rec,
-                        name=rec["name"] if rec else f"Room {n}"))
+            nm = _hint_name(level_id, room["poly"])
+            if nm is None:
+                n += 1
+                nm = f"Room {n}"
+        out.append(dict(room, rec=rec, name=nm))
     return out
 
 

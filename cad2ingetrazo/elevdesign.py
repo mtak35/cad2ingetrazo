@@ -29,7 +29,8 @@ RAILS = [("asdrawn", "As drawn"), ("ms_grill", "Wrought iron"),
          ("glass_post", "Glass panels between posts"),
          ("glass", "Frameless glass"),
          ("ss_bars", "Stainless steel balusters"),
-         ("wood", "Timber balusters"), ("solid", "Solid parapet")]
+         ("wood", "Timber balusters"), ("solid", "Solid parapet"),
+         ("baluster", "Stone balustrade (turned balusters, newel posts)")]
 COLUMNS = [("asdrawn", "As drawn"), ("tuscan", "Tuscan"),
            ("doric", "Doric"), ("ionic", "Ionic"),
            ("corinthian", "Corinthian"), ("composite", "Composite"),

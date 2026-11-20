@@ -236,6 +236,18 @@ def load(raw) -> dict:
                       and isinstance(v, dict)}
     doc["texts"] = [t for t in raw.get("texts") or []
                     if isinstance(t, dict) and t.get("level") in ids]
+    try:            # 3.64.77: the outside areas' words name the spaces
+        from . import areas as AR_
+        from .engine import spaces as SP_
+        hh_ = {}
+        for t_ in doc["texts"]:
+            nm_ = str(t_.get("text", "")).split("\n")[0].strip()
+            if nm_ and len(nm_) <= 40 and AR_.kind_of(nm_):
+                hh_.setdefault(t_["level"], []).append(
+                    (t_["x"], t_["y"], nm_))
+        SP_.HINTS = hh_
+    except Exception:  # noqa: BLE001
+        pass
     doc["settings"].update({k: v for k, v in (raw.get("settings") or {}).items()
                             if k in DEFAULTS})
     rs_ = raw.get("settings") or {}
@@ -16489,6 +16501,11 @@ def update_from_cad(doc, as_cad=False) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.update_from_cad stairs")
+    try:                      # 3.64.77: the landing where a stair arrives
+        stair_arrival_slabs(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.update_from_cad arrival slabs")
     recut_ramps(doc)
     try:                      # 3.64.76: the plot's boundary wall and gate
         if auto_site(doc):
@@ -16497,6 +16514,74 @@ def update_from_cad(doc, as_cad=False) -> list:
         from .host import log_error
         log_error("project.update_from_cad auto_site")
     return out
+
+
+def stair_arrival_slabs(doc, depth=1.2) -> int:
+    """3.64.77: the landing where a stair arrives on the floor above (the
+    top landing): when that floor's slab stops short of the last riser (the
+    stair hall left out of its outline) a landing slab is made over the hall
+    beyond the last riser — ``depth`` deep, a flight wide, never over the
+    flights, a wall or a slab already there. How many were made."""
+    from shapely.affinity import translate
+    from shapely.geometry import MultiPoint, Polygon
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    arch["structure"] = [e for e in arch["structure"]
+                         if not e.get("stair_arrival")]
+    n, new = 0, []
+    t_ = float(doc["settings"].get("slab_t", 0.15))
+    for st in doc.get("stairs") or []:
+        to = st.get("to")
+        lg = next((l for l in st.get("landings") or []
+                   if l.get("arrival") or l.get("top")), None)
+        fl = st.get("flights") or []
+        if not to or lg is None or not fl:
+            continue
+        d = fl[-1]["d"]
+        L0 = Polygon([tuple(p[:2]) for p in lg["corners"]]).buffer(0)
+        if L0.is_empty:
+            continue
+        hull = MultiPoint(list(L0.exterior.coords) + list(translate(
+            L0, d[0] * depth, d[1] * depth).exterior.coords)).convex_hull
+        foots = []
+        for f in fl:
+            pts = [tuple(p[:2]) for ln in f["lines"] for p in ln]
+            if len(pts) >= 3:
+                foots.append(MultiPoint(pts).convex_hull)
+        cover = []
+        for e in arch["structure"]:
+            if e.get("type") == "slab" and e.get("level") == to and \
+                    not e.get("roof") and e.get("corners"):
+                q = Polygon([tuple(p[:2]) for p in e["corners"]]).buffer(0)
+                for h in e.get("holes") or []:
+                    if len(h) >= 3:
+                        q = q.difference(Polygon([tuple(p[:2])
+                                                  for p in h]))
+                cover.append(q)
+        walls = [LineString_(w) for w in arch["walls"]
+                 if w["level"] == to and not w.get("rail")]
+        reg = hull.difference(L0.buffer(0.01))
+        for g in foots + cover + walls:
+            reg = reg.difference(g)
+        best = max(getattr(reg, "geoms", [reg]), key=lambda g: g.area,
+                   default=None)
+        if best is None or best.geom_type != "Polygon" or best.area < 0.25:
+            continue
+        best = best.simplify(0.01)
+        new.append({"type": "slab", "level": to, "stair_arrival": st.get("id"),
+                    "corners": [[round(p[0], 4), round(p[1], 4)]
+                                for p in S._ccw(list(best.exterior.coords)[:-1])],
+                    "holes": [], "shafts": [], "t": t_, "offset": 0.0})
+    if new:
+        arch["structure"] += M.new_elements(arch["structure"], new)
+        n = len(new)
+    return n
+
+
+def LineString_(w):
+    from shapely.geometry import LineString
+    return LineString([tuple(w["a"][:2]), tuple(w["b"][:2])]).buffer(
+        float(w.get("t", 0.2)) / 2 + 0.01)
 
 
 def recut_ramps(doc) -> int:

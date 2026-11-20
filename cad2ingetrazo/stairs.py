@@ -868,6 +868,12 @@ def auto(doc, cad=None, flip=False) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("stairs.clean_well_holes")
+    try:             # 3.64.77: the landing where a stair arrives upstairs
+        from . import project as PJ_
+        PJ_.stair_arrival_slabs(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("stairs.arrival_slabs")
     return {"stairs": made, "cuts": cut, "traced": traced_n}
 
 

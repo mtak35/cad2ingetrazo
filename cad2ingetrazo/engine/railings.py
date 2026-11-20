@@ -19,7 +19,9 @@ TYPES = [("solid", "Solid parapet (masonry, plastered)"),
          ("glass_post", "Glass panels between steel posts"),
          ("pipe", "Steel pipe rails (horizontal)"),
          ("wood", "Timber handrail on timber balusters"),
-         ("wall_rail", "Low wall + steel railing over it")]
+         ("wall_rail", "Low wall + steel railing over it"),
+         ("baluster", "Stone balustrade — turned balusters, newel posts, "
+                      "coping")]
 LABEL = dict(TYPES)
 
 SS = (0.78, 0.79, 0.80, 1.0)          # stainless steel
@@ -27,6 +29,7 @@ MS = (0.17, 0.18, 0.20, 1.0)          # mild steel, painted dark
 GLASS = (0.66, 0.82, 0.90, 0.35)
 TIMBER = (0.55, 0.38, 0.22, 1.0)
 MASONRY = (0.88, 0.86, 0.82, 1.0)
+STONE = (0.93, 0.91, 0.86, 1.0)       # a cast-stone balustrade
 
 
 def _bar(p, q, w, h, color):
@@ -108,6 +111,71 @@ def _run_on(pts, ea, eb):
     return pts
 
 
+#: a turned baluster's profile (radius, fraction of its height): foot block,
+#: neck, bulb, ring, neck, collar — as the white stone ones of a terrace
+_BAL = [(0.62, 0.0), (0.62, 0.05), (0.36, 0.07), (0.30, 0.12), (0.52, 0.28),
+        (0.56, 0.38), (0.30, 0.52), (0.36, 0.58), (0.30, 0.64),
+        (0.40, 0.86), (0.62, 0.90), (0.62, 1.0)]
+
+
+def _lathe(x, y, z0, h, r, prof, color, n=8):
+    """A turned solid at (x, y): ``prof`` = [(radius factor, height
+    fraction)], ``r`` the full radius, ``n`` sides."""
+    rings = []
+    for f, g in prof:
+        rr = r * f
+        rings.append([(x + rr * math.cos(2 * math.pi * (k + 0.5) / n),
+                       y + rr * math.sin(2 * math.pi * (k + 0.5) / n),
+                       z0 + h * g) for k in range(n)])
+    out = []
+    for a, b in zip(rings, rings[1:]):
+        for k in range(n):
+            k2 = (k + 1) % n
+            out.append({"loop": [a[k], a[k2], b[k2], b[k]], "holes": [],
+                        "color": color})
+    out.append({"loop": rings[-1][::1], "holes": [], "color": color})
+    out.append({"loop": rings[0][::-1], "holes": [], "color": color})
+    return out
+
+
+def _baluster_rail(pts, H, t, gap, run_on):
+    """The stone balustrade along ``pts``: a plinth rail, turned balusters
+    every ``gap`` (the type's 0.20 m), a heavy coping on top, a newel post
+    (with its cap and finial) at the corners, the ends and every 2.4 m."""
+    out = []
+    segs = list(zip(pts, pts[1:]))
+    rail_h = 0.12
+    cop_h = 0.09
+    bal_h = max(H - rail_h - cop_h, 0.2)
+    bw = 0.075                     # a baluster's radius
+    for p, q in segs:
+        out += _panel(p, q, 0.0, rail_h, 0.17, STONE)
+        out += _panel(p, q, H - cop_h, H, 0.22, STONE)
+        out += _panel(p, q, H - cop_h - 0.03, H - cop_h, 0.18, STONE)
+        for s in _stations(p, q, max(gap or 0.0, 0.17) if gap else 0.19)[1:-1]:
+            out += _lathe(s[0], s[1], s[2] + rail_h, bal_h, bw, _BAL, STONE)
+    # newel posts
+    posts = []
+    for p, q in segs:
+        for s in _stations(p, q, 2.4):
+            if not posts or math.hypot(s[0] - posts[-1][0],
+                                       s[1] - posts[-1][1]) > 0.05:
+                posts.append(s)
+    for s in posts:
+        a = 0.13
+        out += _box_xy([(s[0] - a, s[1] - a), (s[0] + a, s[1] - a),
+                        (s[0] + a, s[1] + a), (s[0] - a, s[1] + a)],
+                       s[2], s[2] + H + 0.05, STONE)
+        c = 0.18
+        out += _box_xy([(s[0] - c, s[1] - c), (s[0] + c, s[1] - c),
+                        (s[0] + c, s[1] + c), (s[0] - c, s[1] + c)],
+                       s[2] + H + 0.05, s[2] + H + 0.12, STONE)
+        out += _lathe(s[0], s[1], s[2] + H + 0.12, 0.34, 0.14,
+                      [(0.5, 0.0), (0.9, 0.15), (1.0, 0.4), (0.8, 0.7),
+                       (0.4, 0.92), (0.2, 1.0)], STONE)
+    return out
+
+
 def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
           floor=None, no_post=(False, False), run_on=(0.0, 0.0)) -> list:
     """The railing along ``path`` ([(x, y, z)…]) — see the module doc.
@@ -130,6 +198,8 @@ def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
             out += _panel(p, q, 0.0, H - 0.05, t, MASONRY)
             out += _panel(p, q, H - 0.05, H, t + 0.05, MASONRY)
         return out
+    if kind == "baluster":
+        return _baluster_rail(pts, H, t, gap, run_on)
     if kind == "wall_rail":                     # 2'-0" wall, steel above
         wall = min(0.6, H * 0.6)
         for p, q in segs:
