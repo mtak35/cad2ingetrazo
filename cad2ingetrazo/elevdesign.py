@@ -19,7 +19,18 @@ from . import lookstyle as LS
 ROOFS = [("asdrawn", "As drawn (flat roof, parapets)"),
          ("hip", "Tiled hip roofs over every block"),
          ("gable", "Tiled gable roofs over every block (steep: Tudor, "
-          "Cape Cod)")]
+          "Cape Cod)"),
+         ("pyramid", "Pyramid roofs (the hips meet at one point)"),
+         ("dutch", "Dutch gable (hip with a gablet on top)"),
+         ("jerkinhead", "Jerkinhead (clipped gable ends)"),
+         ("gambrel", "Gambrel (barn roof)"),
+         ("saltbox", "Saltbox (long and short slopes)"),
+         ("butterfly", "Butterfly (V, valley in the middle)"),
+         ("shed", "Shed / mono-pitch"),
+         ("bonnet", "Bonnet (flared eaves)"),
+         ("m_roof", "M roof (twin gables, valley between)"),
+         ("arched", "Arched (barrel vault)"),
+         ("clerestory", "Clerestory (raised centre between lower slopes)")]
 HEADS = [("asdrawn", "As drawn"), ("arch", "Arched (semicircle)"),
          ("flat", "Flat")]
 FRAMES = [("asdrawn", "As drawn"), ("upvc", "uPVC, white"),
@@ -300,7 +311,7 @@ class ElevationDesigner(QDialog):
             ch.setEnabled(ok)
             ch.setToolTip("" if ok else "Not part of this style — tick "
                           "«Show every element» to use it anyway")
-        tiled = self.roof.currentData() in ("hip", "gable")
+        tiled = self.roof.currentData() in LS.PITCHED
         for w in (self.slope, self.eave, self.annex):
             w.setEnabled(tiled or unlock)
         flat = self.roof.currentData() == "asdrawn"

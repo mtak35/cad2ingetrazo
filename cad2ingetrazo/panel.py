@@ -318,7 +318,10 @@ FIELDS = {
               tuple(k_ for k_, _l, _c in _CE_COLOURS)),
              ("ceil_led", "Cove / panel light", "choice",
               tuple(k_ for k_, _l, _c in _CE_LEDS))],
-    "roof": [("kind", "Type", "choice", ("flat", "gable", "hip")),
+    "roof": [("kind", "Type", "choice",
+              ("flat", "gable", "hip", "pyramid", "dutch", "jerkinhead",
+               "gambrel", "saltbox", "butterfly", "shed", "bonnet",
+               "m_roof", "arched", "clerestory")),
              ("slope", "Slope", "deg", (5.0, 75.0)),
              ("overhang", "Overhang", "len", (0.0, 3.0)),
              ("t", "Thickness", "len", (0.02, 1.0)),
@@ -5000,8 +5003,12 @@ class Panel(QWidget):
         box, body = _fold("8  Roof", "roof", False)
         f = _form(body)
         self.r_kind = QComboBox()
-        for k, label in (("hip", "Hip"), ("gable", "Gable"),
-                         ("flat", "Flat with parapet"), ("none", "No roof")):
+        from .engine import structure as _S4
+        for k, label in [(k_, _S4.ROOF_LABELS[k_]) for k_ in (
+                "hip", "gable", "pyramid", "dutch", "jerkinhead", "gambrel",
+                "saltbox", "butterfly", "shed", "bonnet", "m_roof",
+                "arched", "clerestory")] + [("flat", "Flat with parapet"),
+                                            ("none", "No roof")]:
             self.r_kind.addItem(label, k)
         f.addRow("Type", self.r_kind)
         self.r_slope = _spin(5, 75, 25, 1, 1, " °")

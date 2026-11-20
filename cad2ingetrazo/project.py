@@ -12870,7 +12870,85 @@ def platform_parts(doc) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.platform_parts walkways")
+    try:                      # 3.64.79: the porch / lobby as their labels
+        _split_label_zones(doc, out, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.platform_parts label zones")
     return out
+
+
+def _zone_dims(text):
+    """(a, b) metres of a CAD label's size «25'-9"x15'-0"» (feet-inches),
+    or None."""
+    t = str(text or "").replace("\u2019", "'").replace("\u201d", '"')
+    m = re.search(r"(\d+)\s*'\s*-?\s*(\d+(?:\s+\d+/\d+)?)?\s*\"?\s*[xX\u00d7]\s*"
+                  r"(\d+)\s*'\s*-?\s*(\d+(?:\s+\d+/\d+)?)?", t)
+    if not m:
+        return None
+
+    def inch(v):
+        if not v:
+            return 0.0
+        a = v.split()
+        x = float(a[0])
+        if len(a) > 1 and "/" in a[1]:
+            n_, d_ = a[1].split("/")
+            x += float(n_) / float(d_)
+        return x
+    a = (int(m.group(1)) * 12 + inch(m.group(2))) * 0.0254
+    b = (int(m.group(3)) * 12 + inch(m.group(4))) * 0.0254
+    return (a, b) if a > 0.5 and b > 0.5 else None
+
+
+def _split_label_zones(doc, out, lid) -> None:
+    """3.64.79: the car porch and the entrance lobby are the areas their CAD
+    labels give («CAR PORCH 25'-9"x15'-0"», «ENTRANCE LOBBY 10'-0"x…» — a
+    rectangle round the words): the platform piece they stand on is cut
+    there, so each finish (right-click «Outside floor finish») goes on its
+    own area — not on the whole forecourt, and the lobby not left out."""
+    from shapely import affinity
+    from shapely.geometry import Point, box
+
+    from . import areas as AR_
+    zones = []                          # [(category, rectangle)]
+    for t in doc.get("texts") or []:
+        if t.get("level") != lid:
+            continue
+        first = str(t.get("text", "")).split("\n")[0].strip()
+        kd = AR_.kind_of(first)
+        if not kd or kd[0] not in ("porch", "entrance") or \
+                "FOYER" in first.upper():
+            continue
+        dm = _zone_dims(t.get("text"))
+        if not dm:
+            continue
+        r = box(-dm[0] / 2, -dm[1] / 2, dm[0] / 2, dm[1] / 2)
+        r = affinity.rotate(r, float(t.get("rot", 0.0) or 0.0), origin=(0, 0))
+        r = affinity.translate(r, t["x"], t["y"])
+        zones.append(("landings" if kd[0] == "entrance" else "porch", r))
+    zones.sort(key=lambda z: z[0] != "landings")      # the lobby first
+    for cat, rect in zones:
+        new = []
+        hit = False
+        for g, top in out["pieces"]:
+            inter = g.intersection(rect)
+            if inter.is_empty or inter.area < 0.3:
+                new.append((g, top))
+                continue
+            hit = True
+            for lst in ("porch", "landings", "veranda"):
+                out[lst] = [q for q in out.get(lst) or [] if q is not g]
+            for q in getattr(inter, "geoms", [inter]):
+                if q.geom_type == "Polygon" and q.area >= 0.05:
+                    new.append((q, top))
+                    out.setdefault(cat, []).append(q)
+            rest = g.difference(rect)
+            for q in getattr(rest, "geoms", [rest]):
+                if q.geom_type == "Polygon" and q.area >= 0.05:
+                    new.append((q, top))
+        if hit:
+            out["pieces"] = new
 
 
 def walk_top(doc) -> float:
@@ -15207,14 +15285,19 @@ def commit(viewport, doc, opts=None) -> None:
         from .host import log_error
         log_error("project.annex_roofs")
     lk_ = doc.get("look") or {}
+    from . import lookstyle as _LSP
+    LS_P_ = _LSP.PITCHED
     if lk_.get("style") == "mediterranean" or (
-            lk_.get("roof") in ("hip", "gable") and lk_.get("annex_roof")):
+            lk_.get("roof") in LS_P_ and lk_.get("annex_roof")):
         try:                   # 3.64.47: the annexes under tiles too
             from . import lookstyle as LS_
             LS_.annex_roofs(doc, float(lk_.get("roof_slope", LS_.SLOPE)),
                             float(lk_.get("roof_eave", LS_.EAVE)) * 0.75,
                             kind=lk_.get("roof") if lk_.get("roof") in (
-                                "hip", "gable") else "hip")
+                                "hip", "gable", "pyramid", "dutch",
+                                "jerkinhead", "gambrel", "saltbox",
+                                "butterfly", "shed", "bonnet", "m_roof",
+                                "arched", "clerestory") else "hip")
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.look annex_roofs")

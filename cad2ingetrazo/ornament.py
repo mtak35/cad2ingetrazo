@@ -28,7 +28,7 @@ PLINTH_H = 0.45
 PLINTH_D = 0.05
 QUOIN_H = 0.30
 QUOIN_W = (0.45, 0.28)
-QUOIN_D = 0.04
+QUOIN_D = 0.035
 SURR_W = 0.12          # a window's architrave
 SURR_D = 0.05
 SILL_H = 0.08
@@ -167,7 +167,7 @@ def _quoins(poly, z0, z1, col) -> list:
     ring = poly.buffer(QUOIN_D, join_style=2, mitre_limit=3.0).difference(
         poly)
     out = []
-    big = 1.0
+    big = 1.5 * QUOIN_D          # the strips hold the ring's corner only
     for b, u1, u2 in _corners(poly):
         def strip(u, a0, a1):
             n = (-u[1], u[0])
@@ -175,10 +175,10 @@ def _quoins(poly, z0, z1, col) -> list:
                          b[1] + u[1] * a0 - n[1] * big),
                         (b[0] + u[0] * a1 - n[0] * big,
                          b[1] + u[1] * a1 - n[1] * big),
-                        (b[0] + u[0] * a1 + n[0] * big,
-                         b[1] + u[1] * a1 + n[1] * big),
-                        (b[0] + u[0] * a0 + n[0] * big,
-                         b[1] + u[1] * a0 + n[1] * big)])
+                        (b[0] + u[0] * a1 + n[0] * 0.01,
+                         b[1] + u[1] * a1 + n[1] * 0.01),
+                        (b[0] + u[0] * a0 + n[0] * 0.01,
+                         b[1] + u[1] * a0 + n[1] * 0.01)])
         k, z = 0, z0 + 0.05
         shapes = {}
         while z + QUOIN_H <= z1 - 0.05:

@@ -466,7 +466,7 @@ def why_not(e: dict) -> str | None:
         elif t == "roof":
             if len(e["corners"]) < 3 or abs(_area(e["corners"])) < 1.0:
                 return "Too small for a roof"
-            if e.get("kind") in ("gable", "hip") and not \
+            if e.get("kind") not in ("flat", None) and not \
                     5.0 <= float(e["slope"]) <= 75.0:
                 return "A pitched roof needs a slope of 5° to 75°"
         else:
@@ -2034,6 +2034,19 @@ def lift_door(dr: dict, z0: float, top: float) -> list:
 #:   "slope" (°), "overhang", "t" (thickness), "ridge": "long" | "short"
 #:   (a gable's), "parapet" (m over a flat roof, 0 = none), "pt" (its
 #:   thickness)} — it rests on the top of its level's walls.
+#: 3.64.80: the roof forms — gable / hip / flat and the others (a pitched
+#: one is a rectangle, its ridge along the longer side)
+ROOF_KINDS = ("gable", "hip", "flat", "pyramid", "dutch", "jerkinhead",
+              "gambrel", "saltbox", "butterfly", "shed", "bonnet", "m_roof",
+              "arched", "clerestory")
+ROOF_LABELS = {"flat": "Flat (parapet)", "gable": "Gable", "hip": "Hip",
+               "pyramid": "Pyramid", "dutch": "Dutch gable",
+               "jerkinhead": "Jerkinhead (clipped gable)",
+               "gambrel": "Gambrel (barn)", "saltbox": "Saltbox",
+               "butterfly": "Butterfly", "shed": "Shed (mono-pitch)",
+               "bonnet": "Bonnet", "m_roof": "M roof (twin gables)",
+               "arched": "Arched (barrel vault)",
+               "clerestory": "Clerestory"}
 ROOF_COLOR = (0.66, 0.36, 0.27, 1.0)       # tiles
 FLAT_COLOR = (0.72, 0.73, 0.74, 1.0)       # a flat roof (concrete)
 GABLE_COLOR = (0.88, 0.86, 0.82, 1.0)      # the gable walls (as walls)
@@ -2144,6 +2157,11 @@ def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
             faces += _faces(W.solid(ring, base + t, base + t + ph),
                             GABLE_COLOR)
         return faces
+    if kind == "pyramid":
+        r = dict(r, kind="hip", apex=True)
+        kind = "hip"
+    elif kind not in ("gable", "hip"):
+        return _roof_extra(r, base, kind, wall_t)
     (cx, cy), u0, ha, v0, hb = rect_frame(r["corners"])
     # x along the ridge (the longer side; a gable may be asked the other
     # way), y across, z up — a right-handed frame
@@ -2223,6 +2241,115 @@ def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
         faces.append({"loop": [P(p[0], p[1], ze), P(q[0], q[1], ze),
                                P(q[0], q[1], ze + dz), P(p[0], p[1], ze + dz)],
                       "holes": [], "color": ROOF_COLOR})
+    return faces
+
+
+def _roof_extra(r, base, kind, wall_t):
+    """3.64.80: the other roof forms (Dutch gable, jerkinhead, gambrel,
+    saltbox, butterfly, shed, bonnet, M, arched, clerestory) over the
+    rectangle ``r["corners"]``: the ridge along the longer side."""
+    (cx, cy), u0, ha, v0, hb = rect_frame(r["corners"])
+    along = ha >= hb
+    ux, A, B = (u0, ha, hb) if along else (v0, hb, ha)
+    uy = (-ux[1], ux[0])
+    o = float(r.get("overhang", 0.0))
+    t = float(r.get("t", 0.20))
+    ang = math.radians(float(r.get("slope", 30.0)))
+    tan, dz = math.tan(ang), t / math.cos(ang)
+
+    def P(x, y, z):
+        return (cx + ux[0] * x + uy[0] * y, cy + ux[1] * x + uy[1] * y, z)
+    faces = []
+
+    def dbl(loop):                       # a roof plane: top and underside
+        faces.append({"loop": [P(x, y, z + dz) for x, y, z in loop],
+                      "holes": [], "color": ROOF_COLOR})
+        faces.append({"loop": [P(x, y, z) for x, y, z in reversed(loop)],
+                      "holes": [], "color": ROOF_COLOR})
+
+    def both(loop):                      # a vertical face, both ways
+        faces.append({"loop": [P(*q) for q in loop], "holes": [],
+                      "color": ROOF_COLOR})
+        faces.append({"loop": [P(*q) for q in reversed(loop)], "holes": [],
+                      "color": ROOF_COLOR})
+    Ao, Bo = A + o, B + o
+    ze, zr = base - o * tan, base + B * tan
+    if kind == "dutch":
+        f = 0.62
+        z1 = ze + f * (zr - ze)
+        y1 = Bo * (1 - f)
+        x1 = Ao - (Bo - y1)
+        for loop in (
+                [(-Ao, -Bo, ze), (Ao, -Bo, ze), (x1, -y1, z1), (-x1, -y1, z1)],
+                [(Ao, Bo, ze), (-Ao, Bo, ze), (-x1, y1, z1), (x1, y1, z1)],
+                [(Ao, -Bo, ze), (Ao, Bo, ze), (x1, y1, z1), (x1, -y1, z1)],
+                [(-Ao, Bo, ze), (-Ao, -Bo, ze), (-x1, -y1, z1),
+                 (-x1, y1, z1)]):
+            dbl(loop)
+        # the gablet on top: its ridge along x, an end triangle each side
+        dbl([(-x1, -y1, z1), (x1, -y1, z1), (x1, 0, zr), (-x1, 0, zr)])
+        dbl([(x1, y1, z1), (-x1, y1, z1), (-x1, 0, zr), (x1, 0, zr)])
+        for sg in (1, -1):
+            both([(sg * x1, -y1, z1), (sg * x1, y1, z1), (sg * x1, 0, zr)])
+        return faces
+    if kind == "jerkinhead":
+        f, d = 0.62, 0.35 * Bo
+        zc = ze + f * (zr - ze)
+        yc = Bo * (1 - f)
+        dbl([(-Ao, -Bo, ze), (Ao, -Bo, ze), (Ao, -yc, zc), (Ao - d, 0, zr),
+             (-Ao + d, 0, zr), (-Ao, -yc, zc)])
+        dbl([(Ao, Bo, ze), (-Ao, Bo, ze), (-Ao, yc, zc), (-Ao + d, 0, zr),
+             (Ao - d, 0, zr), (Ao, yc, zc)])
+        dbl([(Ao, -yc, zc), (Ao, yc, zc), (Ao - d, 0, zr)])
+        dbl([(-Ao, yc, zc), (-Ao, -yc, zc), (-Ao + d, 0, zr)])
+        for sg in (1, -1):
+            both([(sg * Ao, -Bo, ze), (sg * Ao, Bo, ze), (sg * Ao, yc, zc),
+                  (sg * Ao, -yc, zc)])
+        return faces
+    # the sweep forms: a profile across (y / B, z / R), swept along x
+    R = B * tan
+    prof = {
+        "gambrel": ([(-1, 0), (-0.55, 0.66), (0, 1.0), (0.55, 0.66),
+                     (1, 0)], 1.1),
+        "saltbox": ([(-1, 0), (-0.35, 1.0), (1, 0)], 1.15),
+        "butterfly": ([(-1, 0.7), (0, 0), (1, 0.7)], 1.0),
+        "shed": ([(-1, 0), (1, 2.0)], 0.6),
+        "bonnet": ([(-1, 0), (-0.7, 0.18), (0, 1.0), (0.7, 0.18), (1, 0)],
+                   1.1),
+        "m_roof": ([(-1, 0), (-0.5, 1.0), (0, 0), (0.5, 1.0), (1, 0)], 0.5),
+        "arched": ([(k / 8.0 - 1.0, 0.62 * math.cos(math.pi * (k / 16.0
+                                                              - 0.5)))
+                    for k in range(17)], 1.0),
+        "clerestory": ([(-1, 0), (-0.5, 0.55), (-0.5, 0.9), (0, 1.25),
+                        (0.5, 0.9), (0.5, 0.55), (1, 0)], 0.9),
+    }.get(kind)
+    if prof is None:
+        return []
+    pts, mult = prof
+    if kind == "arched":
+        R = B
+    top = [(y * B, base + z * R * mult) for y, z in pts]
+    # the eaves run on past the walls by the overhang along the end slopes
+    (y0, z0), (y1, z1) = top[0], top[1]
+    s0 = (z1 - z0) / (y1 - y0) if abs(y1 - y0) > 1e-9 else 0.0
+    (ya, za), (yb, zb) = top[-2], top[-1]
+    s1 = (zb - za) / (yb - ya) if abs(yb - ya) > 1e-9 else 0.0
+    top = [(y0 - o, z0 - s0 * o)] + top + [(yb + o, zb + s1 * o)]
+    top = [(y, max(z, base - 0.4)) for y, z in top]
+    under = [(y, z - dz) for y, z in top]
+    X = A + o
+    section = under + list(reversed(top))
+    faces += _sweep(section, -X, X, P, ROOF_COLOR)
+    # the end walls: from the floor to the roof's underside
+    d = 0.002
+    wl = [(y, max(z - d, base + 0.002)) for y, z in under if -B - 1e-6 <=
+          y <= B + 1e-6]
+    if len(wl) >= 2:
+        tri = [(-B, base - 0.001), (B, base - 0.001)] + \
+            list(reversed(wl))
+        for sg, x0_, x1_ in ((1, A - wall_t + 0.001, A - 0.001),
+                             (-1, -A + 0.001, -A + wall_t - 0.001)):
+            faces += _sweep(tri, x0_, x1_, P, GABLE_COLOR)
     return faces
 
 

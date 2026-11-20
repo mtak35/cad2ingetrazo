@@ -596,8 +596,9 @@ def _structure(raw, level_ids: set) -> list[dict]:
                 cs = [_pt(p) for p in e["corners"]]
                 if len(cs) < 3:
                     continue
-                kind = e.get("kind") if e.get("kind") in (
-                    "gable", "hip", "flat") else "flat"
+                from . import structure as _S3
+                kind = e.get("kind") if e.get("kind") in \
+                    _S3.ROOF_KINDS else "flat"
                 if kind != "flat" and len(cs) != 4:
                     kind = "flat"           # a pitched roof: a rectangle
                 rec.update(kind=kind, corners=cs,

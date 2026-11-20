@@ -33,6 +33,45 @@ HALL_H = 5.4864                     # 18'-0"
 DEFAULT_H = 3.048
 
 
+#: 3.64.80: the kinds of mosque (the look's «mosque_type»): the main dome's
+#: shape and finish, the minarets' cupola / galleries / slenderness, the
+#: arches' shape
+TYPES = {
+    "modern": dict(label="Modern", dome="hemi", dome_c="white", drum=0.12,
+                   cupola="modern", gal=1, hmul=1.0, bmul=1.0, arch="semi"),
+    "ottoman": dict(label="Ottoman (great dome, pencil minarets)",
+                    dome="saucer", dome_c="copper", drum=0.20,
+                    cupola="conical", gal=2, hmul=1.3, bmul=0.75,
+                    arch="pointed"),
+    "mughal": dict(label="Mughal (onion domes, bulbous minaret caps)",
+                   dome="onion", dome_c="white", drum=0.18,
+                   cupola="bulbous", gal=1, hmul=1.05, bmul=0.9,
+                   arch="multifoil"),
+    "persian": dict(label="Persian / Timurid (blue bulbous domes)",
+                    dome="bulbous", dome_c="blue", drum=0.28,
+                    cupola="bulbous", gal=1, hmul=1.1, bmul=0.8,
+                    arch="pointed"),
+    "mamluk": dict(label="Mamluk (ribbed dome, stepped minarets)",
+                   dome="ribbed", dome_c="stone", drum=0.22,
+                   cupola="bulbous", gal=3, hmul=1.1, bmul=1.0,
+                   arch="pointed"),
+    "moorish": dict(label="Moorish / Andalusian (horseshoe arches)",
+                    dome="hemi", dome_c="green", drum=0.10,
+                    cupola="modern", gal=0, hmul=0.9, bmul=1.15,
+                    arch="horseshoe"),
+    "arabian": dict(label="Arabian / Najdi (shallow domes, plain)",
+                    dome="saucer", dome_c="white", drum=0.10,
+                    cupola="conical", gal=1, hmul=1.0, bmul=0.9,
+                    arch="semi"),
+}
+
+
+def kind_of(doc) -> dict:
+    """The mosque kind the look asks for (the modern one by default)."""
+    t = (doc.get("look") or {}).get("mosque_type") or "modern"
+    return TYPES.get(t, TYPES["modern"])
+
+
 def is_mosque(doc) -> bool:
     n = sum(1 for t in doc.get("texts") or []
             if MOSQUE_RX.search(str(t.get("text", ""))))
@@ -82,12 +121,19 @@ def sync_domes(doc) -> int:
             x, y, d = c
             did = f"cad-{lid}-{round(x, 1)}-{round(y, 1)}"
             main = d >= 0.75 * big and d >= 4.0
+            mk = kind_of(doc)
             rec = {"id": did, "level": lid, "x": x, "y": y, "d": d,
-                   "kind": "hemi", "rise": 0.0,
-                   "drum": round(0.12 * d, 3) if main else 0.0,
-                   "finial": True, "color": "white"}
+                   "kind": mk["dome"] if main else (
+                       "hemi" if mk["dome"] == "saucer" else mk["dome"]),
+                   "rise": 0.0,
+                   "drum": round(mk["drum"] * d, 3) if main else 0.0,
+                   "finial": True, "color": mk["dome_c"],
+                   "mtype": (doc.get("look") or {}).get("mosque_type")
+                   or "modern"}
             o = old.get(did)
-            if o:                         # (its finish / kind set by hand)
+            if o and o.get("mtype") == rec["mtype"]:
+                # (its finish / kind set by hand — kept while the kind of
+                # mosque stays; a new kind of mosque brings its own domes)
                 rec.update({k: o[k] for k in ("kind", "rise", "drum",
                                               "finial", "color") if k in o})
             made.append(rec)
@@ -128,6 +174,7 @@ def minarets(doc, b=1.5) -> int:
         return 0
     from . import minarets as MN
     from . import project as PJ
+    mk = kind_of(doc)
     lid, poly = hall(doc)
     if poly is None:
         return 0
@@ -178,16 +225,18 @@ def minarets(doc, b=1.5) -> int:
                     pts.append((qx, qy, side, a_))
             for x, y, side, a_ in pts:
                 rec = MN.new_minaret(doc, lid, x, y, b=min(max(side, 1.2),
-                                                           3.0),
-                                     h=H, galleries=1, cupola="modern",
+                                                           3.0) * mk["bmul"],
+                                     h=H * mk["hmul"], galleries=mk["gal"],
+                                     cupola=mk["cupola"],
                                      rot=a_ % 90.0, color="white")
                 rec["id"] = "auto-" + rec["id"]
             return len(pts)
     cores = stair_cores(doc, lid, poly)
     if len(cores) >= 2:
         for x, y, a_ in cores:
-            rec = MN.new_minaret(doc, lid, x, y, b=b, h=H, galleries=1,
-                                 cupola="modern", rot=a_ % 90.0,
+            rec = MN.new_minaret(doc, lid, x, y, b=b * mk["bmul"],
+                                 h=H * mk["hmul"], galleries=mk["gal"],
+                                 cupola=mk["cupola"], rot=a_ % 90.0,
                                  color="white")
             rec["id"] = "auto-" + rec["id"]
         return len(cores)
@@ -195,8 +244,10 @@ def minarets(doc, b=1.5) -> int:
         d = math.hypot(x - cx, y - cy)
         k = (d + b * 0.35) / max(d, 1e-6)
         rec = MN.new_minaret(doc, lid, cx + (x - cx) * k,
-                             cy + (y - cy) * k, b=b, h=H, galleries=1,
-                             cupola="modern", rot=ang % 90.0, color="white")
+                             cy + (y - cy) * k, b=b * mk["bmul"],
+                             h=H * mk["hmul"], galleries=mk["gal"],
+                             cupola=mk["cupola"], rot=ang % 90.0,
+                             color="white")
         rec["id"] = "auto-" + rec["id"]     # (the look's: gone with it)
     return 4
 
@@ -248,10 +299,10 @@ def arches(doc) -> int:
         if o["kind"] != "door" and float(o["w"]) >= 0.6 and \
                 o.get("grille") in (None, "", "ms"):
             o["grille"] = jali        # 3.64.67: the jali in the arches
-        if o.get("head") == "arch":
+        if o.get("head") == "arch" and o.get("arch") == kind_of(doc)["arch"]:
             continue
         o["head"] = "arch"
-        o["arch"] = "semi"
+        o["arch"] = kind_of(doc)["arch"]
         try:
             PJ.fit_head(o)
         except Exception:  # noqa: BLE001

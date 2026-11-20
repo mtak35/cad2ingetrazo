@@ -196,6 +196,12 @@ def _outline(arch, lid):
     return unary_union(shells), ws
 
 
+#: the tiled roof forms the design can put over every block
+PITCHED = ("hip", "gable", "pyramid", "dutch", "jerkinhead", "gambrel",
+           "saltbox", "butterfly", "shed", "bonnet", "m_roof", "arched",
+           "clerestory")
+
+
 def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     """Clay-tile hip roofs over the level's blocks: its outline split in
     rectangles (in the building's own frame), one hip roof each. The
@@ -262,7 +268,7 @@ KIT_DEFAULT = {
     "eave_brackets": False,
     "fascia_d": 0.30, "fascia_h": 0.55, "accent": [0.24, 0.16, 0.10],
     # 3.64.66: a mosque's own elements (mosque.py)
-    "mosque": False,
+    "mosque": False, "mosque_type": "modern",
     # 3.64.75: more window / facade detail (stylekit.py)
     "brise_soleil": False, "sills_lintels": False, "jali": False,
     "pilasters": False,
@@ -481,9 +487,74 @@ PRESETS = {
         "wall": [0.95, 0.94, 0.91], "trim": [0.97, 0.96, 0.93],
         "stone": [0.88, 0.86, 0.82], "metal": [0.20, 0.20, 0.22],
         "accent": [0.30, 0.31, 0.33], "gate_color": "charcoal"}),
+    "mosque_ottoman": ("Mosque — Ottoman (grey lead dome, pencil minarets, pointed arches)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "wood", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "ottoman",
+        "wall": [0.93, 0.9, 0.84], "trim": [0.97, 0.95, 0.9],
+        "stone": [0.8, 0.76, 0.68], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.36, 0.62, 0.55], "gate_color": "black"}),
+    "mosque_mughal": ("Mosque — Mughal (red sandstone and white, onion domes)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "wood", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "mughal",
+        "wall": [0.72, 0.34, 0.24], "trim": [0.96, 0.94, 0.88],
+        "stone": [0.9, 0.86, 0.76], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.86, 0.69, 0.25], "gate_color": "black"}),
+    "mosque_persian": ("Mosque — Persian / Timurid (blue bulbous domes, tile panels)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "aluminium", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "persian",
+        "wall": [0.9, 0.86, 0.76], "trim": [0.2, 0.44, 0.62],
+        "stone": [0.82, 0.74, 0.58], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.15, 0.42, 0.66], "gate_color": "charcoal"}),
+    "mosque_mamluk": ("Mosque — Mamluk (stone, ribbed dome, stepped minarets)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "wood", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "mamluk",
+        "wall": [0.84, 0.76, 0.62], "trim": [0.92, 0.88, 0.78],
+        "stone": [0.7, 0.62, 0.5], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.55, 0.3, 0.22], "gate_color": "black"}),
+    "mosque_moorish": ("Mosque — Moorish / Andalusian (horseshoe arches, green accents)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "wood", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "moorish",
+        "wall": [0.96, 0.93, 0.86], "trim": [0.18, 0.52, 0.36],
+        "stone": [0.8, 0.7, 0.55], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.18, 0.52, 0.36], "gate_color": "green"}),
+    "mosque_arabian": ("Mosque — Arabian / Najdi (plain, shallow domes)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "aluminium", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "arabian",
+        "wall": [0.9, 0.82, 0.68], "trim": [0.95, 0.9, 0.8],
+        "stone": [0.78, 0.68, 0.52], "metal": [0.20, 0.20, 0.22],
+        "accent": [0.55, 0.42, 0.3], "gate_color": "brown"}),
 }
 #: a line on what each style is, under the designer's choice
 STYLE_NOTES = {
+    "mosque_ottoman": "A great saucer dome, pencil minarets with two "
+                      "galleries and conical caps, pointed arches.",
+    "mosque_mughal": "Red sandstone with white marble trim, onion domes, "
+                     "bulbous minaret caps, multifoil arches.",
+    "mosque_persian": "Blue bulbous domes, tiled trims, pointed arches.",
+    "mosque_mamluk": "Stone walls, a ribbed dome, minarets with three "
+                     "galleries, pointed arches.",
+    "mosque_moorish": "Horseshoe arches, green tile trims, a plain square "
+                      "minaret.",
+    "mosque_arabian": "Plain walls in sand colours, shallow domes, round "
+                      "arches.",
     "royal": "A palace front: cream stone, gold trim, Corinthian columns "
              "and a pediment, pilasters, quoins and corbels, a cornice, "
              "stone balustrades on every balcony and terrace.",
@@ -608,8 +679,10 @@ def apply_kit(doc, kit) -> dict:
     and positions stay): roofs, windows, doors, railings, columns,
     colours; its mouldings are drawn at every rebuild (ornament.py)."""
     k = dict(KIT_DEFAULT, **(kit or {}))
-    if k.get("style") == "mosque":    # 3.64.72: a hand design saved by the
-        k["mosque"] = True            # dialog lost it (no field for it)
+    if str(k.get("style", "")).startswith("mosque"):   # 3.64.72: a hand
+        k["mosque"] = True            # design saved by the dialog lost it
+        k["mosque_type"] = {"mosque": "modern"}.get(
+            k["style"], str(k["style"])[7:] or "modern")
     if isinstance(k.get("roof"), list):      # a look saved by 3.64.49/50:
         k["roof_c"], k["roof"] = k["roof"], "hip"     # «roof» its colour
     arch = doc["arch"]
@@ -630,7 +703,7 @@ def apply_kit(doc, kit) -> dict:
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
     # 1. the roofs
     arch["structure"] = [e for e in arch["structure"] if not is_look_roof(e)]
-    if k["roof"] in ("hip", "gable"):
+    if k["roof"] in PITCHED:
         mats["roof"] = {"name": "Roof tiles, as designed",
                         "color": list(k["roof_c"])}
         rep["colours"] += ", roof tiles"
@@ -1012,6 +1085,8 @@ def relevant(style, key) -> bool:
     out)? What the style's own preset switches on always is."""
     if key not in ELEMENT_STYLES:
         return True
+    if str(style).startswith("mosque"):
+        style = "mosque"
     if style in (None, "", "auto", "custom"):
         return True
     if style in ELEMENT_STYLES[key]:

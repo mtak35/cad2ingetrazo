@@ -280,7 +280,8 @@ def load(raw) -> list:
                         "z_off": min(max(float(d.get("z_off") or 0.0),
                                          -20.0), 40.0),
                         "color": d.get("color") if d.get("color") in COLOR
-                        else "white"})
+                        else "white",
+                        "mtype": str(d.get("mtype") or "")[:16]})
         except (KeyError, TypeError, ValueError):
             continue
     return out
