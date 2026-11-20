@@ -184,8 +184,11 @@ def _outline(arch, lid):
                                                      "roof edge"))]
     if len(ws) < 3:
         return None, ws
+    # 3.64.79: SQUARE caps — flat ones left the outside corner square of
+    # every wall junction out (the bands, quoins and cornice lost the
+    # corner: cut short inside the walls)
     body = unary_union([LineString([w["a"][:2], w["b"][:2]]).buffer(
-        float(w["t"]) / 2 + 0.02, cap_style=2) for w in ws])
+        float(w["t"]) / 2 + 0.02, cap_style=3) for w in ws])
     shells = [Polygon(p.exterior) for p in getattr(body, "geoms", [body])
               if p.geom_type == "Polygon" and p.area > 4.0]
     if not shells:
