@@ -8102,7 +8102,22 @@ class Panel(QWidget):
                                      self._paint_faces(w_, k, b_, rids_))
         who = (f"the {len(rids_)} selected room(s)" if rids_
                else "every room")
-        mi = menu.addMenu(f"CAD2IngeTrazo · Room inside — paint / wallpaper "
+        what_ = "Room inside"
+        try:                  # 3.64.77: a terrace / porch / lobby / verandah
+            from . import areas as AR_      # is called what it is
+            labs_ = set()
+            doc_ = getattr(self, "_doc_memo", None) or self.doc()
+            for rid_ in rids_:
+                rc_ = PJ.find_record(doc_, "room", rid_) or {}
+                kd_ = AR_.kind_of(rc_.get("name"))
+                labs_.add(kd_[1] if kd_ else "")
+            if rids_ and len(labs_) == 1 and "" not in labs_:
+                what_ = next(iter(labs_)) + " inside"
+                who = (f"the {len(rids_)} selected" if len(rids_) > 1
+                       else "the selected one")
+        except Exception:  # noqa: BLE001
+            pass
+        mi = menu.addMenu(f"CAD2IngeTrazo · {what_} — paint / wallpaper "
                           f"({who})")
         for band, blab, _z0, _z1 in FN.BANDS:
             mb = mi.addMenu(blab)
@@ -8124,6 +8139,42 @@ class Panel(QWidget):
         me.addSeparator()
         me.addAction("Take the finishes off the elevations",
                      lambda: self._paint_faces("out", None, None, rids_))
+
+    def _elements_menu(self, menu) -> None:
+        """3.64.77: every elevation design element on / off straight from
+        the right-click menu (checked = drawn), no dialog."""
+        from . import elevdesign as ED
+        from . import lookstyle as LS
+        doc = getattr(self, "_doc_memo", None) or self.doc()
+        look = doc.get("look") or {}
+        if not look:
+            return
+        sub = menu.addMenu("CAD2IngeTrazo · Elevation elements (on / off)")
+        for grp, items in ED.CHECKS:
+            mg = sub.addMenu(grp)
+            for key_, lab_ in items:
+                on_ = bool(look.get(key_, LS.KIT_DEFAULT.get(key_, False)))
+                act = mg.addAction(lab_)
+                act.setCheckable(True)
+                act.setChecked(on_)
+                act.triggered.connect(
+                    lambda _c=False, k_=key_, v_=not on_, l_=lab_:
+                    self._toggle_element(k_, v_, l_))
+
+    def _toggle_element(self, key, value, label) -> None:
+        from . import lookstyle as LS
+        doc = self.doc()
+        kit = dict(doc.get("look") or {})
+        kit[key] = value
+        try:
+            LS.apply_kit(doc, kit)
+            doc["look"]["manual"] = True
+        except Exception:  # noqa: BLE001
+            log_error("panel.toggle_element")
+            self.flash("Could not change that element", 6000)
+            return
+        self.commit(doc, f"{label}: {'on' if value else 'off'}")
+        self.flash(f"{label}: {'on' if value else 'off'}", 5000)
 
     def _outside_menu(self, menu) -> None:
         """3.64.35 (his ask): right-click on the ground outside — the car
@@ -8424,6 +8475,10 @@ class Panel(QWidget):
             self._outside_menu(menu)
         except Exception:  # noqa: BLE001
             log_error("panel.context_menu outside")
+        try:            # 3.64.77: elevation elements on / off
+            self._elements_menu(menu)
+        except Exception:  # noqa: BLE001
+            log_error("panel.context_menu elements")
         try:            # the false ceiling's type / design, right here
             self._ceiling_menu(menu)
         except Exception:  # noqa: BLE001
@@ -8482,6 +8537,9 @@ class Panel(QWidget):
         name = rec.get("name") or {"stair": "Stair",
                                    "stairrail": "Stair railing"}.get(
             sel[0], sel[0])
+        if sel[0] in ("room", "slab", "platform"):    # 3.64.77: by what it is
+            from . import areas as AR_
+            name = AR_.title(name, name)
         menu.addSeparator()
         sub = menu.addMenu(f"CAD2IngeTrazo · {name}")
         try:                 # a slab and walls selected: the slab out to them

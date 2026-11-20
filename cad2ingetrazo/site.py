@@ -242,6 +242,7 @@ def build(corners, site, z0):
                         site.get("finish", "plaster")))
     done_ = None
     pier_sides = {}
+    pier_pts = []
     k_all = 0
     for ids_, style, fin_ in groups_:
         band_ = strip(ids_)
@@ -276,7 +277,9 @@ def build(corners, site, z0):
                 out.append((f"Boundary wall {k_all} coping", "boundary",
                             W.solid(_piece(cp), solid_top,
                                     solid_top + cap_t), CAP_COLOR))
-        if over or style in SO.PIER_STYLES:   # bars / slats / glass
+        if over or style in SO.PIER_STYLES or style in ("piers",
+                                                        "stone_piers"):
+            # bars / slats / glass — and the piers' set-out
             from .engine import railings as RL
             mid = plot.buffer(-t / 2, join_style=2)
             line = mid.exterior.intersection(band_) if not mid.is_empty \
@@ -292,6 +295,16 @@ def build(corners, site, z0):
                         "MultiLineString" else cut
                 except Exception:  # noqa: BLE001
                     pass
+                if style in ("piers", "stone_piers") + SO.PIER_STYLES:
+                    # 3.64.77: the pillars stand where the design's bays
+                    # meet — run by run, between the corners and the gate
+                    # jambs (as the panels are set out), not by the side
+                    gap0_ = float(site.get("pier_gap", 3.0))
+                    for p0_, u_, _n_, L_ in SO._runs(cut):
+                        for s0_, _s1 in SO._bays(L_, gap0_)[1:]:
+                            pier_pts.append((
+                                (p0_[0] + u_[0] * s0_, p0_[1] + u_[1] * s0_),
+                                math.degrees(math.atan2(u_[1], u_[0]))))
                 if style in SO.PIER_STYLES:     # 3.64.36: his designs
                     for nm_, fs_, col_ in SO.ornaments(
                             style, cut, z0, solid_top + cap_t, h, t,
@@ -330,22 +343,11 @@ def build(corners, site, z0):
             mid = ((b[0] + p.x) / 2, (b[1] + p.y) / 2) if p else b
             spots.append((mid, _angle(b, c)))
         if pier_sides and pil_:         # piers along the sides too
-            gap_ = float(site.get("pier_gap", 3.0))
-            for i in sorted(pier_sides):
-                b, c = corners[i], corners[(i + 1) % n]
-                L = math.dist(b, c)
-                k_ = int(L // gap_)
-                for j in range(1, k_ + (1 if L % gap_ > 0.6 else 0)):
-                    d_ = j * L / max(k_ + (1 if L % gap_ > 0.6 else 0), 1)
-                    q = (b[0] + (c[0] - b[0]) * d_ / L,
-                         b[1] + (c[1] - b[1]) * d_ / L)
-                    p = inner.exterior.interpolate(inner.exterior.project(
-                        _pt(q))) if not inner.is_empty else None
-                    m_ = ((q[0] + p.x) / 2, (q[1] + p.y) / 2) if p else q
-                    if any(Polygon(gate_box(corners, g, t)[0]).buffer(0.5)
-                           .contains(_pt(m_)) for g, _f in gates):
-                        continue
-                    spots.append((m_, _angle(b, c)))
+            for q_, ang_ in pier_pts:    # (the design's own bays)
+                if any(Polygon(gate_box(corners, g, t)[0]).buffer(0.5)
+                       .contains(_pt(q_)) for g, _f in gates):
+                    continue
+                spots.append((q_, ang_))
         n_c = len(spots)
         gi_of = {}
         for gi_, (g, (p0, p1, u, nv)) in enumerate(gates):   # the jambs

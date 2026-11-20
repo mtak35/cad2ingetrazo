@@ -54,7 +54,18 @@ def _items(scene, level_name):
                 rooms = spaces.of_level(arch, lv["id"])
             except Exception:  # noqa: BLE001
                 rooms = []
+            from . import areas as AR_
+            from shapely.geometry import Point as _Pt
             for r in rooms:
+                if r["rec"] is None:      # 3.64.77: «Room 7» → its own name
+                    for t in doc["texts"]:
+                        nm_ = t["text"].split("\n")[0].strip()
+                        if t["level"] == lv["id"] and len(nm_) <= 40 and \
+                                AR_.kind_of(nm_) and r["poly"].buffer(
+                                    1.5).contains(_Pt(t["x"], t["y"])):
+                            r = dict(r, name=nm_)
+                            used.add(nm_)
+                            break
                 # a small room gets smaller words (never over its width)
                 h = min(ROOM_H, max(0.12, math.sqrt(max(r["area"], 0.1))
                                     / 9.0))

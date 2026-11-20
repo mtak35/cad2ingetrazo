@@ -5936,6 +5936,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                           "y": room["at"][1], "name": "STAIRCASE"})
             continue
         inside = names_ or inside
+        if not inside:             # 3.64.77: an open area's word (TERRACE,
+            from . import areas as AR_      # CAR PORCH…) just outside it
+            near_ = [t for t in texts if len(t["text"]) <= 40
+                     and AR_.kind_of(t["text"].split("\n")[0])
+                     and room["poly"].buffer(1.5).contains(
+                         Point(t["x"], t["y"]))]
+            inside = near_
         if inside:
             name = max(inside, key=lambda t: t["h"])["text"].split("\n")[0]
             rrecs.append({"id": "", "level": lid, "x": room["at"][0],
@@ -11281,8 +11288,12 @@ def _finish_groups(doc):
             protos[key] = mesh
         tk = CP.type_of("room", {"finish_t": f})
         t = cat.get(tk[1])
+        from . import areas as AR_
+        kd_ = AR_.kind_of(room["name"])       # 3.64.77: its own name
         g = Group(protos[key], name=(f"{t['mark']} · " if t else "")
-                  + f"Floor finish {room['name']} · {lv['name']}")
+                  + (f"{kd_[1]} floor finish {room['name']} · "
+                     if kd_ else f"Floor finish {room['name']} · ")
+                  + lv["name"])
         g.xform = CP.placement((0.0, 0.0, z, 0.0))
         g.component = count[key] > 1
         g.material = {"color": COLOR["room"], "opacity": 1.0}
