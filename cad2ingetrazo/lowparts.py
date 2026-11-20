@@ -275,6 +275,107 @@ def analyze(doc, lid, pl, is_line) -> dict:
 # ---- building ---------------------------------------------------------------------
 JALI_STYLES = ("cnc", "cnc_square", "cnc_round", "cnc_hex", "cnc_star",
                "cnc_lattice")
+#: 3.64.78: decorated wrought-iron grilles (bars with spear heads, scrolls,
+#: rings, a frame that follows an arch) — «ms» is the scroll one
+WI_STYLES = ("ms", "wi_scroll", "wi_spear", "wi_circle")
+_WI_CACHE = {}
+
+
+def _spiral(cx, cy, r0, r1, turns, a0, sgn, n=26):
+    """A spiral of the scroll: from radius r1 (outer) in to r0, ``turns``
+    turns, starting at angle a0, turning ``sgn`` (+1 / -1)."""
+    pts = []
+    for i in range(n + 1):
+        f = i / n
+        r = r1 + (r0 - r1) * f
+        a = a0 + sgn * turns * 2 * math.pi * f
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
+
+def _wi_shape(W_, H_, style, arch_rise=0.0):
+    """The 2D shape [0, W_] × [0, H_] of a wrought-iron window grille:
+    frame, vertical bars with spear heads, a mid rail, and (by style) the
+    S-scrolls and rings in the upper zone."""
+    key = (round(W_, 2), round(H_, 2), style, round(arch_rise, 2))
+    if key in _WI_CACHE:
+        return _WI_CACHE[key]
+    from shapely.geometry import LineString, Point, Polygon, box
+    from shapely.ops import unary_union
+    bw, bar = 0.035, 0.017
+    clip = box(0, 0, W_, H_)
+    if arch_rise > 0.05:
+        rs = min(arch_rise, W_ / 2.0, H_ * 0.6)
+        spring = H_ - rs
+        top = Polygon([(W_ / 2 + (W_ / 2) * math.cos(math.pi * k / 24),
+                        spring + rs * math.sin(math.pi * k / 24))
+                       for k in range(25)])
+        clip = unary_union([box(0, 0, W_, spring), top])
+    inner = clip.buffer(-bw, join_style=2)
+    if inner.is_empty:
+        return clip
+    parts = [clip.difference(inner)]                       # the frame
+    x0, x1, y0, y1 = 0.0, W_, 0.0, H_
+    zone = 0.58 if style != "wi_spear" else 1.0     # the scroll zone starts
+    ymid = H_ * zone
+    rail = 0.022
+    nb = max(2, int(round(W_ / 0.13)))
+    gap = W_ / nb
+    for i in range(1, nb):                                  # the bars
+        x = gap * i
+        parts.append(box(x - bar / 2, y0, x + bar / 2, y1))
+    if style in ("ms", "wi_scroll", "wi_circle") and H_ > 0.7:
+        # the upper zone: clear the bars there, set scrolls and rings
+        zone_poly = box(bw, ymid + rail, W_ - bw, H_ - bw)
+        zone_poly = zone_poly.intersection(inner)
+        parts = [g.difference(zone_poly) if g is not parts[0] else g
+                 for g in parts]
+        parts.append(box(bw, ymid - rail / 2, W_ - bw, ymid + rail / 2))
+        nbay = max(1, int(round(W_ / 0.42)))
+        bw_ = (W_ - 2 * bw) / nbay
+        hz = H_ - bw - ymid - rail
+        for j in range(nbay):
+            cx = bw + bw_ * (j + 0.5)
+            cy = ymid + rail + hz / 2
+            r = max(0.06, min(bw_ * 0.30, hz * 0.38))
+            for sg in (-1, 1):
+                c = (cx + sg * r * 1.0, cy)
+                pts = _spiral(c[0], c[1], r * 0.18, r, 1.25,
+                              math.pi if sg > 0 else 0.0, -sg)
+                parts.append(LineString(pts).buffer(bar * 0.6, cap_style=1,
+                                                    resolution=2))
+            parts.append(Point(cx, cy).buffer(r * 0.34, resolution=6)
+                         .difference(Point(cx, cy).buffer(r * 0.34 - bar,
+                                                          resolution=6)))
+            # S joining the bay's top and bottom rails
+            parts.append(LineString([(cx, ymid + rail), (cx, cy - r * 0.36)])
+                         .buffer(bar / 2, cap_style=2))
+            parts.append(LineString([(cx, cy + r * 0.36),
+                                     (cx, H_ - bw)]).buffer(bar / 2,
+                                                           cap_style=2))
+            if style == "wi_circle":
+                parts.append(Point(cx, cy).buffer(r * 1.55, resolution=8)
+                             .difference(Point(cx, cy).buffer(
+                                 r * 1.55 - bar, resolution=8)))
+        # a lower rail and a row of small rings between the bars' feet
+        parts.append(box(bw, bw, W_ - bw, bw + rail))
+    else:
+        parts.append(box(bw, H_ * 0.5 - rail / 2, W_ - bw, H_ * 0.5 + rail / 2))
+        parts.append(box(bw, bw, W_ - bw, bw + rail))
+    # spear heads over the bars at the top of the lower zone (or the top)
+    ytop = ymid - rail / 2 if style in ("ms", "wi_scroll", "wi_circle") and \
+        H_ > 0.7 else H_ - bw - 0.10
+    for i in range(1, nb):
+        x = gap * i
+        if style == "wi_spear" or ytop < H_ - bw - 0.01:
+            parts.append(Polygon([(x - 0.04, ytop), (x, ytop + 0.10),
+                                  (x + 0.04, ytop)]))
+    shape = unary_union([g for g in parts if g is not None
+                         and not g.is_empty]).intersection(clip)
+    if shape.is_empty:
+        shape = clip.difference(inner)
+    _WI_CACHE[key] = shape
+    return shape
 
 
 def _jali_holes(style, W_, yb, hh, rim):
@@ -374,6 +475,25 @@ def _grille_faces(w, o, z0, out_sign=None):
     if W_ < 0.2 or H_ < 0.2:
         return []
     rim = 0.04
+    if o.get("grille") in WI_STYLES:           # 3.64.78: wrought iron
+        rise = 0.0
+        if o.get("head") == "arch" or o.get("arch"):
+            rise = W_ / 2.0
+        shp = _wi_shape(W_, H_, o["grille"], rise)
+        faces = PJ._prism(shp, 0.0, 0.026, 0.0001)
+        out = []
+        th = 0.026
+        for f in faces:
+            loop = [(a[0] + u[0] * (s0 + x) + n[0] * (off + z - th / 2),
+                     a[1] + u[1] * (s0 + x) + n[1] * (off + z - th / 2),
+                     z0 + zb + y) for x, y, z in f["loop"]]
+            hs = [[(a[0] + u[0] * (s0 + x) + n[0] * (off + z - th / 2),
+                    a[1] + u[1] * (s0 + x) + n[1] * (off + z - th / 2),
+                    z0 + zb + y) for x, y, z in h]
+                  for h in f.get("holes") or []]
+            out.append({"loop": list(reversed(loop)),
+                        "holes": [list(reversed(h)) for h in hs]})
+        return out
     sty = o.get("grille") if o.get("grille") in JALI_STYLES else "cnc"
     # in panels at most ~1.2 m high (the jali's own frames): each face keeps
     # a few dozen holes — a tall window's in one face would take seconds to

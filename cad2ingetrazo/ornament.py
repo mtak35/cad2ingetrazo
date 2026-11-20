@@ -28,7 +28,7 @@ PLINTH_H = 0.45
 PLINTH_D = 0.05
 QUOIN_H = 0.30
 QUOIN_W = (0.45, 0.28)
-QUOIN_D = 0.03
+QUOIN_D = 0.04
 SURR_W = 0.12          # a window's architrave
 SURR_D = 0.05
 SILL_H = 0.08
@@ -80,6 +80,28 @@ def _outline(arch, lid):
     poly, _ws = LS._outline(arch, lid)
     if poly is None:
         return None
+    # 3.64.78: the columns standing at the outline (a corner column is
+    # thicker than the wall): the bands and quoins go round them, not
+    # into them
+    try:
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        from .engine import structure as S_
+        cols = []
+        for c in arch.get("structure") or []:
+            if c.get("type") == "column" and c.get("level") == lid:
+                q = _Pg([tuple(v[:2]) for v in S_.column_outline(c)]
+                        ).buffer(0.01)
+                if not q.is_empty and q.intersects(poly.boundary.buffer(
+                        0.05)):
+                    cols.append(q)
+        if cols:
+            u = _uu([poly] + cols).buffer(0.02, join_style=2).buffer(
+                -0.02, join_style=2)
+            poly = max(getattr(u, "geoms", [u]), key=lambda g: g.area)
+            poly = _Pg(poly.exterior)
+    except Exception:  # noqa: BLE001
+        pass
     if poly.geom_type != "Polygon":
         poly = max(poly.geoms, key=lambda g: g.area)
     return poly.simplify(0.03)
@@ -136,18 +158,37 @@ def _corners(poly) -> list:
 
 
 def _quoins(poly, z0, z1, col) -> list:
+    """Corner stones on BOTH faces of every outside corner: each course one
+    mitred L-shaped block — a long arm on one face, a short one on the
+    other, alternating up the corner (3.64.78: boxes along each side left
+    one of the faces bare where the walls were not quite square)."""
+    from shapely.geometry import Polygon as _Pg
+    from . import modern as MD
+    ring = poly.buffer(QUOIN_D, join_style=2, mitre_limit=3.0).difference(
+        poly)
     out = []
+    big = 1.0
     for b, u1, u2 in _corners(poly):
+        def strip(u, a0, a1):
+            n = (-u[1], u[0])
+            return _Pg([(b[0] + u[0] * a0 - n[0] * big,
+                         b[1] + u[1] * a0 - n[1] * big),
+                        (b[0] + u[0] * a1 - n[0] * big,
+                         b[1] + u[1] * a1 - n[1] * big),
+                        (b[0] + u[0] * a1 + n[0] * big,
+                         b[1] + u[1] * a1 + n[1] * big),
+                        (b[0] + u[0] * a0 + n[0] * big,
+                         b[1] + u[1] * a0 + n[1] * big)])
         k, z = 0, z0 + 0.05
+        shapes = {}
         while z + QUOIN_H <= z1 - 0.05:
             w1, w2 = QUOIN_W if k % 2 == 0 else QUOIN_W[::-1]
-            # along the side before the corner (ends at it) and after it
-            n1 = (-u1[1], u1[0])
-            n2 = (-u2[1], u2[0])
-            out += _box(b, u1, n1, -w1, QUOIN_D, -QUOIN_D, 0.0, z,
-                        z + QUOIN_H - 0.03, col)
-            out += _box(b, u2, n2, -QUOIN_D, w2, -QUOIN_D, 0.0, z,
-                        z + QUOIN_H - 0.03, col)
+            key = (w1, w2)
+            if key not in shapes:
+                shapes[key] = ring.intersection(
+                    strip(u1, -w1, QUOIN_D + 0.002).union(
+                        strip(u2, -(QUOIN_D + 0.002), w2)))
+            out += MD._solid(shapes[key], z, z + QUOIN_H - 0.03, col)
             z += QUOIN_H
             k += 1
     return out

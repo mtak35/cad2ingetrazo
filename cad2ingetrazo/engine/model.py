@@ -732,7 +732,8 @@ def _openings(raw, wall_ids: set) -> list[dict]:
             rec["hl"] = 1
         if o.get("arcade"):          # 3.64.47: one of an arcade's arches
             rec["arcade"] = str(o["arcade"])[:12]
-        if o.get("grille") in ("cnc", "jali", "ms", "cnc_square",
+        if o.get("grille") in ("cnc", "jali", "ms", "wi_scroll", "wi_spear",
+                               "wi_circle", "cnc_square",
                                "cnc_round", "cnc_hex", "cnc_star",
                                "cnc_lattice"):   # a grille in it
             rec["grille"] = o["grille"]
