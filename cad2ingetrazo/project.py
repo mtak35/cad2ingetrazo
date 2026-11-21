@@ -10314,7 +10314,10 @@ def levels_from_cad(doc) -> list:
                        if r["id"] == doc["hill"]["lower"])
             iu_ = next(i for i, r in enumerate(levels)
                        if r["id"] == doc["hill"]["upper"])
-            want[il_], want[iu_] = round(pl_[0], 4), round(pl_[1], 4)
+            lo_ = part_level_of(doc, levels[il_]["id"])
+            up_ = part_level_of(doc, levels[iu_]["id"])
+            want[il_] = round(pl_[0] if lo_ is None else lo_, 4)
+            want[iu_] = round(pl_[1] if up_ is None else up_, 4)
             abs_.pop(il_, None)
             abs_.pop(iu_, None)
     except Exception:  # noqa: BLE001
@@ -14389,20 +14392,58 @@ def zone_dz(zones, x, y) -> float:
     return best
 
 
+def _zone_level(doc, dz) -> float:
+    """A level part's level on the CAD's datum (m). Parts made by the plot
+    dialog are over the main ground (ref + z); older plots kept the notes'
+    own levels (z = the datum level, the main ground's part at z = ref)."""
+    plot = doc["arch"].get("plot") or {}
+    ref = float(plot.get("ref", 0.0) or 0.0)
+    zs = [float(p.get("z", 0.0) or 0.0) for p in plot.get("parts") or []]
+    if ref and any(abs(z - ref) < 0.002 for z in zs):
+        return dz                         # already on the datum
+    return ref + dz
+
+
 def part_levels(doc):
     """3.64.88 — the plot's level parts as levels on the CAD's datum (m):
-    (lowest, highest), or None without parts. The upper / lower ground
-    floors take these — the levels fixed in the model — not their own."""
-    plot = doc["arch"].get("plot") or {}
+    (lowest, highest), or None without parts."""
     try:
         zs = plot_zones(doc)
     except Exception:  # noqa: BLE001
         return None
     if len(zs) < 2:
         return None
-    ref = float(plot.get("ref", 0.0) or 0.0)
-    v = [ref + dz for _g, dz in zs]
+    v = [_zone_level(doc, dz) for _g, dz in zs]
     return min(v), max(v)
+
+
+def part_level_of(doc, lid):
+    """The level part a floor stands on — the part its walls cover most
+    (the floor takes the level already fixed there, not one of its own);
+    None if it has no walls or the plot no parts."""
+    try:
+        from shapely.geometry import MultiPoint
+        zs = plot_zones(doc)
+        if len(zs) < 2:
+            return None
+        pts = []
+        for w in doc["arch"]["walls"]:
+            if w.get("level") == lid:
+                for k in ("a", "b", "p0", "p1", "start", "end"):
+                    q = w.get(k)
+                    if q is not None and len(q) >= 2:
+                        pts.append((float(q[0]), float(q[1])))
+        if len(pts) < 3:
+            return None
+        hull = MultiPoint(pts).convex_hull
+        if hull.area < 1.0:
+            return None
+        best = max(zs, key=lambda q: hull.intersection(q[0]).area)
+        if hull.intersection(best[0]).area < 1e-3:
+            return None
+        return _zone_level(doc, best[1])
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def set_plot(doc, corners, front=None, dist=None, parts=None,
