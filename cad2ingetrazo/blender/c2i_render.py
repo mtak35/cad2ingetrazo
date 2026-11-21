@@ -367,7 +367,7 @@ def apply_materials(c2i):
     say("materials", ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
 
 
-def _albedo(mat, cap=0.62):
+def _albedo(mat, cap=0.74):
     """No plaster is whiter than ~60 %: a model's pure white renders as a
     blown-out glare. The colour kept, its brightness capped."""
     bsdf = _bsdf(mat)
@@ -434,11 +434,11 @@ def _front_light(job, sun_dir, env):
     h = math.hypot(sun_dir[0], sun_dir[1]) or 1.0
     if (sun_dir[0] * fx + sun_dir[1] * fy) / h < 0.34:   # not from far side
         return sun_dir
-    a = math.radians(35.0)                 # behind the camera, to its left
+    a = math.radians(-15.0)                # behind the camera, a little right
     bx, by = -fx, -fy
     cx = bx * math.cos(a) - by * math.sin(a)
     cy = bx * math.sin(a) + by * math.cos(a)
-    e = math.radians(38.0)
+    e = math.radians(45.0)
     return (cx * math.cos(e), cy * math.cos(e), math.sin(e))
 
 
@@ -557,15 +557,17 @@ def environment(scene, job, c2i):
             nt.links.new(vol.outputs[0], out.inputs["Volume"])
     # exposure and contrast
     view = scene.view_settings
-    for vt_ in ("AgX", "Filmic"):          # 3.64.92: never «Standard»
-        try:
+    vt_used = ""
+    for vt_ in ("Khronos PBR Neutral", "AgX", "Filmic"):
+        try:                       # 3.64.94: true-to-colour whites first
             view.view_transform = vt_
+            vt_used = vt_
             break
         except TypeError:
             continue
     view.exposure = float(env.get("exposure", view.exposure))
-    look = env.get("look") or "High Contrast"
-    if look:
+    look = env.get("look") or "Medium High Contrast"
+    if look and vt_used != "Khronos PBR Neutral":
         for name in (f"AgX - {look}", look):
             try:
                 view.look = name
@@ -773,7 +775,7 @@ def auto_exposure(scene, c2i):
         wgt = np.exp(-(((xx - w / 2) / (0.35 * w)) ** 2 +
                        ((yy - h / 2) / (0.35 * h)) ** 2))
         lavg = float(np.exp((wgt * np.log(lum + 1e-4)).sum() / wgt.sum()))
-        key = 0.07 if night else 0.14
+        key = 0.07 if night else 0.20
         ev = max(-5.0, min(4.0, math.log2(key / max(lavg, 1e-5))))
         scene.view_settings.exposure = ev + float(env.get("exposure", 0.0))
         say("exposure", "%.2f EV (metered %.3f)" % (ev, lavg))
