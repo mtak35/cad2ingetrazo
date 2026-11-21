@@ -414,6 +414,34 @@ def _sun_dir(az_deg, el_deg):
             math.sin(e))
 
 
+def _front_light(job, sun_dir, env):
+    """3.64.93: a sun behind the building leaves the facade seen from the
+    camera in shade — flat, grey. Unless the user set it, a sun that comes
+    from the far side is turned to light the view from the front-side
+    (35° off the camera's back, 38° up): lit planes, long side shadows."""
+    if env.get("sun_custom"):
+        return sun_dir
+    cam = job.get("camera") or {}
+    try:
+        fx = cam["target"][0] - cam["eye"][0]
+        fy = cam["target"][1] - cam["eye"][1]
+    except (KeyError, IndexError, TypeError):
+        return sun_dir
+    L = math.hypot(fx, fy)
+    if L < 1e-6 or sun_dir[2] <= 0 or sun_dir[2] > 0.95:
+        return sun_dir
+    fx, fy = fx / L, fy / L
+    h = math.hypot(sun_dir[0], sun_dir[1]) or 1.0
+    if (sun_dir[0] * fx + sun_dir[1] * fy) / h < 0.34:   # not from far side
+        return sun_dir
+    a = math.radians(35.0)                 # behind the camera, to its left
+    bx, by = -fx, -fy
+    cx = bx * math.cos(a) - by * math.sin(a)
+    cy = bx * math.sin(a) + by * math.cos(a)
+    e = math.radians(38.0)
+    return (cx * math.cos(e), cy * math.cos(e), math.sin(e))
+
+
 def environment(scene, job, c2i):
     env = c2i.get("env") or {}
     sky = env.get("sky", "day")
@@ -429,6 +457,7 @@ def environment(scene, job, c2i):
         sun_dir = _sun_dir(float(env.get("sun_az", 135.0)), el)
     else:
         sun_dir = tuple(job["sun"])
+    sun_dir = _front_light(job, sun_dir, env)
     for o in list(scene.objects):          # the base script's sky lights
         if o.type == "LIGHT" and o.data.type == "SUN":
             bpy.data.objects.remove(o, do_unlink=True)
@@ -535,7 +564,7 @@ def environment(scene, job, c2i):
         except TypeError:
             continue
     view.exposure = float(env.get("exposure", view.exposure))
-    look = env.get("look") or "Medium High Contrast"
+    look = env.get("look") or "High Contrast"
     if look:
         for name in (f"AgX - {look}", look):
             try:
