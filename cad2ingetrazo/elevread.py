@@ -197,6 +197,34 @@ def _view_geom(raw, v):
     return vert, horiz, arcs, circles, marks
 
 
+#: layers that hold the surroundings, not the building (trees, people, cars)
+ENTOURAGE = re.compile(r"TREE|PLANT|LAND|FURN|PEOPLE|PERSON|HUMAN|\bCAR|"
+                       r"VEHICLE|ENTOUR|SHRUB|GRASS|SKY|CLOUD|BIRD|SHADE|"
+                       r"SHADOW|SCALE", re.I)
+#: 3.64.101: the last read's silhouettes: {side: [(u0, z0, u1, z1)]} in the
+#: model's metres (all the view's lines, diagonals too) — for the roof
+PROFILES: dict = {}
+
+
+def _view_all(raw, v):
+    """Every line of the view that belongs to the building, in metres
+    over the view's datum: [(u0, z0, u1, z1)] (a sloped roof edge is one)."""
+    k = float(raw.get("unit") or 1.0)
+    b = v["b"]
+    x0, x1, y0, y1 = v["x0"], v["x1"], v["y0"], v["y1"]
+    out = []
+    for s in raw["segs"]:
+        lay = s[4] or ""
+        if NOTE_LAYERS.search(lay) or ENTOURAGE.search(lay):
+            continue
+        if not (x0 <= s[0] <= x1 and x0 <= s[2] <= x1 and
+                y0 - 60 * FT / k <= s[1] <= y1 + 60 * FT / k and
+                y0 - 60 * FT / k <= s[3] <= y1 + 60 * FT / k):
+            continue
+        out.append((s[0] * k, s[1] * k - b, s[2] * k, s[3] * k - b))
+    return out
+
+
 def _bands(arch, datums, el):
     """{level id: (z0, z1)} — each level from its floor to the next (the
     elevation's own levels; above the last noted floor, its height)."""
@@ -372,6 +400,7 @@ def apply(doc, raw=None, file=None) -> dict:
                     if h.get("file") == file), {})
         raw = cadread.read(file, how.get("unit"))
     views = find_views(raw)
+    PROFILES.clear()
     if not views:
         return rep
     arch = doc["arch"]
@@ -434,6 +463,12 @@ def apply(doc, raw=None, file=None) -> dict:
         circ = [(u + s, z + zg, rr) for (u, z, rr) in circ0]
         marks = {nm: [(u + s, z + zg) for (u, z) in pts]
                  for nm, pts in marks0.items()}
+        try:
+            PROFILES[D] = [(a_ + s, b_ + zg, c_ + s, d_ + zg)
+                           for a_, b_, c_, d_ in _view_all(raw, v)]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("elevread profile")
         _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
                     bands, st)
     finish_stats(arch, st, rep)

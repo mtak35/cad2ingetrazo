@@ -213,7 +213,11 @@ def _regions(doc) -> dict:
                 reg = unary_union(ps).buffer(0.12, join_style=2)
                 # only where this volume stands (a slab of the floor above
                 # may run past it: that part is not this volume's top)
-                reg = reg.intersection(poly.buffer(0.35, join_style=2))
+                # 3.64.101: the top roof slab is the roof: its own
+                # outline (it may run out past the walls), the fascia
+                # follows it; a lower volume's top stays by its walls
+                reach = 2.5 if len(above) == 1 else 0.35
+                reg = reg.intersection(poly.buffer(reach, join_style=2))
         if reg is None or reg.is_empty or reg.area < 1.0:
             reg = poly
         reg = reg.buffer(0.25, join_style=2).buffer(-0.25, join_style=2)

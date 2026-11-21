@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog,
 
 from . import lookstyle as LS
 
-ROOFS = [("asdrawn", "As drawn (flat roof, parapets)"),
+ROOFS = [("reference", "As the reference elevations draw it"),
+         ("asdrawn", "As drawn (flat roof, parapets)"),
          ("hip", "Tiled hip roofs over every block"),
          ("gable", "Tiled gable roofs over every block (steep: Tudor, "
           "Cape Cod)"),
@@ -225,10 +226,12 @@ class ElevationDesigner(QDialog):
         self.roof = _combo(ROOFS)
         self.keep_roof = QCheckBox("Keep the roof structure as built (the "
                                    "design does not touch the roof)")
-        self.keep_roof.setChecked(True)
+        self.keep_roof.setChecked(False)
         self.keep_roof.setToolTip("Ticked: the roof, parapets and roof "
-                                  "slab stay as imported. Untick to let "
-                                  "this design build its own roof below.")
+                                  "slab stay as imported. Unticked: the "
+                                  "roof below is built — «As the reference "
+                                  "elevations draw it» reads the form "
+                                  "from the elevations.")
         self.keep_roof.toggled.connect(lambda _c: self._relevance())
         f1.addRow(self.keep_roof)
         f1.addRow("Roof", self.roof)
@@ -372,14 +375,20 @@ class ElevationDesigner(QDialog):
         look = self.panel.doc().get("look") or {}
         self._fill(dict(LS.KIT_DEFAULT, **look) if look.get("manual")
                    or look.get("style") else LS.preset("mediterranean"))
+        # 3.64.101: the roof follows the reference elevations unless the
+        # saved design chose another form
+        _set(self.roof, "reference")
+        self._roof_set = True
         # 3.64.99: the roof is kept unless the saved design made one
-        self.keep_roof.setChecked(bool(look.get("roof_keep", True)))
+        self.keep_roof.setChecked(False)
 
     # ---- the fields ------------------------------------------------------------
     def _fill(self, k):
         _set(self.style, k.get("style", "mediterranean"))
         _set(self.front, k.get("front", "auto"))
-        _set(self.roof, k.get("roof", "hip"))
+        if not getattr(self, "_roof_set", False) or \
+                k.get("roof") == "reference":
+            _set(self.roof, k.get("roof", "hip"))   # (a preset leaves the
         self.slope.setValue(float(k.get("roof_slope", LS.SLOPE)))
         self.eave.setValue(float(k.get("roof_eave", LS.EAVE)))
         self.annex.setChecked(bool(k.get("annex_roof", True)))

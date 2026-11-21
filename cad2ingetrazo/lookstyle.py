@@ -612,6 +612,77 @@ def preset(name) -> dict:
     return dict(KIT_DEFAULT, **PRESETS.get(name, ("", {}))[1], style=name)
 
 
+def roof_from_picture(img) -> dict:
+    """3.64.100: the roof a perspective shows: its silhouette against the
+    sky read column by column. {"roof": "flat" | "hip" | "gable",
+    "roof_slope": degrees, "roof_c": (r, g, b) 0..1 (the roof's own colour,
+    read just under the silhouette), "inclined": share of the house's width
+    with a raked skyline}. The picture carries no true size: the form, the
+    pitch and the colour are what it gives."""
+    import math
+    import numpy as np
+    from PySide6.QtGui import QImage
+    im = img.convertToFormat(QImage.Format_RGB32)
+    if im.width() > 640:
+        from PySide6.QtCore import Qt
+        im = im.scaledToWidth(640, Qt.SmoothTransformation)
+    w, h = im.width(), im.height()
+    a = np.frombuffer(im.constBits(), dtype=np.uint8,
+                      count=im.sizeInBytes()).reshape(
+        h, im.bytesPerLine())[:, :w * 4].reshape(h, w, 4)[:, :, 2::-1]
+    a = a.astype(np.float32)
+    x0, x1 = int(0.12 * w), int(0.88 * w)
+    top = np.median(a[:max(3, h // 40), :, :], axis=0)       # per column
+    top = np.stack([np.convolve(top[:, c], np.ones(21) / 21, "same")
+                    for c in range(3)], axis=1)
+    sil = np.full(w, np.nan)
+    for x in range(x0, x1):
+        d = np.sqrt(((a[:, x, :] - top[x]) ** 2).sum(axis=1))
+        far = d > 55
+        run = np.convolve(far.astype(np.float32), np.ones(4), "same") >= 4
+        idx = np.flatnonzero(run)
+        if len(idx) and idx[0] > h // 40 + 2:
+            sil[x] = idx[0]
+        elif len(idx):
+            sil[x] = np.nan
+    xs = np.arange(w)
+    ok = ~np.isnan(sil)
+    if ok.sum() < 0.4 * (x1 - x0):
+        raise ValueError("No skyline found in this picture (a plain sky "
+                         "above the house is needed)")
+    y = np.interp(xs, xs[ok], sil[ok])
+    k = 11
+    ys = np.convolve(np.pad(y, k // 2, mode="edge"), np.ones(k) / k, "valid")
+    dy = np.gradient(ys)
+    seg = np.zeros(w, bool)
+    seg[x0:x1] = True
+    inc = seg & (np.abs(dy) > 0.18) & (np.abs(dy) < 1.8)
+    flat = seg & (np.abs(dy) <= 0.06)
+    n = float(seg.sum())
+    share_inc, share_flat = float(inc.sum()) / n, float(flat.sum()) / n
+    # the roof's colour: under the raked skyline
+    cols = []
+    for x in np.flatnonzero(inc)[::3]:
+        yy = int(ys[x]) + 4
+        if yy + 10 < h:
+            cols.append(a[yy:yy + 10, x, :].mean(axis=0))
+    roof_c = tuple(float(v) / 255 for v in np.median(cols, axis=0)) \
+        if len(cols) > 12 else (0.45, 0.30, 0.25)
+    kind = "flat"
+    slope = 0.0
+    if share_inc > 0.22:
+        slope = math.degrees(math.atan(float(np.median(np.abs(dy[inc])))))
+        slope = min(max(slope * 1.12, 15.0), 42.0)
+        # apexes: a point sharper than a hip's plateau means a gable
+        lo = ys.min() + 0.04 * (ys.max() - ys.min() + 1)
+        apex = (ys <= lo) & seg
+        plateau = float(apex.sum()) / max(float(inc.sum()), 1.0)
+        kind = "hip" if plateau > 0.18 else "gable"
+    return {"roof": kind, "roof_slope": round(slope, 1),
+            "roof_c": [round(c, 3) for c in roof_c],
+            "inclined": round(share_inc, 2)}
+
+
 def kit_from_picture(pal, style=None) -> dict:
     """A kit from a perspective: its style's preset, in its colours."""
     style = style or detect(pal)
@@ -704,7 +775,48 @@ def apply_kit(doc, kit) -> dict:
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
     # 1. the roofs
     keep_roof = bool(k.get("roof_keep"))    # 3.64.100: the roof is left
-    if not keep_roof:                       # exactly as it is (the plan's
+    from_ref = k["roof"] == "reference" and not keep_roof
+    if from_ref:                            # 3.64.101: the roof the
+        try:                                # elevations draw
+            from . import roofref as RR
+            rr_ = RR.apply(doc, k.get("roof_c"))
+        except Exception as e_:  # noqa: BLE001
+            from .host import log_error
+            log_error("lookstyle roofref")
+            rr_ = {"note": f"the roof was not read ({e_})"}
+        keep_roof = True                    # (nothing else to do below)
+        if rr_.get("note"):
+            pic_ = None                     # no elevation: the perspective
+            try:                            # gives the form and the pitch
+                from . import refelev as RE9
+                ref_ = next((r_ for r_ in doc.get("ref_elev") or []
+                             if RE9.effective_side(r_) == "perspective"),
+                            None)
+                if ref_ is not None:
+                    src_ = RE9.source(ref_["file"],
+                                      int(ref_.get("page", 1) or 1))
+                    pic_ = roof_from_picture(src_["img"])
+            except Exception as e_:  # noqa: BLE001
+                rep["roof_note"] = f"the perspective's roof was not read ({e_})"
+            if pic_ and pic_["roof"] in PITCHED:
+                k["roof"] = pic_["roof"]
+                k["roof_slope"] = pic_["roof_slope"]
+                k["roof_c"] = pic_["roof_c"]
+                keep_roof = False
+                from_ref = False
+                arch["structure"] = [e for e in arch["structure"]
+                                     if not is_look_roof(e)]
+                rep["roof_note"] = ("the roof follows the perspective: "
+                                    f"{pic_['roof']} {pic_['roof_slope']:.0f}°")
+            elif pic_:
+                rep["roof_note"] = "the perspective shows a flat roof: kept"
+            else:
+                rep.setdefault("roof_note", rr_["note"])
+        else:
+            rep.update({kk: vv for kk, vv in rr_.items()
+                        if kk in ("roofs", "forms", "flat", "parapets_off")})
+            rep["colours"] += ", roof tiles"
+    elif not keep_roof:                     # exactly as it is (the plan's
         arch["structure"] = [e for e in arch["structure"]   # or an earlier
                              if not is_look_roof(e)]        # design's)
     if k["roof"] in PITCHED and not keep_roof:
