@@ -367,8 +367,8 @@ def apply_materials(c2i):
     say("materials", ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
 
 
-def _albedo(mat, cap=0.80):
-    """No paint is whiter than ~80 %: a model's pure white renders as a
+def _albedo(mat, cap=0.62):
+    """No plaster is whiter than ~60 %: a model's pure white renders as a
     blown-out glare. The colour kept, its brightness capped."""
     bsdf = _bsdf(mat)
     if bsdf is None:
@@ -423,7 +423,7 @@ def environment(scene, job, c2i):
     if env.get("sun_custom") or sky in ("golden", "blue") or \
             job.get("sun") is None:
         el = {"golden": 6.0, "blue": -4.0}.get(sky, float(
-            env.get("sun_el", 45.0)))
+            env.get("sun_el", 36.0)))
         if env.get("sun_custom"):
             el = float(env.get("sun_el", el))
         sun_dir = _sun_dir(float(env.get("sun_az", 135.0)), el)
@@ -478,10 +478,10 @@ def environment(scene, job, c2i):
         else:
             say("environment", "hdri missing:", path, "- a physical sky")
             if sun_dir[2] < 0.35:           # (a clear day: the sun well up)
-                sun_dir = _sun_dir(float(env.get("sun_az", 135.0)), 42.0)
+                sun_dir = _sun_dir(float(env.get("sun_az", 135.0)), 36.0)
             set_world(scene, sun_dir)
             if sun_dir[2] > 0:
-                add_sun(scene, sun_dir, 4.5 * sun_k)
+                add_sun(scene, sun_dir, 3.6 * sun_k)
             lights_k = 0.03
     elif sky == "night":
         set_plain_world(scene, (0.008, 0.013, 0.03), 1.0 * sky_k, "night")
@@ -490,7 +490,7 @@ def environment(scene, job, c2i):
         set_plain_world(scene, (0.62, 0.66, 0.70), 1.0 * sky_k, "overcast")
     else:
         if sun_dir[2] > 0:
-            s = add_sun(scene, sun_dir, {"golden": 2.5}.get(sky, 4.0)
+            s = add_sun(scene, sun_dir, {"golden": 2.5}.get(sky, 3.4)
                         * sun_k)
             if sky == "golden":
                 s.data.color = (1.0, 0.72, 0.45)
@@ -528,8 +528,14 @@ def environment(scene, job, c2i):
             nt.links.new(vol.outputs[0], out.inputs["Volume"])
     # exposure and contrast
     view = scene.view_settings
+    for vt_ in ("AgX", "Filmic"):          # 3.64.92: never «Standard»
+        try:
+            view.view_transform = vt_
+            break
+        except TypeError:
+            continue
     view.exposure = float(env.get("exposure", view.exposure))
-    look = env.get("look")
+    look = env.get("look") or "Medium High Contrast"
     if look:
         for name in (f"AgX - {look}", look):
             try:
@@ -738,7 +744,7 @@ def auto_exposure(scene, c2i):
         wgt = np.exp(-(((xx - w / 2) / (0.35 * w)) ** 2 +
                        ((yy - h / 2) / (0.35 * h)) ** 2))
         lavg = float(np.exp((wgt * np.log(lum + 1e-4)).sum() / wgt.sum()))
-        key = 0.07 if night else 0.18
+        key = 0.07 if night else 0.14
         ev = max(-5.0, min(4.0, math.log2(key / max(lavg, 1e-5))))
         scene.view_settings.exposure = ev + float(env.get("exposure", 0.0))
         say("exposure", "%.2f EV (metered %.3f)" % (ev, lavg))
