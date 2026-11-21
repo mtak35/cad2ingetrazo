@@ -47,6 +47,8 @@ class Canvas(QWidget):
         self.outline = []                       # the plot limit, once set
         self.wall = []                          # the boundary wall's line
         self.on_part = None                     # click on a part → its index
+        self.on_text = None                     # click (x, y) in leveltext
+        self.level_texts = []                   # [(x, y, label)] to mark
         self._vdrag = None                      # corner being dragged (edit)
         self.parts = []                         # [(poly, z)] level parts
         self.lines = [QLineF(s[0], s[1], s[2], s[3]) for s in drawing["segs"]]
@@ -213,6 +215,10 @@ class Canvas(QWidget):
             else:
                 self.poly.append(p)
             self.on_change()
+        elif self.mode == "leveltext":
+            q = self.to_dwg(e.position())
+            if self.on_text:
+                self.on_text(q.x(), q.y(), SNAP_PX * 2.5 / self.scale())
         elif self.mode == "partpick":
             q = self.to_dwg(e.position())
             from shapely.geometry import Point
@@ -419,6 +425,12 @@ class Canvas(QWidget):
                 from .host import both_txt
                 p.drawText(qp.boundingRect().center(),
                            f"Level {i + 1}: {both_txt(zz)}")
+        if self.mode == "leveltext":
+            p.setPen(QPen(QColor("#f59e0b"), 2))
+            p.setBrush(Qt.NoBrush)
+            for x, y, lab in self.level_texts:
+                c = self.view.map(QPointF(x, y))
+                p.drawEllipse(c, 9, 9)
         if self.wall:
             from PySide6.QtGui import QPolygonF
             p.setPen(QPen(QColor("#d946ef"), 3))
@@ -884,12 +896,12 @@ class PlotDialog(QDialog):
             row.addWidget(b)
         row.addStretch(1)
         row2 = QHBoxLayout()
-        self.b_part = QPushButton("Level parts…")
+        self.b_part = QPushButton("Levels: click a level text…")
         self.b_part.setToolTip(
-            "A plot on more than one level: after the plot limit, pick its "
-            "parts one by one — each polyline picked is one level (asked "
-            "for in metres and feet-inches); when it is complete, pick the "
-            "next one, until the whole plot limit is covered.")
+            "A plot on more than one level: click a level written on the "
+            "plan (LEV. +2'-6\", +0.45 …) — the closed line around it is "
+            "taken as that level's part. Repeat for each level; edit any "
+            "part after with «Edit a part…».")
         self.b_part.clicked.connect(self._start_parts)
         self.b_rest = QPushButton("The rest is one level")
         self.b_rest.setToolTip("What is not yet in a part becomes the last "
@@ -919,8 +931,8 @@ class PlotDialog(QDialog):
         self.b_done = QPushButton("Done editing")
         self.b_done.clicked.connect(self._edit_done)
         self.cov = QLabel()
-        for w in (self.b_part, self.b_marks, self.b_edit, self.b_done,
-                  self.b_rest, self.b_undo, self.b_wall, self.cov):
+        for w in (self.b_part, self.b_edit, self.b_done, self.b_undo,
+                  self.b_wall, self.cov):
             row2.addWidget(w)
         row2.addStretch(1)
         v.addLayout(row2)
@@ -932,6 +944,8 @@ class PlotDialog(QDialog):
         self._busy = False
         self._editing = None                     # (index, z) of a part
         self.canvas.on_part = self._part_clicked
+        self.canvas.on_text = self._text_clicked
+        self._marks = None
         self.ok = QPushButton("Use this plot")
         self.ok.setStyleSheet("QPushButton { background: #2f6fdd; color: "
                               "white; font-weight: bold; padding: 4px 12px; }")
@@ -981,9 +995,95 @@ class PlotDialog(QDialog):
             c.outline = list(c.poly)
         self._phase = "parts"
         c.poly, c.closed = [], False
-        c.mode = "chain"
+        self._level_mode()
+
+    def _level_texts(self):
+        """The level notes inside the plot: [(x, y, metres)], and the main
+        ground (the commonest mark)."""
+        if self._marks is None:
+            from collections import Counter
+            from shapely.geometry import Point
+            from . import parking as PK
+            plot = self._geo(self._plot_poly)
+            near = plot.buffer(max(plot.length * 0.02, 1.0))
+            ms = []
+            for t in self.canvas.d.get("texts") or []:
+                v = PK.level_note(t.get("text"))
+                if v and v[1] is not None and near.contains(
+                        Point(t["x"], t["y"])):
+                    ms.append((t["x"], t["y"], float(v[1])))
+            ref = Counter(round(m[2], 3) for m in ms).most_common(1)[0][0] \
+                if ms else 0.0
+            self._marks = (ms, ref)
+        return self._marks
+
+    def _level_mode(self):
+        c = self.canvas
+        ms, _ref = self._level_texts()
+        from .host import ft_in_txt
+        c.level_texts = [(x, y, ft_in_txt(v)) for x, y, v in ms]
+        c.mode = "leveltext"
         c.update()
         self._changed()
+
+    def _text_clicked(self, x, y, tol):
+        """A level text clicked: the smallest closed line round it is that
+        level's part."""
+        import math as _m
+        from shapely.geometry import LineString, Point
+        from shapely.ops import polygonize, unary_union
+        ms, ref = self._level_texts()
+        if not ms:
+            return
+        k = min(range(len(ms)), key=lambda i: _m.hypot(ms[i][0] - x,
+                                                       ms[i][1] - y))
+        if _m.hypot(ms[k][0] - x, ms[k][1] - y) > tol:
+            self.tip.setText("<b>Click on a level text</b> (the orange "
+                             "circles).")
+            return
+        tx, ty, v = ms[k]
+        plot = self._geo(self._plot_poly)
+        near = plot.buffer(max(plot.length * 0.02, 1.0))
+        x0, y0, x1, y1 = near.bounds
+        ls = []
+        for sg in self.canvas.d.get("segs") or []:
+            if x0 <= sg[0] <= x1 and y0 <= sg[1] <= y1 and \
+                    x0 <= sg[2] <= x1 and y0 <= sg[3] <= y1:
+                ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
+        for lp in self.canvas.d.get("loops") or []:
+            if len(lp["pts"]) >= 3:
+                ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
+        pt = Point(tx, ty)
+        best = None
+        try:
+            for g in polygonize(unary_union(ls)):
+                if 0.002 * plot.area < g.area < 0.98 * plot.area and \
+                        g.contains(pt) and (best is None or
+                                            g.area < best.area):
+                    best = g
+        except Exception:  # noqa: BLE001
+            best = None
+        if best is None:                  # no line round it: a patch
+            best = pt.buffer(max(plot.length / 40.0, 1.0), 4)
+        best = best.intersection(plot) if best.intersection(plot).area > \
+            1e-6 else best
+        n0 = len(self._parts)
+        z = v - ref
+        self._add([tuple(c) for c in list(best.exterior.coords)[:-1]]
+                  if best.geom_type == "Polygon" else
+                  [tuple(c) for c in list(max(
+                      best.geoms, key=lambda q: q.area).exterior.coords)[:-1]],
+                  z)
+        self.canvas.parts = list(self._parts)
+        self.canvas.update()
+        self._changed()
+        from .host import both_txt
+        self.tip.setText(
+            ("<b>Level part %d made</b> " % len(self._parts)
+             if len(self._parts) > n0 else
+             "<b>Nothing new</b> (that area is already a level) ") +
+            f"— {both_txt(z)} over the main ground. Click the next level "
+            "text, or «Edit a part…» to correct this one.")
 
     def _start_wall(self):
         c = self.canvas
@@ -1036,6 +1136,7 @@ class PlotDialog(QDialog):
                 c.wall = list(c.poly)
                 c.poly, c.closed = [], False
                 self._phase = "parts"
+                self._level_mode()
             c.update()
         finally:
             self._busy = False
@@ -1166,9 +1267,7 @@ class PlotDialog(QDialog):
         self._editing = None
         c.parts = list(self._parts)
         c.poly, c.closed = [], False
-        c.mode = "chain"
-        c.update()
-        self._changed()
+        self._level_mode()
 
     def _rest_part(self):
         g = self._left()
@@ -1213,8 +1312,6 @@ class PlotDialog(QDialog):
             return
         ph = self._phase
         self.b_rest.setEnabled(ph == "parts")
-        self.b_marks.setEnabled(ph != "plot" or (c.closed and
-                                                 len(c.poly) >= 3))
         self.b_edit.setEnabled(bool(self._parts) and self._editing is None)
         self.b_done.setEnabled(self._editing is not None)
         self.b_undo.setEnabled(ph == "parts" and bool(self._parts))
@@ -1239,12 +1336,11 @@ class PlotDialog(QDialog):
                                  "«Use this plot».")
             else:
                 self.tip.setText(
-                    "<b>Level parts</b> — click ONE polyline (its line, "
-                    "inside it, or its corners): it is one level, asked "
-                    "for in metres / feet-inches. When it is complete, "
-                    "click the next polyline for the next level, until the "
-                    "plot limit is covered («The rest is one level» closes "
-                    "it). What is left stays on the main ground.")
+                    "<b>Levels</b> — click a level text on the plan (orange "
+                    "circles): the closed line round it becomes that "
+                    "level's part. Next level text, and so on; what is not "
+                    "taken stays on the main ground. «Edit a part…» "
+                    "corrects one.")
             self.ok.setEnabled(True)
             return
         self.cov.setText("")
