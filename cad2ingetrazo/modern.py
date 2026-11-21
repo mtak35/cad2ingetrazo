@@ -390,11 +390,16 @@ def _fascias(doc, dark, light, slab_edges) -> list:
     FD = float(look.get("fascia_d", FASCIA_D) or FASCIA_D)
     FH = float(look.get("fascia_h", FASCIA_H) or FASCIA_H)
     out = []
+    st_ = doc.get("settings") or {}
+    # 3.64.102: the bands stop at the top of the floor finish (not 2" /
+    # 4" over it)
+    ft = float(st_.get("finish_t", 0.0508) or 0.0) \
+        if st_.get("finish_on", True) else 0.0
     for part, zt, kind in ring_parts(doc, FD, slab_edges=slab_edges):
         if kind == "roof":
-            out += _solid(part, zt - FH, zt + 0.05, dark)
+            out += _solid(part, zt - FH, zt + ft, dark)
         else:
-            out += _solid(part, zt - EDGE_H + 0.10, zt + 0.10, light)
+            out += _solid(part, zt - EDGE_H + ft, zt + ft, light)
     return out
 
 

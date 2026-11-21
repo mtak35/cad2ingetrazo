@@ -219,7 +219,7 @@ def empty() -> dict:
             "furniture": [], "ffl_marks": [], "slab_edges": {},
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
-            "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {},
+            "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
             "hill": {}, "plan_area": {}, "cad_domes": {}, "tiers": {},
             "bound_lines": {}}
 
@@ -297,7 +297,10 @@ def load(raw) -> dict:
     lk_ = raw.get("look") if isinstance(raw.get("look"), dict) else {}
     from .lookstyle import KIT_DEFAULT as KD_
     doc["look"] = {k: v for k, v in lk_.items()
-                   if k in KD_ or k in ("roof", "manual")}
+                   if k in KD_ or k in ("roof", "manual", "roof_keep")}
+    # 3.64.102: what the design changed, to take it all back
+    lu_ = raw.get("look_undo")
+    doc["look_undo"] = lu_ if isinstance(lu_, dict) else {}
     # 3.64.44: the reference elevations / perspectives (image, PDF, CAD)
     doc["ref_elev"] = []
     for r_ in raw.get("ref_elev") or []:

@@ -745,7 +745,7 @@ def apply(doc, ref, src=None) -> dict:
     return apply_kit(doc, kit_from_picture(pal, style))
 
 
-def apply_kit(doc, kit) -> dict:
+def _apply_kit(doc, kit) -> dict:
     """The elevation kit applied to the model as the plans draw it (sizes
     and positions stay): roofs, windows, doors, railings, columns,
     colours; its mouldings are drawn at every rebuild (ornament.py)."""
@@ -971,11 +971,128 @@ def apply_kit(doc, kit) -> dict:
     return rep
 
 
+_MISSING = {"__missing__": 1}
+_GROUPS = (("walls", "walls"), ("open", "openings"), ("struct", "structure"),
+           ("rooms", "rooms"))
+
+
+def _undo_snap(doc) -> dict:
+    """What the design may touch, as it stands now."""
+    import copy
+    a = doc["arch"]
+    sn = {g: {e["id"]: copy.deepcopy(e) for e in a.get(k, [])
+              if isinstance(e, dict) and e.get("id")} for g, k in _GROUPS}
+    for k in ("settings", "site", "materials"):
+        sn[k] = copy.deepcopy(doc.get(k) or {})
+    return sn
+
+
+def _undo_diff(pre, post) -> dict:
+    out = {}
+    for g, _k in _GROUPS:
+        a, b = pre[g], post[g]
+        out[g] = {"changed": {i: a[i] for i in a if i in b and a[i] != b[i]},
+                  "removed": [a[i] for i in a if i not in b],
+                  "added": [i for i in b if i not in a]}
+    for k in ("settings", "site", "materials"):
+        a, b = pre[k], post[k]
+        out[k] = {kk: a.get(kk, _MISSING) for kk in set(a) | set(b)
+                  if a.get(kk, _MISSING) != b.get(kk, _MISSING)}
+    return out
+
+
+def _undo_merge(old, new) -> dict:
+    """Two applications in a row: the first state of everything wins."""
+    out = {}
+    for g, _k in _GROUPS:
+        o = old.get(g) or {"changed": {}, "removed": [], "added": []}
+        n = new[g]
+        ch = dict(n["changed"])
+        ch.update(o["changed"])
+        ch = {i: v for i, v in ch.items() if i not in o["added"]}
+        rem = list(o["removed"])
+        have = {r.get("id") for r in rem}
+        for r in n["removed"]:
+            if r.get("id") in o["added"]:
+                continue            # it came with the first design: no loss
+            if r.get("id") not in have:
+                rem.append(r)
+        gone = {r.get("id") for r in n["removed"]}
+        added = [i for i in set(o["added"]) | set(n["added"])
+                 if i not in gone]
+        out[g] = {"changed": ch, "removed": rem, "added": added}
+    for k in ("settings", "site", "materials"):
+        d = dict(new[k])
+        d.update(old.get(k) or {})
+        out[k] = d
+    return out
+
+
+def apply_kit(doc, kit) -> dict:
+    """The elevation kit applied (3.64.102: and what it changed kept, so
+    «Remove design» can take every bit of it back)."""
+    pre = _undo_snap(doc)
+    try:
+        return _apply_kit(doc, kit)
+    finally:
+        try:
+            doc["look_undo"] = _undo_merge(doc.get("look_undo") or {},
+                                           _undo_diff(pre, _undo_snap(doc)))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("lookstyle undo record")
+
+
 def remove_kit(doc) -> None:
-    """The design taken off: the roofs it made gone, the look cleared (the
-    rest comes back as drawn at the next «Update from CAD»)."""
-    doc["arch"]["structure"] = [e for e in doc["arch"]["structure"]
-                                if not is_look_roof(e)]
+    """The design taken off, all of it: the roofs and parapets, the
+    windows, railings, finishes, the boundary wall and the settings it
+    changed, back as they were before it (what the model had since is
+    left alone)."""
+    a = doc["arch"]
+    a["structure"] = [e for e in a["structure"] if not is_look_roof(e)]
+    try:
+        from . import mosque as MQ
+        MQ.remove(doc)
+    except Exception:  # noqa: BLE001
+        pass
+    u = doc.get("look_undo") or {}
+    for g, k in _GROUPS:
+        d = u.get(g)
+        if not d:
+            continue
+        gone = set(d.get("added") or [])
+        cur = [e for e in a.get(k, []) if e.get("id") not in gone]
+        ch = d.get("changed") or {}
+        cur = [ch.get(e.get("id"), e) for e in cur]
+        have = {e.get("id") for e in cur}
+        cur += [r for r in d.get("removed") or [] if r.get("id") not in have]
+        a[k] = cur
+    if not u:                 # a design made before the changes were kept
+        st = doc.setdefault("settings", {})
+        ft = st.get("fin_terrace")
+        for r_ in a["rooms"]:
+            if ft and r_.get("mat_floor") == ft:
+                r_.pop("mat_floor", None)
+        for kk in ("fin_terrace", "fin_porch", "fin_entrance", "fin_veranda"):
+            st[kk] = ""
+        st["roof_parapet"] = True
+        site = doc.setdefault("site", {})
+        for kk in ("finish", "front_finish"):
+            if site.get(kk) == "match":
+                site[kk] = "plaster"
+        mats = doc.get("materials") or {}
+        for kk in ("wall", "site", "roof"):
+            if str((mats.get(kk) or {}).get("name", "")).endswith(
+                    "as designed"):
+                mats.pop(kk, None)
+    for k in ("settings", "site", "materials"):
+        tgt = doc.setdefault(k, {})
+        for kk, v in (u.get(k) or {}).items():
+            if v == _MISSING:
+                tgt.pop(kk, None)
+            else:
+                tgt[kk] = v
+    doc["look_undo"] = {}
     doc["look"] = {}
 
 
