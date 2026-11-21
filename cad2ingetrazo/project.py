@@ -11043,6 +11043,28 @@ def _finish_groups(doc):
     elev = elevations(arch)
     cat = CP.catalogue(doc)
     prep, count = [], {}
+    try:
+        from . import matlib as MLT_
+        ter_at_ = MLT_.attrs_of(st.get("fin_terrace") or "")
+    except Exception:  # noqa: BLE001
+        ter_at_ = None
+    _enc_cache = {}
+
+    def _enclosed(lid_):
+        """What the level's walls (not the railings) close in."""
+        if lid_ not in _enc_cache:
+            from shapely.geometry import Polygon as _Pg
+            from shapely.ops import unary_union as _uu8
+
+            from . import slabedges as SE8
+            ws_ = [w_ for w_ in arch["walls"] if w_["level"] == lid_
+                   and not w_.get("rail") and W.why_not(w_) is None]
+            u_ = _uu8(SE8.wall_polys(ws_)).buffer(0.02) if ws_ else None
+            _enc_cache[lid_] = _uu8([
+                _Pg(g_.exterior) for g_ in getattr(u_, "geoms", [u_])
+                if g_.geom_type == "Polygon"]) if u_ is not None \
+                and not u_.is_empty else None
+        return _enc_cache[lid_]
     for i, lv in enumerate(arch["levels"]):
         lid = lv["id"]
         if not any(w["level"] == lid for w in arch["walls"]):
@@ -11084,22 +11106,43 @@ def _finish_groups(doc):
                         poly = poly.difference(cut_)
                     except Exception:  # noqa: BLE001
                         pass
-            faces = []
-            for pg in getattr(poly, "geoms", [poly]):
-                if pg.geom_type != "Polygon" or pg.area < 0.05:
+            jobs_ = [(poly, room)]
+            if ter_at_ is not None and lv.get("kind") != "ground" and \
+                    not (room.get("rec") or {}).get("mat_floor"):
+                # 3.64.98: the part of the room with no wall round it (a
+                # back terrace the plan leaves as one open space) takes
+                # the terrace finish
+                try:
+                    enc_ = _enclosed(lid)
+                    ot_ = poly.difference(enc_) if enc_ is not None else None
+                    if ot_ is not None and ot_.area >= 1.0:
+                        ins_ = poly.intersection(enc_)
+                        jobs_ = [(ot_, dict(room, _tex=ter_at_))]
+                        if ins_.area >= 0.3:
+                            jobs_.append((ins_, room))
+                except Exception:  # noqa: BLE001
+                    from .host import log_error
+                    log_error("project open terrace part")
+                    jobs_ = [(poly, room)]
+            for poly, room in jobs_:
+                faces = []
+                for pg in getattr(poly, "geoms", [poly]):
+                    if pg.geom_type != "Polygon" or pg.area < 0.05:
+                        continue
+                    piece = {"outer": S._ccw([tuple(q) for q in
+                                              list(pg.exterior.coords)[:-1]]),
+                             "holes": [list(reversed(S._ccw(
+                                 [tuple(q) for q in list(h.coords)[:-1]])))
+                                 for h in pg.interiors]}
+                    faces += W.solid(piece, 0.0, f) or []
+                if not faces:
                     continue
-                piece = {"outer": S._ccw([tuple(q) for q in
-                                          list(pg.exterior.coords)[:-1]]),
-                         "holes": [list(reversed(S._ccw(
-                             [tuple(q) for q in list(h.coords)[:-1]])))
-                             for h in pg.interiors]}
-                faces += W.solid(piece, 0.0, f) or []
-            if not faces:
-                continue
-            lf = CP.local_faces(faces, (0.0, 0.0, 0.0, 0.0))
-            key = CP.shape_key(lf)
-            count[key] = count.get(key, 0) + 1
-            prep.append((lv, lid, room, f, z, lf, key))
+                lf = CP.local_faces(faces, (0.0, 0.0, 0.0, 0.0))
+                key = CP.shape_key(lf)
+                if room.get("_tex"):
+                    key = (key, "tex")
+                count[key] = count.get(key, 0) + 1
+                prep.append((lv, lid, room, f, z, lf, key))
     edge = []          # the finish carried out to the slab's edge
     if st.get("finish_to_edge", True):
         from . import slabedges as SE
@@ -11297,13 +11340,19 @@ def _finish_groups(doc):
         if key not in protos:
             mesh = Mesh()
             for lp, hs, _c in lf:
-                _safe_add(mesh, [QVector3D(*q) for q in lp],
-                              [[QVector3D(*q) for q in h] for h in hs])
+                fc_ = _safe_add(mesh, [QVector3D(*q) for q in lp],
+                                [[QVector3D(*q) for q in h] for h in hs])
+                if fc_ is not None and room.get("_tex"):
+                    n_ = fc_.normal()
+                    if n_.z() > 0.9 * max(n_.length(), 1e-9):
+                        fc_.attrs.update(dict(room["_tex"]))
             protos[key] = mesh
         tk = CP.type_of("room", {"finish_t": f})
         t = cat.get(tk[1])
         from . import areas as AR_
         kd_ = AR_.kind_of(room["name"])       # 3.64.77: its own name
+        if room.get("_tex"):
+            kd_ = ("terrace", "Terrace")
         g = Group(protos[key], name=(f"{t['mark']} · " if t else "")
                   + (f"{kd_[1]} floor finish {room['name']} · "
                      if kd_ else f"Floor finish {room['name']} · ")
@@ -11312,7 +11361,8 @@ def _finish_groups(doc):
         g.component = count[key] > 1
         g.material = {"color": COLOR["room"], "opacity": 1.0}
         g.layer = level_layer(lv["name"])
-        g.ext = {KEY: {"type": "room", "id": room_key(lid, room),
+        g.ext = {KEY: {"type": "room", "id": room_key(lid, room) + (
+            "~open" if room.get("_tex") else ""),
                        "level": lid,
                        **({"ctype": tk[1], "mark": t["mark"]} if t else {})}}
         out.append(g)
