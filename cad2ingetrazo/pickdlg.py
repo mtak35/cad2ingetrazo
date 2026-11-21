@@ -933,13 +933,6 @@ class PlotDialog(QDialog):
             "own line (else the wall's CAD layer is used, else the plot "
             "limit).")
         self.b_wall.clicked.connect(self._start_wall)
-        self.b_marks = QPushButton("Levels from the plan's marks")
-        self.b_marks.setToolTip(
-            "Where the plan has levels written (LEV. +2'-6\", +0.45 …), "
-            "a polyline is made round each — the closed outline holding "
-            "the mark, else a patch round it — with that level. Edit them "
-            "after with «Edit a part…».")
-        self.b_marks.clicked.connect(self._auto_marks)
         self.b_edit = QPushButton("Edit a part…")
         self.b_edit.setToolTip(
             "Click a part, then drag its corners, click an edge to add a "
@@ -1052,10 +1045,23 @@ class PlotDialog(QDialog):
             for lp in self.canvas.d.get("loops") or []:
                 if len(lp["pts"]) >= 3:
                     ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
+            ok = lambda g: 0.002 * plot.area < g.area < 0.98 * plot.area
             try:
-                self._polys = [g for g in polygonize(unary_union(ls))
-                               if 0.002 * plot.area < g.area <
-                               0.98 * plot.area]
+                un = unary_union(ls)
+                self._polys = [g for g in polygonize(un) if ok(g)]
+                # lines with small gaps (not quite closed): the enclosed
+                # regions seen through a thickened drawing, grown back
+                tol = max(plot.length * 0.0012, 1e-6)
+                fat = un.buffer(tol, join_style=2)
+                for g in getattr(fat, "geoms", [fat]):
+                    for r in g.interiors:
+                        from shapely.geometry import Polygon as _Pg
+                        q = _Pg(r).buffer(tol, join_style=2)
+                        if ok(q) and not any(
+                                abs(q.area - h.area) < 0.02 * h.area and
+                                q.centroid.distance(h.centroid) <
+                                tol * 4 for h in self._polys):
+                            self._polys.append(q)
             except Exception:  # noqa: BLE001
                 self._polys = []
         ms, _r = self._level_texts()
@@ -1128,8 +1134,13 @@ class PlotDialog(QDialog):
                     best = g
         except Exception:  # noqa: BLE001
             best = None
-        if best is None:                  # no line round it: a patch
-            best = pt.buffer(max(plot.length / 40.0, 1.0), 4)
+        if best is None:                  # no closed line round it
+            self.tip.setText(
+                "<b>No closed line round this level text.</b> Pick its "
+                "boundary yourself: «Click the boundary line (curves too)» "
+                "or «Click inside the boundary outline» below, then give "
+                "its level.")
+            return
         best = best.intersection(plot) if best.intersection(plot).area > \
             1e-6 else best
         n0 = len(self._parts)
@@ -1222,81 +1233,6 @@ class PlotDialog(QDialog):
             self._phase = "parts"
             c.poly, c.closed = [], False
         return True
-
-    def _auto_marks(self):
-        """A polyline round each level written on the plan."""
-        if not self._need_plot():
-            return
-        from collections import Counter
-        from shapely.geometry import LineString, Point, Polygon
-        from shapely.ops import polygonize, unary_union
-        from . import parking as PK
-        plot = self._geo(self._plot_poly)
-        near = plot.buffer(max(plot.length * 0.02, 1.0))
-        marks = []
-        for t in self.canvas.d.get("texts") or []:
-            v = PK.level_note(t.get("text"))
-            if v and v[1] is not None and near.contains(
-                    Point(t["x"], t["y"])):
-                marks.append((t["x"], t["y"], float(v[1]),
-                              float(t.get("h") or 0.0)))
-        if not marks:
-            self.tip.setText("<b>No level marks found</b> inside the plot "
-                             "(notes like «LEV. +2'-6\"»). Pick the levels "
-                             "polyline by polyline instead.")
-            return
-        ref = Counter(round(m[2], 3) for m in marks).most_common(1)[0][0]
-        x0, y0, x1, y1 = near.bounds
-        ls = []
-        for sg in self.canvas.d.get("segs") or []:
-            if x0 <= sg[0] <= x1 and y0 <= sg[1] <= y1 and \
-                    x0 <= sg[2] <= x1 and y0 <= sg[3] <= y1:
-                ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
-        for lp in self.canvas.d.get("loops") or []:
-            if len(lp["pts"]) >= 3:
-                ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
-        cand = []
-        try:
-            cand = [g for g in polygonize(unary_union(ls))
-                    if 0.002 * plot.area < g.area < 0.98 * plot.area
-                    and plot.buffer(1e-6).contains(g.representative_point())]
-        except Exception:  # noqa: BLE001
-            cand = []
-        cand.sort(key=lambda g: g.area)
-        groups = {}                       # candidate index → [(z…)], poly
-        loose = []
-        for x, y, v, h in marks:
-            pt = Point(x, y)
-            k = next((i for i, g in enumerate(cand) if g.contains(pt)), None)
-            if k is None:
-                loose.append((x, y, v, h))
-            else:
-                groups.setdefault(k, []).append(v)
-        made = []
-        for k, vs in groups.items():
-            z = Counter(round(q, 3) for q in vs).most_common(1)[0][0] - ref
-            if abs(z) > 1e-6 or len(groups) + len(loose) == 1:
-                made.append((cand[k], z))
-        r_ = max(plot.length / 40.0, 1.0)
-        for x, y, v, h in loose:                # no outline: a patch
-            z = v - ref
-            if abs(z) > 1e-6:
-                made.append((Point(x, y).buffer(max(r_, 4 * h), 4)
-                             .intersection(plot), z))
-        made.sort(key=lambda m: m[0].area)       # small ones win the overlap
-        for g, z in made:
-            for q in getattr(g, "geoms", [g]):
-                if q.geom_type == "Polygon":
-                    self._add([tuple(c) for c in
-                               list(q.exterior.coords)[:-1]], z)
-        self.canvas.parts = list(self._parts)
-        self.canvas.mode = "chain"
-        self.canvas.update()
-        self._changed()
-        self.tip.setText(
-            f"<b>{len(made)} level parts from the plan's marks</b> (main "
-            "ground = the commonest mark). Fix any with «Edit a part…»; "
-            "the rest of the plot stays on the main ground.")
 
     def _edit_pick(self):
         if self._need_plot() and self._parts:
