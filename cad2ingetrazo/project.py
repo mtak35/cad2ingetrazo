@@ -14146,6 +14146,13 @@ def plot_top(doc) -> float:
     """The plot's ground: under the ground floor by the plinth (3.64.71:
     on a two-ground site, the upper plaza's lowest noted terrace)."""
     hl_ = doc.get("hill") or {}
+    try:                  # 3.64.91: level parts set: the main ground's own
+        from . import hillside as HS_      # level, on the floors' datum
+        if HS_.zoned(doc):
+            return float((doc["arch"].get("plot") or {}).get("ref", 0.0)
+                         or 0.0)
+    except Exception:  # noqa: BLE001
+        pass
     if hl_.get("on") and hl_.get("plaza") is not None:
         ids_ = {lv["id"] for lv in doc["arch"]["levels"]}
         if hl_.get("upper") in ids_ and hl_.get("lower") in ids_:
@@ -14349,13 +14356,14 @@ def plot_zones(doc) -> list:
         except Exception:  # noqa: BLE001
             pass
     out, used = [], None
+    off_ = _parts_offset(doc)
     for pt in parts:
         g = Polygon(pt["poly"]).buffer(0)
         if used is not None:
             g = g.difference(used)
         if g.is_empty or g.area < 0.01:
             continue
-        out.append((g, float(pt.get("z", 0.0))))
+        out.append((g, float(pt.get("z", 0.0)) - off_))
         used = g if used is None else unary_union([used, g])
     rest = pl if used is None else pl.difference(used)
     if not rest.is_empty and rest.area > 0.01:
@@ -14375,16 +14383,22 @@ def zone_dz(zones, x, y) -> float:
     return best
 
 
-def _zone_level(doc, dz) -> float:
-    """A level part's level on the CAD's datum (m). Parts made by the plot
-    dialog are over the main ground (ref + z); older plots kept the notes'
-    own levels (z = the datum level, the main ground's part at z = ref)."""
+def _parts_offset(doc) -> float:
+    """Parts made by the plot dialog are over the main ground (z = 0 there).
+    Older plots kept the notes' own levels (the main ground's part at
+    z = ref): then z - ref is the height over the main ground."""
     plot = doc["arch"].get("plot") or {}
     ref = float(plot.get("ref", 0.0) or 0.0)
     zs = [float(p.get("z", 0.0) or 0.0) for p in plot.get("parts") or []]
     if ref and any(abs(z - ref) < 0.002 for z in zs):
-        return dz                         # already on the datum
-    return ref + dz
+        return ref
+    return 0.0
+
+
+def _zone_level(doc, dz) -> float:
+    """A zone's level on the CAD's datum (m): the main ground + its height."""
+    plot = doc["arch"].get("plot") or {}
+    return float(plot.get("ref", 0.0) or 0.0) + dz
 
 
 def part_levels(doc):
