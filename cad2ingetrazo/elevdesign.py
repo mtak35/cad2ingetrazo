@@ -223,6 +223,14 @@ class ElevationDesigner(QDialog):
         g1 = QGroupBox("Roofs")
         f1 = QFormLayout(g1)
         self.roof = _combo(ROOFS)
+        self.keep_roof = QCheckBox("Keep the roof structure as built (the "
+                                   "design does not touch the roof)")
+        self.keep_roof.setChecked(True)
+        self.keep_roof.setToolTip("Ticked: the roof, parapets and roof "
+                                  "slab stay as imported. Untick to let "
+                                  "this design build its own roof below.")
+        self.keep_roof.toggled.connect(lambda _c: self._relevance())
+        f1.addRow(self.keep_roof)
         f1.addRow("Roof", self.roof)
         self.roof.currentIndexChanged.connect(lambda _i: self._relevance())
         self.slope = QDoubleSpinBox()
@@ -364,6 +372,8 @@ class ElevationDesigner(QDialog):
         look = self.panel.doc().get("look") or {}
         self._fill(dict(LS.KIT_DEFAULT, **look) if look.get("manual")
                    or look.get("style") else LS.preset("mediterranean"))
+        # 3.64.99: the roof is kept unless the saved design made one
+        self.keep_roof.setChecked(bool(look.get("roof_keep", True)))
 
     # ---- the fields ------------------------------------------------------------
     def _fill(self, k):
@@ -404,10 +414,12 @@ class ElevationDesigner(QDialog):
             ch.setEnabled(ok)
             ch.setToolTip("" if ok else "Not part of this style — tick "
                           "«Show every element» to use it anyway")
-        tiled = self.roof.currentData() in LS.PITCHED
+        keep_ = self.keep_roof.isChecked()
+        self.roof.setEnabled(not keep_)
+        tiled = self.roof.currentData() in LS.PITCHED and not keep_
         for w in (self.slope, self.eave, self.annex):
-            w.setEnabled(tiled or unlock)
-        flat = self.roof.currentData() == "asdrawn"
+            w.setEnabled(tiled or (unlock and not keep_))
+        flat = keep_ or self.roof.currentData() == "asdrawn"
         for w in (self.fd, self.fh):
             w.setEnabled(flat or unlock)
         arch = LS.PRESETS.get(st, ("", {}))[1]
@@ -416,7 +428,9 @@ class ElevationDesigner(QDialog):
     def _kit(self) -> dict:
         k = {"style": self.style.currentData(),
              "front": self.front.currentData(),
-             "roof": self.roof.currentData(),
+             "roof": "asdrawn" if self.keep_roof.isChecked()
+             else self.roof.currentData(),
+             "roof_keep": self.keep_roof.isChecked(),
              "roof_slope": round(self.slope.value(), 2),
              "roof_eave": round(self.eave.value(), 3),
              "annex_roof": self.annex.isChecked(),
@@ -464,7 +478,8 @@ class ElevationDesigner(QDialog):
         doc = self.panel.doc()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            rep = LS.apply_kit(doc, self._kit())
+            kit_ = self._kit()
+            rep = LS.apply_kit(doc, kit_)
             doc["look"]["manual"] = True
         except Exception as e:  # noqa: BLE001
             from .host import log_error

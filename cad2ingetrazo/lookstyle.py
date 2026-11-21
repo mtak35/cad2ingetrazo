@@ -688,6 +688,7 @@ def apply_kit(doc, kit) -> dict:
     arch = doc["arch"]
     rep = {"look": k.get("style", "custom")}
     mats = doc.setdefault("materials", {})
+    prev0_ = dict(doc.get("look") or {})
     doc["look"] = {kk: v for kk, v in k.items()}
     if k.get("style") == "mediterranean":
         doc["look"]["style"] = "mediterranean"
@@ -702,8 +703,11 @@ def apply_kit(doc, kit) -> dict:
     ids = [levels[i]["id"] for i in order]
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
     # 1. the roofs
-    arch["structure"] = [e for e in arch["structure"] if not is_look_roof(e)]
-    if k["roof"] in PITCHED:
+    keep_roof = bool(k.get("roof_keep"))    # 3.64.100: the roof is left
+    if not keep_roof:                       # exactly as it is (the plan's
+        arch["structure"] = [e for e in arch["structure"]   # or an earlier
+                             if not is_look_roof(e)]        # design's)
+    if k["roof"] in PITCHED and not keep_roof:
         mats["roof"] = {"name": "Roof tiles, as designed",
                         "color": list(k["roof_c"])}
         rep["colours"] += ", roof tiles"
