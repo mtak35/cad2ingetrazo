@@ -321,6 +321,13 @@ def tops(doc) -> list:
                 # 3.64.54: a lower volume's top (a terrace, a low roof):
                 # all of it one light slab edge, at its parapet's top
                 zt = z1 if _railed(arch, levels, j, p, q) else z1 + ph
+                try:        # 3.64.103: down to the floor finish there
+                    from .project import floor_offset_at
+                    off = float(floor_offset_at(doc, levels[j]["id"], mid))
+                    if off < 0 and ph <= 0.05:
+                        zt = el[j] + off
+                except Exception:  # noqa: BLE001
+                    pass
                 out.append((i, p, q, u, n, L, zt, "terrace"))
             else:
                 mine.append((i, p, q, u, n, L, z1 + ph, "roof", ph))

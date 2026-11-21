@@ -1067,7 +1067,7 @@ def remove_kit(doc) -> None:
         have = {e.get("id") for e in cur}
         cur += [r for r in d.get("removed") or [] if r.get("id") not in have]
         a[k] = cur
-    if not u:                 # a design made before the changes were kept
+    if True:        # 3.64.103: always the full clean-up (a delete, not an undo)
         st = doc.setdefault("settings", {})
         ft = st.get("fin_terrace")
         for r_ in a["rooms"]:
@@ -1076,6 +1076,9 @@ def remove_kit(doc) -> None:
         for kk in ("fin_terrace", "fin_porch", "fin_entrance", "fin_veranda"):
             st[kk] = ""
         st["roof_parapet"] = True
+        for kk in [k for k in st if str(k).startswith(("fin_", "bw_"))]:
+            st[kk] = "" if kk.startswith("fin_") else st[kk]
+        st.pop("terrace_rail_kind", None)
         site = doc.setdefault("site", {})
         for kk in ("finish", "front_finish"):
             if site.get(kk) == "match":
