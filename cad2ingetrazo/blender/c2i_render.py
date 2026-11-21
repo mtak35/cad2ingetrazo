@@ -442,6 +442,233 @@ def _front_light(job, sun_dir, env):
     return (cx * math.cos(e), cy * math.cos(e), math.sin(e))
 
 
+# ---- city / forest beyond the plot (3.64.96) ---------------------------------------
+def _site_box(scene):
+    """(cx, cy, radius) of the model — what stands on the plot."""
+    xs, ys = [], []
+    for o in scene.objects:
+        if o.type != "MESH" or o.name.startswith("IngeTrazo ground"):
+            continue
+        for c in o.bound_box:
+            w = o.matrix_world @ Vector(c)
+            xs.append(w.x)
+            ys.append(w.y)
+    if not xs:
+        return 0.0, 0.0, 30.0
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    r = max(max(xs) - min(xs), max(ys) - min(ys)) / 2
+    return cx, cy, max(r, 10.0)
+
+
+def _cam_xy(scene):
+    c = scene.camera
+    if c is None:
+        return None
+    return c.matrix_world.translation.x, c.matrix_world.translation.y
+
+
+def _pbr(name, col, rough=0.85):
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    b = _bsdf(m)
+    if b is not None:
+        b.inputs["Base Color"].default_value = (*col, 1.0)
+        b.inputs["Roughness"].default_value = rough
+    return m
+
+
+def _facade(name, col):
+    """A building's wall with floors of windows: lit by the world's own
+    coordinates (3 m bays, 3.2 m floors); the glass dark and glossy, the
+    roofs plain."""
+    m = _pbr(name, col)
+    nt = m.node_tree
+    b = _bsdf(m)
+    try:
+        N = nt.nodes
+
+        def math_(op, a=None, b_=None, clamp=False):
+            n = N.new("ShaderNodeMath")
+            n.operation = op
+            n.use_clamp = clamp
+            if a is not None:
+                n.inputs[0].default_value = a
+            if b_ is not None:
+                n.inputs[1].default_value = b_
+            return n
+        L = nt.links.new
+        tc = N.new("ShaderNodeTexCoord")
+        sp = N.new("ShaderNodeSeparateXYZ")
+        L(tc.outputs["Object"], sp.inputs["Vector"])
+        xy = math_("ADD")
+        L(sp.outputs["X"], xy.inputs[0])
+        L(sp.outputs["Y"], xy.inputs[1])
+        fu = math_("FRACT")
+        L(math_("DIVIDE", None, 3.0).outputs[0], fu.inputs[0]) \
+            if False else None
+        du = math_("DIVIDE", None, 3.0)
+        L(xy.outputs[0], du.inputs[0])
+        L(du.outputs[0], fu.inputs[0])
+        dv = math_("DIVIDE", None, 3.2)
+        L(sp.outputs["Z"], dv.inputs[0])
+        fv = math_("FRACT")
+        L(dv.outputs[0], fv.inputs[0])
+
+        def band(src, lo, hi):
+            g = math_("GREATER_THAN", None, lo)
+            L(src.outputs[0], g.inputs[0])
+            l = math_("LESS_THAN", None, hi)
+            L(src.outputs[0], l.inputs[0])
+            r = math_("MULTIPLY")
+            L(g.outputs[0], r.inputs[0])
+            L(l.outputs[0], r.inputs[1])
+            return r
+        wu, wv = band(fu, 0.18, 0.82), band(fv, 0.28, 0.80)
+        win = math_("MULTIPLY")
+        L(wu.outputs[0], win.inputs[0])
+        L(wv.outputs[0], win.inputs[1])
+        gn = N.new("ShaderNodeNewGeometry")
+        sn = N.new("ShaderNodeSeparateXYZ")
+        L(gn.outputs["Normal"], sn.inputs["Vector"])
+        ab = math_("ABSOLUTE")
+        L(sn.outputs["Z"], ab.inputs[0])
+        wall = math_("LESS_THAN", None, 0.5)
+        L(ab.outputs[0], wall.inputs[0])
+        fin = math_("MULTIPLY")
+        L(win.outputs[0], fin.inputs[0])
+        L(wall.outputs[0], fin.inputs[1])
+        mix = N.new("ShaderNodeMix")
+        mix.data_type = "RGBA"
+        mix.inputs["A"].default_value = (*col, 1.0)
+        mix.inputs["B"].default_value = (0.05, 0.09, 0.15, 1.0)
+        L(fin.outputs[0], mix.inputs["Factor"])
+        L(mix.outputs["Result"], b.inputs["Base Color"])
+        rg = math_("SUBTRACT", 0.85)
+        L(fin.outputs[0], rg.inputs[1])
+        L(rg.outputs[0], b.inputs["Roughness"])
+    except Exception:  # noqa: BLE001
+        pass
+    return m
+
+
+def _join_boxes(name, boxes, mat):
+    """boxes [(x, y, z0, sx, sy, h)] → one mesh object."""
+    import bmesh
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    for x, y, z0, sx, sy, h in boxes:
+        r = bmesh.ops.create_cube(bm, size=1.0)
+        bmesh.ops.scale(bm, vec=(sx, sy, h), verts=r["verts"])
+        bmesh.ops.translate(bm, vec=(x, y, z0 + h / 2), verts=r["verts"])
+    bm.to_mesh(me)
+    bm.free()
+    ob = bpy.data.objects.new(name, me)
+    ob.data.materials.append(mat)
+    scene = bpy.context.scene
+    scene.collection.objects.link(ob)
+    return ob
+
+
+def city_view(scene, z, seed=7):
+    """Blocks of buildings round the site, streets between, taller away
+    from the plot (a city seen from a house)."""
+    import random
+    rnd = random.Random(seed)
+    cx, cy, R = _site_box(scene)
+    cam = _cam_xy(scene)
+    r0 = R + 28.0
+    pitch, street = 62.0, 16.0
+    blk = pitch - street
+    pal = [(0.62, 0.58, 0.50), (0.72, 0.70, 0.66), (0.50, 0.50, 0.52),
+           (0.55, 0.36, 0.28), (0.78, 0.74, 0.64), (0.40, 0.44, 0.50)]
+    mats = [_facade("City %d" % i, c) for i, c in enumerate(pal)]
+    pad_m = _pbr("City pavement", (0.46, 0.45, 0.43), 0.9)
+    per = [[] for _ in pal]
+    pads = []
+    n = int(480 / pitch) + 1
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            x, y = cx + i * pitch, cy + j * pitch
+            d = math.hypot(x - cx, y - cy)
+            if d < r0 + blk / 2 or d > 520:
+                continue
+            if cam and math.hypot(x - cam[0], y - cam[1]) < 60.0:
+                continue                 # not round the camera
+            pads.append((x, y, z, blk, blk, 0.2))
+            k = max(1, int(rnd.random() * 3) + 1)      # 1-3 buildings
+            for _ in range(k):
+                sx = blk * (0.35 + 0.4 * rnd.random())
+                sy = blk * (0.35 + 0.4 * rnd.random())
+                bx = x + (rnd.random() - 0.5) * (blk - sx) * 0.9
+                by = y + (rnd.random() - 0.5) * (blk - sy) * 0.9
+                lo = 9.0 + 0.04 * d
+                h = lo + rnd.random() ** 2 * (28.0 + 0.12 * d)
+                h = round(h / 3.2) * 3.2
+                per[rnd.randrange(len(pal))].append(
+                    (bx, by, z + 0.2, sx, sy, h))
+    _join_boxes("IngeTrazo city pads", pads, pad_m)
+    for i, bx in enumerate(per):
+        if bx:
+            ob = _join_boxes("IngeTrazo city %d" % i, bx, mats[i])
+            _bevel(mats[i], 0.05)
+    say("city view", sum(len(b) for b in per), "buildings")
+
+
+def forest_view(scene, z, seed=11):
+    """Trees round the site — a wood seen from a house, denser and taller
+    with distance."""
+    import bmesh
+    import random
+    rnd = random.Random(seed)
+    cx, cy, R = _site_box(scene)
+    cam = _cam_xy(scene)
+    r0 = R + 14.0
+    greens = [(0.10, 0.25, 0.07), (0.14, 0.30, 0.08), (0.08, 0.20, 0.06),
+              (0.20, 0.33, 0.09)]
+    gm = [_pbr("Forest leaf %d" % i, c, 0.8) for i, c in enumerate(greens)]
+    tm = _pbr("Forest trunk", (0.18, 0.11, 0.06), 0.9)
+    trunk = bmesh.new()
+    crowns = [bmesh.new() for _ in greens]
+    n = 0
+    for _ in range(1700):
+        a = rnd.random() * 2 * math.pi
+        d = r0 + (rnd.random() ** 0.8) * (420.0 - r0)
+        x, y = cx + d * math.cos(a), cy + d * math.sin(a)
+        if cam and math.hypot(x - cam[0], y - cam[1]) < 14.0:
+            continue
+        h = (7.0 + rnd.random() * 9.0) * (1.0 + d / 500.0)
+        rc = h * (0.22 + 0.1 * rnd.random())
+        r = bmesh.ops.create_cone(trunk, cap_ends=True, segments=6,
+                                  radius1=h * 0.03 + 0.1,
+                                  radius2=h * 0.02 + 0.06, depth=h * 0.55)
+        bmesh.ops.translate(trunk, vec=(x, y, z + h * 0.275),
+                            verts=r["verts"])
+        cb = crowns[rnd.randrange(len(greens))]
+        for lv in range(3):                 # a crown of three blobs
+            r = bmesh.ops.create_icosphere(cb, subdivisions=2,
+                                           radius=rc * (0.75 + 0.3 *
+                                                        rnd.random()))
+            bmesh.ops.scale(cb, vec=(1.0, 1.0, 1.25), verts=r["verts"])
+            bmesh.ops.translate(cb, vec=(
+                x + (rnd.random() - 0.5) * rc * 1.1,
+                y + (rnd.random() - 0.5) * rc * 1.1,
+                z + h * (0.55 + 0.2 * lv) + rnd.random() * rc * 0.3),
+                verts=r["verts"])
+        n += 1
+    for nm, bm, mat in [("IngeTrazo forest trunks", trunk, tm)] + [
+            ("IngeTrazo forest leaves %d" % i, b, gm[i])
+            for i, b in enumerate(crowns)]:
+        me = bpy.data.meshes.new(nm)
+        bm.to_mesh(me)
+        bm.free()
+        ob = bpy.data.objects.new(nm, me)
+        ob.data.materials.append(mat)
+        scene.collection.objects.link(ob)
+        for p_ in me.polygons:
+            p_.use_smooth = True
+    say("forest view", n, "trees")
+
+
 def environment(scene, job, c2i):
     env = c2i.get("env") or {}
     sky = env.get("sky", "day")
@@ -532,6 +759,9 @@ def environment(scene, job, c2i):
         say("environment", sky)
     # the ground beyond the plot
     gnd = env.get("ground", "grass")
+    view_ = gnd if gnd in ("city", "forest") else ""
+    if view_:                       # 3.64.96: the view beyond the plot
+        gnd = "asphalt" if view_ == "city" else "grass"
     if gnd != "none":
         cols = {"grass": (0.07, 0.16, 0.04), "concrete": (0.45, 0.44, 0.42),
                 "asphalt": (0.06, 0.06, 0.065), "plain": (0.42, 0.42, 0.40),
@@ -546,6 +776,13 @@ def environment(scene, job, c2i):
         if g is not None and gnd in ("grass", "concrete", "asphalt",
                                      "sand"):
             make(g, "grass" if gnd == "grass" else "concrete", {}, 1.0)
+        try:
+            if view_ == "city":
+                city_view(scene, z)
+            elif view_ == "forest":
+                forest_view(scene, z)
+        except Exception as e_:  # noqa: BLE001
+            say("view", "skipped:", e_)
     # haze: a thin volume in the world (Cycles)
     haze = float(env.get("haze", 0.0))
     if haze > 0 and scene.world and scene.world.node_tree:

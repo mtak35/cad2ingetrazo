@@ -1002,7 +1002,10 @@ def _dialog_class():
             self.ground = QComboBox()
             for k, lab in (("grass", "Grass"), ("concrete", "Concrete"),
                            ("asphalt", "Asphalt road"), ("sand", "Sand"),
-                           ("plain", "Plain grey"), ("none", "None")):
+                           ("plain", "Plain grey"),
+                           ("city", "City view (buildings and streets)"),
+                           ("forest", "Forest view (trees)"),
+                           ("none", "None")):
                 self.ground.addItem(lab, k)
             self.ground.setCurrentIndex(max(0, self.ground.findData(
                 self._qs.value(SK + "ground", "grass"))))
