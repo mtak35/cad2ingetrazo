@@ -48,7 +48,9 @@ class Canvas(QWidget):
         self.wall = []                          # the boundary wall's line
         self.on_part = None                     # click on a part → its index
         self.on_text = None                     # click (x, y) in leveltext
-        self.level_texts = []                   # [(x, y, label)] to mark
+        self.level_texts = []                   # [(x, y, label)]
+        self.level_outlines = []                # [pts] the lines round them
+        self._hover = None
         self._vdrag = None                      # corner being dragged (edit)
         self.parts = []                         # [(poly, z)] level parts
         self.lines = [QLineF(s[0], s[1], s[2], s[3]) for s in drawing["segs"]]
@@ -290,6 +292,15 @@ class Canvas(QWidget):
 
     def mouseMoveEvent(self, e):
         self._mouse = e.position()
+        if self.mode == "leveltext":
+            q = self.to_dwg(e.position())
+            hit = [i for i, pg in enumerate(self.level_outlines)
+                   if _inside((q.x(), q.y()), pg)]
+            h = min(hit, key=lambda i: _area(self.level_outlines[i])) \
+                if hit else None
+            if h != self._hover:
+                self._hover = h
+                self.update()
         if self.mode == "edit" and self._vdrag is not None:
             self._edit_move(e.position())
             self.update()
@@ -426,11 +437,18 @@ class Canvas(QWidget):
                 p.drawText(qp.boundingRect().center(),
                            f"Level {i + 1}: {both_txt(zz)}")
         if self.mode == "leveltext":
-            p.setPen(QPen(QColor("#f59e0b"), 2))
-            p.setBrush(Qt.NoBrush)
-            for x, y, lab in self.level_texts:
-                c = self.view.map(QPointF(x, y))
-                p.drawEllipse(c, 9, 9)
+            from PySide6.QtGui import QPolygonF
+            for i, pts_ in enumerate(self.level_outlines):
+                qp = QPolygonF([self.view.map(QPointF(*q)) for q in pts_])
+                if i == self._hover:
+                    c = QColor("#f59e0b")
+                    c.setAlpha(60)
+                    p.setBrush(c)
+                    p.setPen(QPen(QColor("#f59e0b"), 4))
+                else:
+                    p.setBrush(Qt.NoBrush)
+                    p.setPen(QPen(QColor("#f59e0b"), 2, Qt.DashLine))
+                p.drawPolygon(qp)
         if self.wall:
             from PySide6.QtGui import QPolygonF
             p.setPen(QPen(QColor("#d946ef"), 3))
@@ -1017,11 +1035,53 @@ class PlotDialog(QDialog):
             self._marks = (ms, ref)
         return self._marks
 
+    def _outline_of(self, k):
+        """The smallest closed line round level text k (a polygon), or
+        None. The lines are polygonized once."""
+        from shapely.geometry import LineString, Point
+        from shapely.ops import polygonize, unary_union
+        if getattr(self, "_polys", None) is None:
+            plot = self._geo(self._plot_poly)
+            near = plot.buffer(max(plot.length * 0.02, 1.0))
+            x0, y0, x1, y1 = near.bounds
+            ls = []
+            for sg in self.canvas.d.get("segs") or []:
+                if x0 <= sg[0] <= x1 and y0 <= sg[1] <= y1 and \
+                        x0 <= sg[2] <= x1 and y0 <= sg[3] <= y1:
+                    ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
+            for lp in self.canvas.d.get("loops") or []:
+                if len(lp["pts"]) >= 3:
+                    ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
+            try:
+                self._polys = [g for g in polygonize(unary_union(ls))
+                               if 0.002 * plot.area < g.area <
+                               0.98 * plot.area]
+            except Exception:  # noqa: BLE001
+                self._polys = []
+        ms, _r = self._level_texts()
+        pt = Point(ms[k][0], ms[k][1])
+        best = None
+        for g in self._polys:
+            if g.contains(pt) and (best is None or g.area < best.area):
+                best = g
+        return best
+
     def _level_mode(self):
         c = self.canvas
         ms, _ref = self._level_texts()
         from .host import ft_in_txt
         c.level_texts = [(x, y, ft_in_txt(v)) for x, y, v in ms]
+        self._outl = {}
+        outs = []
+        for k in range(len(ms)):
+            g = self._outline_of(k)
+            if g is not None:
+                key = tuple(round(v, 3) for v in g.bounds)
+                if key not in self._outl:
+                    self._outl[key] = (g, k)
+                    outs.append([tuple(q) for q in
+                                 list(g.exterior.coords)[:-1]])
+        c.level_outlines = outs
         c.mode = "leveltext"
         c.update()
         self._changed()
@@ -1035,12 +1095,17 @@ class PlotDialog(QDialog):
         ms, ref = self._level_texts()
         if not ms:
             return
-        k = min(range(len(ms)), key=lambda i: _m.hypot(ms[i][0] - x,
-                                                       ms[i][1] - y))
-        if _m.hypot(ms[k][0] - x, ms[k][1] - y) > tol:
-            self.tip.setText("<b>Click on a level text</b> (the orange "
-                             "circles).")
-            return
+        hit = [(g, k0) for g, k0 in getattr(self, "_outl", {}).values()
+               if g.contains(Point(x, y))]
+        if hit:                          # inside a line round a level
+            _g, k = min(hit, key=lambda h: h[0].area)
+        else:
+            k = min(range(len(ms)), key=lambda i: _m.hypot(ms[i][0] - x,
+                                                           ms[i][1] - y))
+            if _m.hypot(ms[k][0] - x, ms[k][1] - y) > tol:
+                self.tip.setText("<b>Click inside a dashed line round a "
+                                 "level</b> (or on the level text).")
+                return
         tx, ty, v = ms[k]
         plot = self._geo(self._plot_poly)
         near = plot.buffer(max(plot.length * 0.02, 1.0))
@@ -1336,9 +1401,10 @@ class PlotDialog(QDialog):
                                  "«Use this plot».")
             else:
                 self.tip.setText(
-                    "<b>Levels</b> — click a level text on the plan (orange "
-                    "circles): the closed line round it becomes that "
-                    "level's part. Next level text, and so on; what is not "
+                    "<b>Levels</b> — the closed lines round the level texts are "
+                    "dashed orange: click inside one (it lights up) and it "
+                    "becomes that level's part. Next one, and so on; what "
+                    "is not "
                     "taken stays on the main ground. «Edit a part…» "
                     "corrects one.")
             self.ok.setEnabled(True)
