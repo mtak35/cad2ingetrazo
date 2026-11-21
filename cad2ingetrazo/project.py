@@ -10306,23 +10306,6 @@ def levels_from_cad(doc) -> list:
             want[i] = f[1]
         elif f:
             abs_[i] = f[1]
-    try:                        # 3.64.88: the lower / upper ground floors
-        from . import hillside as HS_       # take the plot's level parts
-        pl_ = part_levels(doc)
-        if pl_ and HS_.on(doc):
-            il_ = next(i for i, r in enumerate(levels)
-                       if r["id"] == doc["hill"]["lower"])
-            iu_ = next(i for i, r in enumerate(levels)
-                       if r["id"] == doc["hill"]["upper"])
-            lo_ = part_level_of(doc, levels[il_]["id"])
-            up_ = part_level_of(doc, levels[iu_]["id"])
-            want[il_] = round(pl_[0] if lo_ is None else lo_, 4)
-            want[iu_] = round(pl_[1] if up_ is None else up_, 4)
-            abs_.pop(il_, None)
-            abs_.pop(iu_, None)
-    except Exception:  # noqa: BLE001
-        from .host import log_error
-        log_error("project.levels from parts")
     if abs_:                    # absolute-only floors: from one anchor
         if want:
             # an anchor noted both ways is rare: the absolute floors keep
@@ -15295,6 +15278,59 @@ def _dig_groups(doc):
     return out
 
 
+def zone_steps(zones) -> list:
+    """3.64.90 — the levels stay as the plot's level parts fix them; where
+    two parts of different level meet, steps join them: [(box outline,
+    z bottom, z top)] — solid steps going down into the lower part, one
+    flight per ~6 m of the shared edge (1.2 m wide, 0.30 treads, risers
+    <= 0.17)."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import linemerge, unary_union
+    out = []
+    for i, (gi, zi) in enumerate(zones):
+        for gj, zj in zones[i + 1:]:
+            dh = abs(zi - zj)
+            if dh < 0.06 or dh > 3.0:
+                continue
+            lo_g, lo_z = (gi, zi) if zi < zj else (gj, zj)
+            sh = gi.boundary.intersection(gj.boundary)
+            ls = [g for g in getattr(sh, "geoms", [sh])
+                  if g.geom_type in ("LineString", "MultiLineString")]
+            if not ls:
+                continue
+            m = linemerge(unary_union(ls))
+            for ln in getattr(m, "geoms", [m]):
+                if ln.geom_type != "LineString" or ln.length < 1.2:
+                    continue
+                nfl = max(1, int(ln.length // 6.0))
+                for q in range(nfl):
+                    t = ln.length * (q + 0.5) / nfl
+                    a = ln.interpolate(max(t - 0.6, 0))
+                    b = ln.interpolate(min(t + 0.6, ln.length))
+                    ux, uy = b.x - a.x, b.y - a.y
+                    L = math.hypot(ux, uy)
+                    if L < 0.8:
+                        continue
+                    ux, uy = ux / L, uy / L
+                    nx, ny = -uy, ux
+                    mx, my = (a.x + b.x) / 2, (a.y + b.y) / 2
+                    if not lo_g.buffer(0.01).contains(
+                            Point(mx + nx * 0.4, my + ny * 0.4)):
+                        nx, ny = -nx, -ny
+                        if not lo_g.buffer(0.01).contains(
+                                Point(mx + nx * 0.4, my + ny * 0.4)):
+                            continue
+                    n = max(2, math.ceil(dh / 0.17))
+                    for k in range(1, n):
+                        d0, d1 = (k - 1) * 0.30, k * 0.30
+                        poly = [(a.x + nx * d0, a.y + ny * d0),
+                                (b.x + nx * d0, b.y + ny * d0),
+                                (b.x + nx * d1, b.y + ny * d1),
+                                (a.x + nx * d1, a.y + ny * d1)]
+                        out.append((poly, lo_z, lo_z + dh - k * dh / n))
+    return out
+
+
 def _plot_groups(doc):
     """The plot: a ground plate (the building's footprint cut out of it)
     on the plot layer; the setback line, dashed, for the site plan."""
@@ -15349,7 +15385,7 @@ def _plot_groups(doc):
     z_pl = top
     try:                # 3.64.66: on a slope, the plate on the lower road;
         from . import hillside as HS_      # the upper ground its own block
-        if HS_.on(doc):
+        if HS_.on(doc) and not HS_.zoned(doc):
             z_pl = HS_.low_z(doc)
             H_ = HS_.high_area(doc)
             if H_ is not None:
@@ -15373,7 +15409,7 @@ def _plot_groups(doc):
     hill_tin_ = False
     try:                       # 3.64.72: the lower ground a surface on its
         from . import hillside as HS_      # spot levels (roads, forecourts)
-        if HS_.on(doc) and HS_.lower_spots(doc):
+        if HS_.on(doc) and not HS_.zoned(doc) and HS_.lower_spots(doc):
             from shapely.geometry import Polygon as _PgT
             fs_ = HS_.terrain_faces(
                 [_PgT(o_, [list(h_) for h_ in hs_]).buffer(0)
@@ -15407,7 +15443,16 @@ def _plot_groups(doc):
     else:
         for outer, hs in ([] if hill_tin_ else plates):
             fs_ += W.solid({"outer": outer, "holes": hs}, z_pl - 0.10, z_pl)
-    for f in fs_:
+    steps_ = []
+    if len(zones_) > 1:
+        try:
+            for poly_, zb_, zt_ in zone_steps(zones_):
+                steps_ += W.solid({"outer": S._ccw(poly_), "holes": []},
+                                  z_pl + zb_ - 0.05, z_pl + zt_)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project._plot_groups steps")
+    for f in fs_ + steps_:
         if isinstance(f, dict):
             _safe_add(mesh, [QVector3D(*q) for q in f["loop"]],
                           [[QVector3D(*q) for q in h] for h in f["holes"]])

@@ -71,6 +71,26 @@ def on(doc) -> bool:
         h.get("upper") in ids
 
 
+def zoned(doc) -> bool:
+    """3.64.89 — the plot has level parts («Site · ground»): those levels
+    are the site's grounds; the hillside makes no ground of its own, it
+    only brings the steps and ramps to them."""
+    if not on(doc):
+        return False
+    from . import project as PJ
+    try:
+        return len(PJ.plot_zones(doc)) >= 2
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def zone_fn(doc):
+    """fn(x, y) → the level of the plot part there (m, the model's datum)."""
+    from . import project as PJ
+    zs = PJ.plot_zones(doc)
+    return lambda x, y: PJ._zone_level(doc, PJ.zone_dz(zs, x, y))
+
+
 def apply(doc) -> bool:
     """Before the levels are set from the CAD's notes: the two ground
     floors named, the upper one the ground floor, the lower one under
@@ -277,7 +297,7 @@ def high_area(doc):
     """The upper ground: what the upper ground floor's plan covers (inside
     the plot), less what the lower ground floor builds — shapely, or
     None."""
-    if not on(doc):
+    if not on(doc) or zoned(doc):
         return None
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
@@ -382,6 +402,8 @@ def low_terrain_fn(doc):
     """fn(x, y) → the lower ground's level: the spot levels blended
     (inverse distance, the nearest four) — the road rising along the
     site, the forecourts at their notes."""
+    if zoned(doc):
+        return zone_fn(doc)
     low = float((doc.get("hill") or {}).get("low", 0.0) or 0.0)
     sp = lower_spots(doc)
     if not sp:
@@ -436,6 +458,8 @@ def ground_fn(doc):
     top = PJ.plot_top(doc)
     if not on(doc):
         return lambda x, y: top
+    if zoned(doc):
+        return zone_fn(doc)
     lowf = low_terrain_fn(doc)        # 3.64.72: the lower ground sloped
     H = high_area(doc)
     if H is None:
@@ -645,7 +669,7 @@ def fill_groups(doc):
     """The earth of the upper ground (where the lower floor is not), from
     the lower road up to the upper plaza — its top the plaza, its sides
     the retaining walls."""
-    if not on(doc):
+    if not on(doc) or zoned(doc):
         return []
     from PySide6.QtGui import QVector3D
     from core.group import Group
