@@ -145,6 +145,7 @@ def load(raw) -> dict:
             doc["plot"].update(_setbacks(plot, n))
             doc["plot"]["survey"] = _survey(plot.get("survey"))
             doc["plot"]["parts"] = _plot_parts(plot.get("parts"))
+            doc["plot"]["wall"] = _plot_wall(plot.get("wall"))
             try:                             # contour lines every … m
                 step = float(plot.get("contour", CONTOUR_STEP))
             except (TypeError, ValueError):
@@ -832,6 +833,16 @@ def _setbacks(plot: dict, n: int) -> dict:
                 pass
     return {"sb_front": front, "sb_custom": custom, "sb_role": role,
             "sb_dist": dist}
+
+
+def _plot_wall(raw) -> list:
+    """3.64.82 — the boundary wall's own line (from its CAD layer): not
+    always the plot limit. [[x, y]…] or []."""
+    try:
+        pts = [[float(q[0]), float(q[1])] for q in raw or []]
+    except (TypeError, ValueError, IndexError):
+        return []
+    return pts if len(pts) >= 3 else []
 
 
 def _plot_parts(raw) -> list:

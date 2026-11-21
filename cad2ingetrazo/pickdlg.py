@@ -45,6 +45,9 @@ class Canvas(QWidget):
         self.poly = []                          # plot corners (drawing)
         self.closed = False
         self.outline = []                       # the plot limit, once set
+        self.wall = []                          # the boundary wall's line
+        self.on_part = None                     # click on a part → its index
+        self._vdrag = None                      # corner being dragged (edit)
         self.parts = []                         # [(poly, z)] level parts
         self.lines = [QLineF(s[0], s[1], s[2], s[3]) for s in drawing["segs"]]
         # the drawing as AutoCAD shows it: each line's colour, line weight
@@ -181,6 +184,15 @@ class Canvas(QWidget):
         if e.button() in (Qt.MiddleButton, Qt.RightButton):
             self._pan = e.position()
             return
+        if e.button() == Qt.RightButton and self.mode == "edit" \
+                and len(self.poly) > 3:
+            pos = e.position()
+            for i, q in enumerate(self.poly):
+                c = self.view.map(QPointF(*q))
+                if math.hypot(c.x() - pos.x(), c.y() - pos.y()) < 9:
+                    self.poly.pop(i)
+                    self.update()
+                    return
         if e.button() != Qt.LeftButton:
             return
         if self.mode == "box":
@@ -201,6 +213,15 @@ class Canvas(QWidget):
             else:
                 self.poly.append(p)
             self.on_change()
+        elif self.mode == "partpick":
+            q = self.to_dwg(e.position())
+            from shapely.geometry import Point
+            hit = [i for i, (pg, _z) in enumerate(self.parts)
+                   if len(pg) >= 3 and _inside((q.x(), q.y()), pg)]
+            if hit and self.on_part:
+                self.on_part(min(hit, key=lambda i: _area(self.parts[i][0])))
+        elif self.mode == "edit":
+            self._edit_press(e)
         elif self.mode == "chain":
             q = self.to_dwg(e.position())
             loop = _chain_from(self.d, (q.x(), q.y()), SNAP_PX * 2 / self.scale())
@@ -225,8 +246,48 @@ class Canvas(QWidget):
             self.on_change()
         self.update()
 
+    def _edit_press(self, e):
+        """Edit mode: drag a corner of the polyline; click on an edge to add
+        a corner there; right-click a corner to delete it."""
+        pts = [self.view.map(QPointF(*q)) for q in self.poly]
+        pos = e.position()
+        near = [i for i, q in enumerate(pts)
+                if math.hypot(q.x() - pos.x(), q.y() - pos.y()) < 9]
+        if near:
+            self._vdrag = near[0]
+            return
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            dx, dy = b.x() - a.x(), b.y() - a.y()
+            L2 = dx * dx + dy * dy or 1e-9
+            t = max(0.0, min(1.0, ((pos.x() - a.x()) * dx +
+                                   (pos.y() - a.y()) * dy) / L2))
+            if math.hypot(a.x() + t * dx - pos.x(),
+                          a.y() + t * dy - pos.y()) < 7:
+                q = self.snap(pos)
+                if q is None:
+                    w = self.to_dwg(pos)
+                    q = (w.x(), w.y())
+                self.poly.insert(i + 1, tuple(q))
+                self._vdrag = i + 1
+                return
+
+    def _edit_move(self, pos):
+        if self._vdrag is None or self._vdrag >= len(self.poly):
+            return
+        q = self.snap(pos)
+        if q is None:
+            w = self.to_dwg(pos)
+            q = (w.x(), w.y())
+        self.poly[self._vdrag] = tuple(q)
+
     def mouseMoveEvent(self, e):
         self._mouse = e.position()
+        if self.mode == "edit" and self._vdrag is not None:
+            self._edit_move(e.position())
+            self.update()
+            return
         if self._pan is not None:
             d = e.position() - self._pan
             self._pan = e.position()
@@ -236,7 +297,7 @@ class Canvas(QWidget):
         elif self._drag is not None:
             q = self.to_dwg(e.position())
             self.region = [self._drag[0], self._drag[1], q.x(), q.y()]
-        elif self.mode in ("base", "poly"):
+        elif self.mode in ("base", "poly", "edit"):
             self._snap = self.snap(e.position())
         self.update()
 
@@ -262,6 +323,10 @@ class Canvas(QWidget):
             super().keyPressEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self._vdrag is not None:
+            self._vdrag = None
+            self.update()
+            return
         if self._pan is not None:
             self._pan = None
             return
@@ -351,14 +416,21 @@ class Canvas(QWidget):
                 qp = QPolygonF([self.view.map(QPointF(*q)) for q in pg])
                 p.drawPolygon(qp)
                 p.setPen(QPen(QColor("#111"), 1))
+                from .host import both_txt
                 p.drawText(qp.boundingRect().center(),
-                           f"Part {i + 1}: {zz:+.2f} m")
+                           f"Level {i + 1}: {both_txt(zz)}")
+        if self.wall:
+            from PySide6.QtGui import QPolygonF
+            p.setPen(QPen(QColor("#d946ef"), 3))
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(QPolygonF([self.view.map(QPointF(*q))
+                                     for q in self.wall]))
         if self.poly:
             from PySide6.QtGui import QPolygonF
             pts = [self.view.map(QPointF(*q)) for q in self.poly]
             col = QColor("#38c172")
             p.setPen(QPen(col, 2))
-            if self.closed:
+            if self.closed or self.mode == "edit":
                 c = QColor(col)
                 c.setAlpha(45)
                 p.setBrush(c)
@@ -368,8 +440,9 @@ class Canvas(QWidget):
                 p.drawPolyline(QPolygonF(pts + ([self._mouse]
                                                 if self._mouse else [])))
             for q in pts:
-                p.drawEllipse(q, 3.5, 3.5)
-        if self.mode in ("base", "poly") and self._snap:
+                p.drawEllipse(q, 5 if self.mode == "edit" else 3.5,
+                              5 if self.mode == "edit" else 3.5)
+        if self.mode in ("base", "poly", "edit") and self._snap:
             c = self.view.map(QPointF(*self._snap))
             p.setPen(QPen(QColor("#ffd400"), 2))
             p.setBrush(Qt.NoBrush)
@@ -722,6 +795,62 @@ class PortionDialog(QDialog):
         self.accept()
 
 
+class LevelDlg(QDialog):
+    """A part's ground level, over (+) or under (−) the main ground — typed
+    in metres or in feet-inches; the other follows."""
+
+    def __init__(self, parent, k, z0=0.0):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QFormLayout, QLineEdit
+        self.setWindowTitle(f"Level of part {k}")
+        f = QFormLayout(self)
+        f.addRow(QLabel("Ground level of this part, over (+) or under (−) "
+                        "the main ground:"))
+        self.m = QLineEdit()
+        self.ft = QLineEdit()
+        f.addRow("Metres", self.m)
+        f.addRow("Feet-inches", self.ft)
+        self._z = float(z0)
+        self._fill(None)
+        self.m.editingFinished.connect(lambda: self._read("m"))
+        self.ft.editingFinished.connect(lambda: self._read("ft"))
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self._ok)
+        no = QPushButton("Skip this part")
+        no.clicked.connect(self.reject)
+        r = QHBoxLayout()
+        r.addWidget(ok)
+        r.addWidget(no)
+        f.addRow(r)
+
+    def _fill(self, skip):
+        from .host import ft_in_txt
+        if skip != "m":
+            self.m.setText(f"{self._z:.3f}")
+        if skip != "ft":
+            self.ft.setText(ft_in_txt(self._z))
+
+    def _read(self, which):
+        from .host import parse_len
+        t = (self.m if which == "m" else self.ft).text().strip()
+        if which == "m" and t.replace(".", "", 1).replace("-", "", 1)\
+                .replace("+", "", 1).isdigit():
+            t += "m"
+        v = parse_len(t.lstrip("+"))
+        if v is not None:
+            self._z = max(-50.0, min(50.0, float(v)))
+        self._fill(which)
+
+    def _ok(self):
+        self._read("m" if self.m.hasFocus() else "ft"
+                   if self.ft.hasFocus() else "m")
+        self.accept()
+
+    def value(self):
+        return self._z
+
+
 class PlotDialog(QDialog):
     """The plot's boundary on the CAD drawing: click its corners (they
     snap), or click inside a closed outline (the boundary polyline).
@@ -758,38 +887,55 @@ class PlotDialog(QDialog):
         self.b_part = QPushButton("Level parts…")
         self.b_part.setToolTip(
             "A plot on more than one level: after the plot limit, pick its "
-            "parts one by one — each with its own level — until the whole "
-            "plot limit is covered. The boundary wall follows each part's "
-            "level.")
+            "parts one by one — each polyline picked is one level (asked "
+            "for in metres and feet-inches); when it is complete, pick the "
+            "next one, until the whole plot limit is covered.")
         self.b_part.clicked.connect(self._start_parts)
-        self.zsp = QDoubleSpinBox()
-        self.zsp.setRange(-50.0, 50.0)
-        self.zsp.setDecimals(3)
-        self.zsp.setSingleStep(0.15)
-        self.zsp.setSuffix(" m")
-        self.zsp.setToolTip("This part's ground level over (+) or under (−) "
-                            "the building's main ground")
-        self.b_keep = QPushButton("Keep this part")
-        self.b_keep.clicked.connect(self._keep_part)
-        self.b_rest = QPushButton("The rest is one part")
+        self.b_rest = QPushButton("The rest is one level")
         self.b_rest.setToolTip("What is not yet in a part becomes the last "
-                               "part, at the level above")
+                               "part")
         self.b_rest.clicked.connect(self._rest_part)
         self.b_undo = QPushButton("Remove last part")
         self.b_undo.clicked.connect(self._undo_part)
+        self.b_wall = QPushButton("Boundary wall line…")
+        self.b_wall.setToolTip(
+            "The boundary wall is not always on the plot limit: pick its "
+            "own line (else the wall's CAD layer is used, else the plot "
+            "limit).")
+        self.b_wall.clicked.connect(self._start_wall)
+        self.b_marks = QPushButton("Levels from the plan's marks")
+        self.b_marks.setToolTip(
+            "Where the plan has levels written (LEV. +2'-6\", +0.45 …), "
+            "a polyline is made round each — the closed outline holding "
+            "the mark, else a patch round it — with that level. Edit them "
+            "after with «Edit a part…».")
+        self.b_marks.clicked.connect(self._auto_marks)
+        self.b_edit = QPushButton("Edit a part…")
+        self.b_edit.setToolTip(
+            "Click a part, then drag its corners, click an edge to add a "
+            "corner, right-click a corner to delete it; «Done editing» "
+            "keeps it (its level can be changed).")
+        self.b_edit.clicked.connect(self._edit_pick)
+        self.b_done = QPushButton("Done editing")
+        self.b_done.clicked.connect(self._edit_done)
         self.cov = QLabel()
-        for w in (self.b_part, QLabel("Level of this part:"), self.zsp,
-                  self.b_keep, self.b_rest, self.b_undo, self.cov):
+        for w in (self.b_part, self.b_marks, self.b_edit, self.b_done,
+                  self.b_rest, self.b_undo, self.b_wall, self.cov):
             row2.addWidget(w)
         row2.addStretch(1)
         v.addLayout(row2)
         self._phase = "plot"
         self._plot_poly = []
         self._parts = []                         # [(poly, z)] in drawing units
+        self._wall_poly = []
+        self._last_z = 0.0
+        self._busy = False
+        self._editing = None                     # (index, z) of a part
+        self.canvas.on_part = self._part_clicked
         self.ok = QPushButton("Use this plot")
         self.ok.setStyleSheet("QPushButton { background: #2f6fdd; color: "
                               "white; font-weight: bold; padding: 4px 12px; }")
-        self.ok.clicked.connect(self.accept)
+        self.ok.clicked.connect(self._ok_clicked)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         row.addWidget(self.ok)
@@ -799,14 +945,20 @@ class PlotDialog(QDialog):
 
     @property
     def poly(self):
-        return list(self._plot_poly if self._phase == "parts"
+        return list(self._plot_poly if self._phase != "plot"
                     else self.canvas.poly)
 
     @property
     def parts(self):
-        """[(poly, z m)] — the level parts, clipped to the plot and to each
-        other (empty: one level)."""
+        """[(poly, z m)] — the level parts, each clipped by the parts
+        before it (empty: one level)."""
         return [(list(p), z) for p, z in self._parts]
+
+    @property
+    def wall(self):
+        """The boundary wall's own line picked here ([] — the layer, else
+        the plot limit)."""
+        return list(self._wall_poly)
 
     def _geo(self, poly):
         from shapely.geometry import Polygon
@@ -822,45 +974,213 @@ class PlotDialog(QDialog):
 
     def _start_parts(self):
         c = self.canvas
-        if not (c.closed and len(c.poly) >= 3):
-            return
+        if self._phase == "plot":
+            if not (c.closed and len(c.poly) >= 3):
+                return
+            self._plot_poly = list(c.poly)
+            c.outline = list(c.poly)
         self._phase = "parts"
-        self._plot_poly = list(c.poly)
-        c.outline = list(c.poly)
         c.poly, c.closed = [], False
-        c.mode = "poly"
+        c.mode = "chain"
+        c.update()
+        self._changed()
+
+    def _start_wall(self):
+        c = self.canvas
+        if self._phase == "plot":
+            if not (c.closed and len(c.poly) >= 3):
+                return
+            self._plot_poly = list(c.poly)
+            c.outline = list(c.poly)
+        self._phase = "wall"
+        c.poly, c.closed = [], False
+        c.mode = "chain"
         c.update()
         self._changed()
 
     def _add(self, poly, z):
-        from shapely.geometry import Polygon
-        g = self._geo(poly).intersection(self._left())
-        if g.is_empty:
-            return False
+        from shapely.ops import unary_union
+        g = self._geo(poly)
+        if self._parts:
+            g = g.difference(unary_union([self._geo(p) for p, _z in
+                                          self._parts]))
+        n0 = len(self._parts)
         for q in getattr(g, "geoms", [g]):
             if q.geom_type == "Polygon" and q.area > 1e-6:
                 self._parts.append(([tuple(x) for x in
                                      list(q.exterior.coords)[:-1]], z))
         self.canvas.parts = list(self._parts)
+        return len(self._parts) > n0
+
+    def _level_for(self, k):
+        """Ask the level of part k — metres and feet-inches, one value."""
+        d = LevelDlg(self, k, self._last_z)
+        if d.exec():
+            self._last_z = d.value()
+            return self._last_z
+        return None
+
+    def _complete(self):
+        """A polyline picked and closed: in the parts phase it is one level
+        — asked for, kept; the next pick is the next level."""
+        c = self.canvas
+        self._busy = True
+        try:
+            if self._phase == "parts":
+                z = self._level_for(len(self._parts) + 1)
+                if z is not None:
+                    self._add(c.poly, z)
+                c.poly, c.closed = [], False
+            elif self._phase == "wall":
+                self._wall_poly = list(c.poly)
+                c.wall = list(c.poly)
+                c.poly, c.closed = [], False
+                self._phase = "parts"
+            c.update()
+        finally:
+            self._busy = False
+        self._changed()
+
+    def _ok_clicked(self):
+        if self._editing is not None:        # keep the part being edited
+            self._edit_done()
+        self.accept()
+
+    def _need_plot(self):
+        c = self.canvas
+        if self._phase == "plot":
+            if not (c.closed and len(c.poly) >= 3):
+                return False
+            self._plot_poly = list(c.poly)
+            c.outline = list(c.poly)
+            self._phase = "parts"
+            c.poly, c.closed = [], False
         return True
 
-    def _keep_part(self):
+    def _auto_marks(self):
+        """A polyline round each level written on the plan."""
+        if not self._need_plot():
+            return
+        from collections import Counter
+        from shapely.geometry import LineString, Point, Polygon
+        from shapely.ops import polygonize, unary_union
+        from . import parking as PK
+        plot = self._geo(self._plot_poly)
+        near = plot.buffer(max(plot.length * 0.02, 1.0))
+        marks = []
+        for t in self.canvas.d.get("texts") or []:
+            v = PK.level_note(t.get("text"))
+            if v and v[1] is not None and near.contains(
+                    Point(t["x"], t["y"])):
+                marks.append((t["x"], t["y"], float(v[1]),
+                              float(t.get("h") or 0.0)))
+        if not marks:
+            self.tip.setText("<b>No level marks found</b> inside the plot "
+                             "(notes like «LEV. +2'-6\"»). Pick the levels "
+                             "polyline by polyline instead.")
+            return
+        ref = Counter(round(m[2], 3) for m in marks).most_common(1)[0][0]
+        x0, y0, x1, y1 = near.bounds
+        ls = []
+        for sg in self.canvas.d.get("segs") or []:
+            if x0 <= sg[0] <= x1 and y0 <= sg[1] <= y1 and \
+                    x0 <= sg[2] <= x1 and y0 <= sg[3] <= y1:
+                ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
+        for lp in self.canvas.d.get("loops") or []:
+            if len(lp["pts"]) >= 3:
+                ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
+        cand = []
+        try:
+            cand = [g for g in polygonize(unary_union(ls))
+                    if 0.002 * plot.area < g.area < 0.98 * plot.area
+                    and plot.buffer(1e-6).contains(g.representative_point())]
+        except Exception:  # noqa: BLE001
+            cand = []
+        cand.sort(key=lambda g: g.area)
+        groups = {}                       # candidate index → [(z…)], poly
+        loose = []
+        for x, y, v, h in marks:
+            pt = Point(x, y)
+            k = next((i for i, g in enumerate(cand) if g.contains(pt)), None)
+            if k is None:
+                loose.append((x, y, v, h))
+            else:
+                groups.setdefault(k, []).append(v)
+        made = []
+        for k, vs in groups.items():
+            z = Counter(round(q, 3) for q in vs).most_common(1)[0][0] - ref
+            if abs(z) > 1e-6 or len(groups) + len(loose) == 1:
+                made.append((cand[k], z))
+        r_ = max(plot.length / 40.0, 1.0)
+        for x, y, v, h in loose:                # no outline: a patch
+            z = v - ref
+            if abs(z) > 1e-6:
+                made.append((Point(x, y).buffer(max(r_, 4 * h), 4)
+                             .intersection(plot), z))
+        made.sort(key=lambda m: m[0].area)       # small ones win the overlap
+        for g, z in made:
+            for q in getattr(g, "geoms", [g]):
+                if q.geom_type == "Polygon":
+                    self._add([tuple(c) for c in
+                               list(q.exterior.coords)[:-1]], z)
+        self.canvas.parts = list(self._parts)
+        self.canvas.mode = "chain"
+        self.canvas.update()
+        self._changed()
+        self.tip.setText(
+            f"<b>{len(made)} level parts from the plan's marks</b> (main "
+            "ground = the commonest mark). Fix any with «Edit a part…»; "
+            "the rest of the plot stays on the main ground.")
+
+    def _edit_pick(self):
+        if self._need_plot() and self._parts:
+            self.canvas.poly, self.canvas.closed = [], False
+            self.canvas.mode = "partpick"
+            self.tip.setText("<b>Click the part to edit</b> (inside it).")
+            self.canvas.update()
+
+    def _part_clicked(self, i):
+        pg, z = self._parts.pop(i)
+        self._editing = (i, z)
+        self._last_z = z
         c = self.canvas
-        if c.closed and len(c.poly) >= 3 and self._add(c.poly,
-                                                       self.zsp.value()):
-            c.poly, c.closed = [], False
-            c.update()
+        c.parts = list(self._parts)
+        c.poly, c.closed = [tuple(q) for q in pg], False
+        c.mode = "edit"
+        c.update()
+        self.tip.setText(
+            "<b>Editing the part</b> — drag a corner · click an edge to add "
+            "a corner · right-click a corner to delete it · «Done editing» "
+            "keeps it.")
+        self._changed()
+
+    def _edit_done(self):
+        c = self.canvas
+        if self._editing is None or len(c.poly) < 3:
+            return
+        i, z = self._editing
+        zz = self._level_for(i + 1)
+        pg = list(c.poly)
+        self._parts.insert(min(i, len(self._parts)),
+                           ([tuple(q) for q in pg], z if zz is None else zz))
+        self._editing = None
+        c.parts = list(self._parts)
+        c.poly, c.closed = [], False
+        c.mode = "chain"
+        c.update()
         self._changed()
 
     def _rest_part(self):
         g = self._left()
         if g.is_empty:
             return
+        z = self._level_for(len(self._parts) + 1)
+        if z is None:
+            return
         for q in getattr(g, "geoms", [g]):
             if q.geom_type == "Polygon" and q.area > 1e-6:
                 self._parts.append(([tuple(x) for x in
-                                     list(q.exterior.coords)[:-1]],
-                                    self.zsp.value()))
+                                     list(q.exterior.coords)[:-1]], z))
         self.canvas.parts = list(self._parts)
         self.canvas.update()
         self._changed()
@@ -877,38 +1197,62 @@ class PlotDialog(QDialog):
         self._changed()
 
     def _clear(self):
+        if self._phase == "wall" and not self.canvas.poly:
+            self._wall_poly = []
+            self.canvas.wall = []
         self.canvas.poly, self.canvas.closed = [], False
         self.canvas.update()
         self._changed()
 
     def _changed(self):
         c = self.canvas
-        parts_ = self._phase == "parts"
-        for w in (self.zsp, self.b_keep, self.b_rest, self.b_undo):
-            w.setEnabled(parts_)
-        self.b_part.setEnabled(not parts_ and c.closed and len(c.poly) >= 3)
-        if parts_:
+        if self._phase != "plot" and c.closed and len(c.poly) >= 3 \
+                and not self._busy and c.mode != "edit":
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._complete)
+            return
+        ph = self._phase
+        self.b_rest.setEnabled(ph == "parts")
+        self.b_marks.setEnabled(ph != "plot" or (c.closed and
+                                                 len(c.poly) >= 3))
+        self.b_edit.setEnabled(bool(self._parts) and self._editing is None)
+        self.b_done.setEnabled(self._editing is not None)
+        self.b_undo.setEnabled(ph == "parts" and bool(self._parts))
+        self.b_part.setEnabled(ph != "plot" or (c.closed and
+                                                len(c.poly) >= 3))
+        self.b_wall.setEnabled(ph != "plot" or (c.closed and
+                                                len(c.poly) >= 3))
+        if ph != "plot":
             tot = self._geo(self._plot_poly).area or 1.0
             left = self._left().area
-            self.cov.setText(f"{len(self._parts)} parts · "
-                             f"{100 * (1 - left / tot):.0f}% of the plot "
-                             "covered")
-            if left < 1e-6 * tot or left / tot < 0.002:
+            self.cov.setText(
+                f"{len(self._parts)} levels · "
+                f"{100 * (1 - left / tot):.0f}% of the plot covered" +
+                (" · wall line set" if self._wall_poly else ""))
+            if ph == "wall":
+                self.tip.setText(
+                    "<b>Boundary wall line</b> — click the wall's own line "
+                    "(followed all the way round); the wall is built on it, "
+                    "not on the plot limit. Then «Use this plot».")
+            elif left / tot < 0.002:
                 self.tip.setText("<b>The whole plot limit is covered.</b> "
                                  "«Use this plot».")
             else:
                 self.tip.setText(
-                    "<b>Level parts</b> — click one part's corners (or "
-                    "inside / on its outline), set its level, «Keep this "
-                    "part»; repeat until the plot limit is covered "
-                    "(«The rest is one part» closes it). What is left "
-                    "stays on the main ground.")
+                    "<b>Level parts</b> — click ONE polyline (its line, "
+                    "inside it, or its corners): it is one level, asked "
+                    "for in metres / feet-inches. When it is complete, "
+                    "click the next polyline for the next level, until the "
+                    "plot limit is covered («The rest is one level» closes "
+                    "it). What is left stays on the main ground.")
             self.ok.setEnabled(True)
             return
         self.cov.setText("")
         if c.closed:
             self.tip.setText(f"<b>Plot closed — {len(c.poly)} corners.</b> "
-                             "«Use this plot», or Clear to start again.")
+                             "«Use this plot», «Level parts…» (a plot on "
+                             "more than one level), «Boundary wall line…», "
+                             "or Clear to start again.")
         elif c.mode == "inside":
             self.tip.setText("<b>Click inside the plot's boundary</b> (a "
                              "closed polyline in the drawing).")

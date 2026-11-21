@@ -121,6 +121,23 @@ def len_txt(m: float) -> str:
         return f"{m:.2f} m"
 
 
+def ft_in_txt(m: float) -> str:
+    """A length in feet-inches (to 1/8"), whatever the document's units."""
+    sg = "-" if m < -1e-9 else ""
+    eighths = int(round(abs(m) / 0.0254 * 8))
+    ft, rem = divmod(eighths, 96)
+    inch, fr = divmod(rem, 8)
+    f = {0: "", 4: " 1/2"}.get(fr, f" {fr}/8" if fr % 2 else
+                              f" {fr // 2}/4")
+    return f"{sg}{ft}'-{inch}{f}\""
+
+
+def both_txt(m: float) -> str:
+    """3.64.82 — a level in both systems: «+0.762 m (+2'-6")»."""
+    sg = "+" if m > 1e-9 else ""
+    return f"{sg}{m:.3f} m ({sg}{ft_in_txt(m)})"
+
+
 def area_txt(a: float) -> str:
     if imperial():
         return f"{a / 0.09290304:,.1f} ft²"

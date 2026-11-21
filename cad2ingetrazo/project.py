@@ -58,6 +58,8 @@ DEFAULTS = {
     "holes": "*STAIR*, *SHAFT*, *LIFT*, *VOID*, *DUCT*, *OPENING*",
     "text": "*",
     "plot": "*PLOT*, *SITE*, *BOUNDARY*, *BOUNDRY*, *PROP*",
+    "bwall": "*BWALL*, *B?WALL*, *BOUNDARY*WALL*, *BOUNDRY*WALL*, "
+             "*COMPOUND*, *FENCE*",
     "footings": "*FOOT*, *FOUND*, *FNDN*",
     "stairs": "*STAIR*, *ESCALERA*",
     "escalators": "*ESCALAT*, *TRAV*LATOR*, *MOVING*WALK*",
@@ -13304,10 +13306,11 @@ def _site_groups(doc):
     if not plot or not doc["site"]["wall"]:
         return []
     from .engine import plotgeo
-    corners = plotgeo.clean(plot["corners"])
+    corners = wall_corners(doc)
     z0 = plot_top(doc)
     site_ = dict(doc["site"], _front=[      # 3.64.34: the plot's front
-        i for i, f_ in enumerate(plot.get("sb_front") or []) if f_])
+        i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
+        if len(plot.get("wall") or []) < 3 else [wall_front_side(doc)])
     try:                    # 3.64.67: on a slope, its sides cut short so
         from . import hillside as HS_     # each piece stands on its own
         if HS_.on(doc) and not doc["site"].get("gates"):   # ground
@@ -13511,7 +13514,7 @@ def moved_gates(scene, doc, seen: dict) -> list:
     plot = doc["arch"].get("plot")
     if not plot:
         return []
-    corners = plotgeo.clean(plot["corners"])
+    corners = wall_corners(doc)
     out = []
     for g in list(scene.groups):
         tag = tag_of(g)
@@ -14147,6 +14150,61 @@ def plot_top(doc) -> float:
     return elev[g] - float(doc["settings"].get("plinth", 0.15))
 
 
+def bwall_ring(drawing, patterns):
+    """3.64.82 — the boundary wall's line from its CAD layer: [(x, y)…]
+    (drawing units) of the biggest closed outline the layer's lines make,
+    or None. Two nested rings (a wall drawn with both faces) give the
+    outer one."""
+    pats = [q.strip().upper() for q in str(patterns or "").split(",")
+            if q.strip()]
+    if not pats:
+        return None
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import polygonize, unary_union
+    ls = []
+    for lp in drawing.get("loops") or []:
+        if _match(lp["layer"], pats) and len(lp["pts"]) >= 3:
+            ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
+    for sg in drawing.get("segs") or []:
+        if _match(sg[4], pats):
+            ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
+    if not ls:
+        return None
+    polys = list(polygonize(unary_union(ls)))
+    if not polys:
+        return None
+    big = max(polys, key=lambda g: g.area)
+    big = Polygon(big.exterior)
+    return [tuple(c) for c in list(big.simplify(0.001).exterior.coords)[:-1]]
+
+
+def wall_corners(doc) -> list:
+    """3.64.82 — the corners the boundary wall runs on: the wall's own line
+    (its CAD layer, or picked) when there is one — the plot limit is not
+    always the wall — else the plot's."""
+    from .engine import plotgeo
+    plot = doc["arch"].get("plot") or {}
+    w = plot.get("wall") or []
+    if len(w) >= 3:
+        return plotgeo.clean(w)
+    return plotgeo.clean(plot.get("corners") or [])
+
+
+def wall_front_side(doc) -> int:
+    """The wall's side facing the plot's front side."""
+    plot = doc["arch"].get("plot") or {}
+    cn = wall_corners(doc)
+    pc = plot.get("corners") or []
+    fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
+    if not cn or not pc or not fr or cn == pc:
+        return fr[0] if fr and len(cn) == len(pc) else 0
+    a, b = pc[fr[0] % len(pc)], pc[(fr[0] + 1) % len(pc)]
+    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    from shapely.geometry import LineString, Point
+    return min(range(len(cn)), key=lambda i: LineString(
+        [cn[i], cn[(i + 1) % len(cn)]]).distance(Point(mx, my)))
+
+
 def plot_zones(doc) -> list:
     """3.64.81 — the plot cut in its level parts: [(Polygon, dz)] that tile
     the plot (each part clipped to the plot and to the parts before it; the
@@ -14158,9 +14216,11 @@ def plot_zones(doc) -> list:
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     pl = Polygon(plot["corners"]).buffer(0)
+    if len(plot.get("wall") or []) >= 3:      # the wall may stand outside
+        pl = unary_union([pl, Polygon(plot["wall"]).buffer(0)]).buffer(1.0)
     out, used = [], None
     for pt in parts:
-        g = Polygon(pt["poly"]).buffer(0).intersection(pl)
+        g = Polygon(pt["poly"]).buffer(0)
         if used is not None:
             g = g.difference(used)
         if g.is_empty or g.area < 0.01:
@@ -14185,7 +14245,8 @@ def zone_dz(zones, x, y) -> float:
     return best
 
 
-def set_plot(doc, corners, front=None, dist=None, parts=None) -> str | None:
+def set_plot(doc, corners, front=None, dist=None, parts=None,
+             wall=None) -> str | None:
     """The plot from its corners (m); None, or why not."""
     from .engine import plotgeo
     pts = plotgeo.clean([[float(p[0]), float(p[1])] for p in corners])
@@ -14209,7 +14270,8 @@ def set_plot(doc, corners, front=None, dist=None, parts=None) -> str | None:
            "sb_role": [None] * n,
            "sb_dist": dist or old.get("sb_dist") or
            {"front": 3.0, "back": 1.5, "sides": 1.0},
-           "parts": parts if parts is not None else old.get("parts") or []}
+           "parts": parts if parts is not None else old.get("parts") or [],
+           "wall": wall if wall is not None else old.get("wall") or []}
     arch = dict(doc["arch"], plot=raw)
     doc["arch"]["plot"] = M.load(arch)["plot"]
     try:
@@ -14244,10 +14306,9 @@ def auto_site(doc, force=False) -> bool:
         st["auto_site_done"] = True
         return False
     from .engine import plotgeo
-    cn = plotgeo.clean(plot["corners"])
+    cn = wall_corners(doc)                 # the wall's own line, if any
     n = len(cn)
-    fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
-    side = fr[0] if fr else 0
+    side = wall_front_side(doc)
     a, u, _nrm, L = SITE_.side_frame(cn, side)
     w = 3.6576                                   # 12'-0" double swing
     m = 0.6 + float(site.get("pillar", 0.35))

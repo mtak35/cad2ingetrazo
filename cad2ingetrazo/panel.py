@@ -1665,6 +1665,7 @@ class Panel(QWidget):
                          ("beams", "Beams"), ("slab", "Slab outline"),
                          ("holes", "Slab holes"), ("text", "Texts"),
                          ("plot", "Plot boundary"),
+                         ("bwall", "Boundary wall (its own line)"),
                          ("footings", "Footings"), ("stairs", "Stairs"),
                          ("grid", "Column grid"), ("lift", "Lift core"),
                          ("parking", "Parking bays"), ("cars", "Cars"),
@@ -2747,14 +2748,14 @@ class Panel(QWidget):
         if not plot:
             self.flash("Make the plot first (part 4)")
             return
-        from .engine import plotgeo
-        cn = plotgeo.clean(plot["corners"])
+        cn = PJ.wall_corners(doc)
         n = len(cn)
         st = self._site_from_ui(doc)
         st["wall"] = True
         self.bw_on.setChecked(True)
-        fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
-        fs = fr[0] if fr else (st["gates"][0]["side"] if st["gates"] else 0)
+        fs = PJ.wall_front_side(doc) if (plot.get("wall") or
+                                         plot.get("sb_front")) else \
+            (st["gates"][0]["side"] if st["gates"] else 0)
         where = self.sg_where.currentData() or "fl"
         w = 1.2192
         m = 0.6 + float(st.get("pillar", 0.35))
@@ -2851,7 +2852,7 @@ class Panel(QWidget):
         plot = doc["arch"].get("plot")
         self.gt_side.clear()
         if plot:
-            pts = plot["corners"]
+            pts = PJ.wall_corners(doc)
             n = len(pts)
             for i in range(n):
                 L = math.dist(pts[i], pts[(i + 1) % n])
@@ -2916,8 +2917,11 @@ class Panel(QWidget):
                             "<br><span style='color:#c0392b'>⚠ The building "
                             "crosses a setback line</span>")
         if plot.get("parts"):
+            from .host import both_txt
             txt += "<br>Level parts: " + ", ".join(
-                f"{p['name']} {p['z']:+.2f} m" for p in plot["parts"])
+                f"{p['name']} {both_txt(p['z'])}" for p in plot["parts"])
+        if plot.get("wall"):
+            txt += "<br>Boundary wall on its own line (not the plot limit)"
         self.pl_info.setText(txt)
 
     def _apply_lawn(self):
@@ -2929,13 +2933,13 @@ class Panel(QWidget):
         self.commit(doc, "Landscape level: " + len_txt(
             doc["settings"]["landscape_h"]) + " over the ground")
 
-    def _plot_store(self, corners, msg, parts=None):
+    def _plot_store(self, corners, msg, parts=None, wall=None):
         doc = self.doc()
         doc["settings"]["plinth"] = self.pl_plinth.value()
         why = PJ.set_plot(doc, corners, dist={"front": self.sb_front.value(),
                                               "back": self.sb_back.value(),
                                               "sides": self.sb_sides.value()},
-                          parts=parts or [])
+                          parts=parts or [], wall=wall or [])
         if why:
             self.flash(f"No plot — {why}", 8000)
             return
@@ -2984,9 +2988,19 @@ class Panel(QWidget):
             parts.append({"poly": [list(q) for q in cadread.to_model(
                 d, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
                 how.get("rot", 0.0), pg)], "z": z, "name": f"Part {k}"})
+        # 3.64.82: the boundary wall runs on its own line — picked, else
+        # its CAD layer — not on the plot limit
+        wring = dlg.wall or PJ.bwall_ring(
+            d, self.i_layers["bwall"].text() if "bwall" in self.i_layers
+            else doc["settings"].get("bwall"))
+        wall = [list(q) for q in cadread.to_model(
+            d, base, (how.get("ix", 0.0), how.get("iy", 0.0)),
+            how.get("rot", 0.0), wring)] if wring else []
         self._plot_store(pts, f"Plot of {len(pts)} corners taken from the "
                               "drawing" + (f", in {len(parts)} level parts"
-                                           if parts else ""), parts)
+                                           if parts else "") +
+                              (", boundary wall on its own line"
+                               if wall else ""), parts, wall)
 
     def _plot_setbacks(self):
         doc = self.doc()
