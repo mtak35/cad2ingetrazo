@@ -2820,6 +2820,10 @@ def build(doc: dict, elevations) -> list[dict]:
                 n_ = 1 if w.get("kind", "line") == "line" else 12
                 path = [(*seg.at(k / n_), b) for k in range(n_ + 1)]
                 ch = float(w.get("curb_h") or 0.0)
+                if ch > 0.01 and doc.get("_curb_flush", True):
+                    # 3.64.105: the band along the floor's edge stops at
+                    # the top of the floor finish (not a foot above it)
+                    ch = max(float(doc.get("_fin_t", 0.0) or 0.0), 0.02)
                 if ch > 0.01:                    # on its upstand (curb)
                     pl_ = PLASTER(doc)
                     ct = float(w.get("curb_t") or 0.0762) + 2 * pl_
