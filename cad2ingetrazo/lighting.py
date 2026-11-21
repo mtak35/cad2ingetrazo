@@ -555,6 +555,69 @@ def script_path():
                         "blender", "c2i_render.py")
 
 
+# ---- D5 Render: the alternative to Blender (3.64.95) ---------------------------------
+def d5_find(saved=None):
+    """D5 Render's program: the saved path, else the usual install places."""
+    import glob
+    import os
+    if saved and os.path.isfile(saved):
+        return saved
+    pats = []
+    for root in (os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)"),
+                 os.environ.get("LOCALAPPDATA"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+                 "C:/", "D:/"):
+        if root:
+            pats += [os.path.join(root, "D5 Render*", "**", "D5Render.exe"),
+                     os.path.join(root, "D5 Render*", "**", "D5 Render.exe"),
+                     os.path.join(root, "D5*", "D5Launcher.exe"),
+                     os.path.join(root, "D5 Render*", "**",
+                                  "D5Launcher.exe")]
+    for pat in pats:
+        try:
+            hit = sorted(glob.glob(pat, recursive=True))
+        except OSError:
+            continue
+        if hit:
+            return hit[-1]
+    return None
+
+
+def d5_export(app):
+    """The model for D5 Render: a GLB (colours kept) in its own folder, with
+    the view and the sun written beside it. Returns (folder, glb path)."""
+    import json
+    import time
+    from pathlib import Path
+
+    from core import render_blender as rb
+    from formats.gltf import save_glb
+    scene, vp = app.viewport.scene, app.viewport
+    work = Path.home() / "Documents" / "IngeTrazo D5" / \
+        time.strftime("%Y%m%d-%H%M%S")
+    work.mkdir(parents=True, exist_ok=True)
+    cam = vp.camera
+
+    def toward(anchor):
+        if cam.perspective:
+            return cam.eye() - anchor
+        return cam.eye() - cam.target
+    glb = work / "model.glb"
+    save_glb(scene, glb, face_me=toward)
+    info = {"camera": rb.camera_dict(cam), "sun_toward": rb.sun_toward(scene),
+            "units": "metres, Z up"}
+    (work / "view.json").write_text(json.dumps(info, indent=2),
+                                    encoding="utf-8")
+    (work / "READ ME.txt").write_text(
+        "Drag model.glb into D5 Render (File > Import, or the start page).\n"
+        "Then in D5: Environment > a sky/HDRI and Sun (the sun direction is\n"
+        "in view.json: 'sun_toward'), Camera > the view in view.json\n"
+        "('eye', 'target'; metres, Z up), then Materials > assign PBR\n"
+        "materials (walls, roof, glass, grass) and Render.\n", encoding="utf-8")
+    return work, glb
+
+
 def prepare(app, settings: dict):
     """Export the model and write the job (IngeTrazo's Render with Blender
     does that part: core.render_blender.write_job), then our "c2i" part and
@@ -1094,6 +1157,20 @@ def _dialog_class():
             b.addWidget(self.inbl)
             b.addStretch(1)
             v.addLayout(b)
+            d5 = QHBoxLayout()
+            d5b = QPushButton("Send to D5 Render")
+            d5b.setToolTip(
+                "Alternative to Blender: the model is exported (GLB, colours "
+                "kept) with the view and sun, and D5 Render is opened if it "
+                "is found. In D5: import model.glb, set the sky/sun/camera "
+                "(view.json) and its PBR materials, then render.")
+            d5b.clicked.connect(self._send_d5)
+            d5.addWidget(d5b)
+            d5p = QPushButton("D5 location…")
+            d5p.clicked.connect(self._d5_where)
+            d5.addWidget(d5p)
+            d5.addStretch(1)
+            v.addLayout(d5)
             self.bar = QProgressBar()
             self.bar.setRange(0, 100)
             self.bar.setVisible(False)
@@ -1368,6 +1445,35 @@ def _dialog_class():
                 QProcess.startDetached(self._found.command[0],
                                        [*self._found.command[1:],
                                         self._blend])
+
+        def _d5_where(self):
+            path, _f = QFileDialog.getOpenFileName(
+                self, "D5 Render program (D5Render.exe or D5Launcher.exe)",
+                "", "Programs (*.exe);;All files (*)")
+            if path:
+                self._qs.setValue(SK + "d5", path)
+                self.status.setText(f"D5 Render: {path}")
+
+        def _send_d5(self):
+            import os
+            try:
+                work, glb = d5_export(self.panel.app)
+            except Exception as e:  # noqa: BLE001
+                self.status.setText(f"<b>Could not export for D5:</b> {e}")
+                return
+            exe = d5_find(self._qs.value(SK + "d5", "") or None)
+            msg = f"Exported — {glb} (the view and sun: view.json). "
+            if exe:
+                QProcess.startDetached(exe, [])
+                msg += "D5 Render is opening: import model.glb in it."
+            else:
+                msg += ("D5 Render was not found — open it yourself, or "
+                        "«D5 location…».")
+            try:
+                os.startfile(str(work))      # the folder, to drag from
+            except (AttributeError, OSError):
+                pass
+            self.status.setText(msg)
 
         def closeEvent(self, ev):
             self._remember()
