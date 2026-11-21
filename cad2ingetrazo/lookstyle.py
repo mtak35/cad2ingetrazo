@@ -805,6 +805,34 @@ def apply_kit(doc, kit) -> dict:
     except Exception:  # noqa: BLE001
         pass
     rep["rails"] = n_r
+    # 4b. 3.64.97: the finishes by area (terraces, car porch, entrance,
+    # boundary wall), as the elevation type suggests
+    try:
+        import re as _re
+        st_ = doc["settings"]
+        for key in ("fin_terrace", "fin_porch", "fin_entrance"):
+            v = k.get(key)
+            if v is None or v == "keep":
+                continue
+            st_[key] = "" if v == "plain" else v
+            if key == "fin_terrace":
+                for r_ in arch["rooms"]:
+                    if _re.search(r"TERRACE|BALCON|VERAND|SIT\s*OUT|DECK",
+                                  str(r_.get("name") or ""), _re.I):
+                        if st_[key]:
+                            r_["mat_floor"] = st_[key]
+                        else:
+                            r_.pop("mat_floor", None)
+        for kk, sk in (("bw_front_style", "front_style"),
+                       ("bw_style", "style"),
+                       ("bw_front_finish", "front_finish"),
+                       ("bw_finish", "finish")):
+            v = k.get(kk)
+            if v is not None and v != "keep":
+                doc["site"][sk] = v
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("lookstyle.finishes by area")
     # 5. the outside free-standing columns
     if k["columns"] != "asdrawn":
         from . import ornament as OR_

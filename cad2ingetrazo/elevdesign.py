@@ -105,6 +105,53 @@ COLOURS = [("wall", "Walls"), ("trim", "Mouldings / trims"),
            ("metal", "Metal (railings, lanterns)")]
 
 
+#: 3.64.97 — the finishes that suit each elevation type (material keys of
+#: finishes.FLOOR_GROUPS; boundary wall designs / finishes of site.py)
+_F = {  # family: (terrace, car porch, entrance landing, front wall design,
+        #          side wall design, front finish, side finish)
+    "mediterranean": ("finish/botticino_marble.jpg", "floor/paving_stone.jpg",
+                      "finish/carrara_marble.jpg", "stone_piers", "piers",
+                      "stone", "plaster"),
+    "classic": ("finish/botticino_marble.jpg", "finish/sandstone_cladding.jpg",
+                "finish/statuario_marble.jpg", "stone_piers", "piers",
+                "white", "white"),
+    "modern": ("finish/porcelain_grey.jpg", "finish/porcelain_grey.jpg",
+               "finish/marquina_marble.jpg", "coping", "coping", "white",
+               "white"),
+    "raw": ("finish/slate_tiles.jpg", "floor/paving_stone.jpg",
+            "finish/slate_tiles.jpg", "plain", "plain", "concrete",
+            "concrete"),
+    "brick": ("floor/brown_terrace_tiles.jpg", "floor/paving_stone.jpg",
+              "finish/slate_tiles.jpg", "piers", "piers", "brick", "brick"),
+    "cottage": ("floor/brown_terrace_tiles.jpg", "floor/paving_stone.jpg",
+                "finish/sandstone_cladding.jpg", "coping", "coping",
+                "white", "white"),
+    "timber": ("finish/oak_planks.jpg", "finish/sandstone_cladding.jpg",
+               "finish/oak_planks.jpg", "wood_screen", "plain", "plaster",
+               "plaster"),
+    "gulf": ("finish/botticino_marble.jpg", "finish/sandstone_cladding.jpg",
+             "finish/carrara_marble.jpg", "stone_piers", "coping", "stone",
+             "plaster"),
+}
+_FAMILY = {"classical": "classic", "neoclassical": "classic",
+           "royal": "classic", "royal_villa": "classic",
+           "italianate": "mediterranean", "mediterranean": "mediterranean",
+           "modern": "modern", "minimalist": "modern",
+           "contemporary": "modern", "bauhaus": "modern",
+           "hightech": "modern", "artdeco": "modern", "midcentury": "timber",
+           "brutalist": "raw", "industrial": "raw", "tudor": "brick",
+           "georgian": "brick", "victorian": "brick", "capecod": "cottage",
+           "farmhouse": "cottage", "tropical": "timber", "arabian": "gulf"}
+FIN_KEYS = ("fin_terrace", "fin_porch", "fin_entrance", "bw_front_style",
+            "bw_style", "bw_front_finish", "bw_finish")
+
+
+def suggest(style) -> dict:
+    fam = _FAMILY.get(style, "gulf" if str(style).startswith("mosque")
+                      else "mediterranean")
+    return dict(zip(FIN_KEYS, _F[fam]))
+
+
 def _combo(items):
     cb = QComboBox()
     for k, label in items:
@@ -247,6 +294,48 @@ class ElevationDesigner(QDialog):
             self.cols[k] = (b, [0.8, 0.8, 0.8])
             f5.addRow(label, b)
         grid.addWidget(g5, r_, c_)
+        # 3.64.97: finishes by area, to suit the elevation type
+        from . import finishes as FN
+        from .site import WALL_FINISHES, WALL_STYLES
+        flo = [("keep", "— leave as built —"),
+               ("plain", "Plain (concrete / the default)")]
+        try:
+            for title, ks in FN.groups_menu(floor=True):
+                flo += [(m_, f"{title} · {l_}") for m_, l_ in ks]
+        except Exception:  # noqa: BLE001
+            pass
+        gf = QGroupBox("Finishes by area (suit the elevation type — «Style "
+                       "suggests» fills them)")
+        ff = QFormLayout(gf)
+        self.fin = {}
+        for key, lab in (("fin_terrace", "Terraces and balconies — floor"),
+                         ("fin_porch", "Car porch — floor"),
+                         ("fin_entrance", "Main entrance — landing floor")):
+            self.fin[key] = _combo(flo)
+            ff.addRow(lab, self.fin[key])
+        wst = [("keep", "— leave as built —")]
+        self.fin["bw_front_style"] = _combo(
+            wst + [("", "Same as the sides")] + list(WALL_STYLES))
+        ff.addRow("Boundary wall — front design",
+                  self.fin["bw_front_style"])
+        self.fin["bw_style"] = _combo(wst + list(WALL_STYLES))
+        ff.addRow("Boundary wall — sides / back design",
+                  self.fin["bw_style"])
+        wfn = [(k, v[0]) for k, v in WALL_FINISHES.items()]
+        self.fin["bw_front_finish"] = _combo(
+            wst + [("", "Same as the sides")] + wfn)
+        ff.addRow("Boundary wall — front finish",
+                  self.fin["bw_front_finish"])
+        self.fin["bw_finish"] = _combo(wst + wfn)
+        ff.addRow("Boundary wall — sides / back finish",
+                  self.fin["bw_finish"])
+        sg = QPushButton("Style suggests")
+        sg.setToolTip("Fill these from the chosen elevation type (marble "
+                      "for classical, porcelain for modern, brick for "
+                      "Tudor…) — then change what you like")
+        sg.clicked.connect(lambda _c=False: self._suggest_fin())
+        ff.addRow(sg)
+        grid.addWidget(gf, r_ + 1, 0, 1, 2)
         # buttons
         row = QHBoxLayout()
         for text, fn, tip in (
@@ -295,6 +384,8 @@ class ElevationDesigner(QDialog):
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         self._relevance()
+        for key in FIN_KEYS:               # (older designs: as built)
+            _set(self.fin[key], k.get(key, "keep"))
         for key, (b, _c) in self.cols.items():
             c = list(k.get(key) or LS.KIT_DEFAULT[key])
             self.cols[key] = (b, c)
@@ -337,6 +428,8 @@ class ElevationDesigner(QDialog):
              "columns": self.columns.currentData(),
              "gate_color": self.gate.currentData(),
              "manual": True}
+        for key in FIN_KEYS:
+            k[key] = self.fin[key].currentData()
         for key, ch in self.checks.items():
             k[key] = ch.isChecked()
         for key, (_b, c) in self.cols.items():
@@ -347,8 +440,13 @@ class ElevationDesigner(QDialog):
                 if kk not in k}
         return dict(base, **k)
 
+    def _suggest_fin(self):
+        for key, v in suggest(self.style.currentData()).items():
+            _set(self.fin[key], v)
+
     def _load_preset(self):
         self._fill(LS.preset(self.style.currentData()))
+        self._suggest_fin()
         if self.auto.isChecked():
             self._apply()
 

@@ -1005,6 +1005,9 @@ def _dialog_class():
                            ("plain", "Plain grey"),
                            ("city", "City view (buildings and streets)"),
                            ("forest", "Forest view (trees)"),
+                           ("society", "Housing society (houses, streets, "
+                            "parks)"),
+                           ("sea", "Sea view (beach, water, palms)"),
                            ("none", "None")):
                 self.ground.addItem(lab, k)
             self.ground.setCurrentIndex(max(0, self.ground.findData(

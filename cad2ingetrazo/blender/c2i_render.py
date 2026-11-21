@@ -569,9 +569,130 @@ def _join_boxes(name, boxes, mat):
     return ob
 
 
+def _tex_noise(nt, scale=2.0, detail=6.0):
+    """A world-space noise node (Fac output) for colour variation."""
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    nz = nt.nodes.new("ShaderNodeTexNoise")
+    nz.inputs["Scale"].default_value = scale
+    nz.inputs["Detail"].default_value = detail
+    nt.links.new(tc.outputs["Object"], nz.inputs["Vector"])
+    return nz
+
+
+def _leaf_mat(name, col, var=0.35):
+    """Foliage: the colour broken up by noise (light and dark leaf masses),
+    rough, a little sheen."""
+    m = _pbr(name, col, 0.7)
+    nt = m.node_tree
+    b = _bsdf(m)
+    try:
+        nz = _tex_noise(nt, 0.9, 8.0)
+        cr = nt.nodes.new("ShaderNodeValToRGB")
+        cr.color_ramp.elements[0].color = (col[0] * (1 - var),
+                                           col[1] * (1 - var),
+                                           col[2] * (1 - var), 1)
+        cr.color_ramp.elements[1].color = (col[0] * (1 + var),
+                                           col[1] * (1 + var * 1.2),
+                                           col[2] * (1 + var * 0.6), 1)
+        nt.links.new(nz.outputs["Fac"], cr.inputs["Fac"])
+        nt.links.new(cr.outputs["Color"], b.inputs["Base Color"])
+    except Exception:  # noqa: BLE001
+        pass
+    return m
+
+
+def _jitter(bm, verts, amt, rnd):
+    for v in verts:
+        v.co.x += (rnd.random() - 0.5) * amt
+        v.co.y += (rnd.random() - 0.5) * amt
+        v.co.z += (rnd.random() - 0.5) * amt
+
+
+def _add_tree(trunk, crowns, x, y, z, h, rnd, kind="broad"):
+    """One tree into the shared bmeshes: ``trunk`` and ``crowns`` (a list
+    of bmeshes by leaf colour). kind: broad (3 jittered masses), conifer
+    (stacked cones), palm (curved trunk, fronds)."""
+    import bmesh
+    cb = crowns[rnd.randrange(len(crowns))]
+    if kind == "conifer":
+        r = bmesh.ops.create_cone(trunk, cap_ends=True, segments=6,
+                                  radius1=h * 0.02 + 0.08,
+                                  radius2=h * 0.012 + 0.05, depth=h * 0.35)
+        bmesh.ops.translate(trunk, vec=(x, y, z + h * 0.175),
+                            verts=r["verts"])
+        for lv in range(4):
+            rad = h * (0.24 - 0.045 * lv)
+            r = bmesh.ops.create_cone(cb, cap_ends=False, segments=9,
+                                      radius1=rad, radius2=rad * 0.12,
+                                      depth=h * 0.34)
+            _jitter(cb, r["verts"], rad * 0.18, rnd)
+            bmesh.ops.translate(cb, vec=(x, y, z + h * (0.30 + 0.17 * lv)),
+                                verts=r["verts"])
+        return
+    if kind == "palm":
+        lean = (rnd.random() - 0.5) * 0.18
+        r = bmesh.ops.create_cone(trunk, cap_ends=True, segments=6,
+                                  radius1=h * 0.028 + 0.08,
+                                  radius2=h * 0.016 + 0.05, depth=h * 0.92)
+        for v in r["verts"]:
+            v.co.x += lean * max(0.0, v.co.z + h * 0.46) ** 1.3 * 0.12
+        bmesh.ops.translate(trunk, vec=(x, y, z + h * 0.46),
+                            verts=r["verts"])
+        tx, ty, tz = x + lean * h ** 1.3 * 0.12 * 0.95, y, z + h * 0.92
+        for k in range(9):          # fronds: tilted flat cones
+            a = k / 9 * 2 * math.pi + rnd.random() * 0.3
+            r = bmesh.ops.create_cone(cb, cap_ends=False, segments=3,
+                                      radius1=h * 0.045, radius2=0.01,
+                                      depth=h * 0.42)
+            bmesh.ops.rotate(cb, cent=(0, 0, 0), verts=r["verts"],
+                             matrix=__import__("mathutils").Matrix.Rotation(
+                                 math.radians(80), 3, "Y"))
+            bmesh.ops.rotate(cb, cent=(0, 0, 0), verts=r["verts"],
+                             matrix=__import__("mathutils").Matrix.Rotation(
+                                 a, 3, "Z"))
+            for v in r["verts"]:
+                v.co.z -= 0.0
+            bmesh.ops.translate(cb, vec=(tx + math.cos(a) * h * 0.2,
+                                         ty + math.sin(a) * h * 0.2,
+                                         tz - h * 0.04), verts=r["verts"])
+        return
+    rc = h * (0.2 + 0.08 * rnd.random())
+    r = bmesh.ops.create_cone(trunk, cap_ends=True, segments=7,
+                              radius1=h * 0.032 + 0.1,
+                              radius2=h * 0.018 + 0.06, depth=h * 0.55)
+    bmesh.ops.translate(trunk, vec=(x, y, z + h * 0.275), verts=r["verts"])
+    for lv in range(3):
+        r = bmesh.ops.create_icosphere(cb, subdivisions=2,
+                                       radius=rc * (0.7 + 0.35 *
+                                                    rnd.random()))
+        bmesh.ops.scale(cb, vec=(1.0, 1.0, 0.85), verts=r["verts"])
+        _jitter(cb, r["verts"], rc * 0.35, rnd)
+        bmesh.ops.translate(cb, vec=(
+            x + (rnd.random() - 0.5) * rc * 1.2,
+            y + (rnd.random() - 0.5) * rc * 1.2,
+            z + h * (0.58 + 0.16 * lv) + rnd.random() * rc * 0.25),
+            verts=r["verts"])
+
+
+def _flush_trees(scene, name, trunk, crowns, tmat, lmats):
+    import bmesh
+    for nm, bm, mat in [(name + " trunks", trunk, tmat)] + [
+            (name + " leaves %d" % i, b, lmats[i])
+            for i, b in enumerate(crowns)]:
+        me = bpy.data.meshes.new(nm)
+        bm.to_mesh(me)
+        bm.free()
+        for p_ in me.polygons:
+            p_.use_smooth = True
+        ob = bpy.data.objects.new(nm, me)
+        ob.data.materials.append(mat)
+        scene.collection.objects.link(ob)
+
+
 def city_view(scene, z, seed=7):
-    """Blocks of buildings round the site, streets between, taller away
-    from the plot (a city seen from a house)."""
+    """Blocks round the site: concrete blocks with windows, glass towers,
+    stepped tops and roof plant; streets with lane marks; street trees."""
+    import bmesh
     import random
     rnd = random.Random(seed)
     cx, cy, R = _site_box(scene)
@@ -580,11 +701,19 @@ def city_view(scene, z, seed=7):
     pitch, street = 62.0, 16.0
     blk = pitch - street
     pal = [(0.62, 0.58, 0.50), (0.72, 0.70, 0.66), (0.50, 0.50, 0.52),
-           (0.55, 0.36, 0.28), (0.78, 0.74, 0.64), (0.40, 0.44, 0.50)]
+           (0.55, 0.36, 0.28), (0.78, 0.74, 0.64)]
     mats = [_facade("City %d" % i, c) for i, c in enumerate(pal)]
-    pad_m = _pbr("City pavement", (0.46, 0.45, 0.43), 0.9)
+    glass = _pbr("City glass", (0.10, 0.20, 0.27), 0.12)
+    try:
+        _bsdf(glass).inputs["Metallic"].default_value = 0.85
+    except Exception:  # noqa: BLE001
+        pass
+    roof_m = _pbr("City roof", (0.32, 0.31, 0.30), 0.9)
+    pad_m = _pbr("City pavement", (0.50, 0.49, 0.47), 0.9)
+    mark_m = _pbr("City lane mark", (0.85, 0.85, 0.80), 0.7)
     per = [[] for _ in pal]
-    pads = []
+    gl, roofs, pads, marks = [], [], [], []
+    tr, cr = bmesh.new(), [bmesh.new(), bmesh.new()]
     n = int(480 / pitch) + 1
     for i in range(-n, n + 1):
         for j in range(-n, n + 1):
@@ -594,8 +723,8 @@ def city_view(scene, z, seed=7):
                 continue
             if cam and math.hypot(x - cam[0], y - cam[1]) < 60.0:
                 continue                 # not round the camera
-            pads.append((x, y, z, blk, blk, 0.2))
-            k = max(1, int(rnd.random() * 3) + 1)      # 1-3 buildings
+            pads.append((x, y, z, blk + 4, blk + 4, 0.2))
+            k = rnd.randrange(1, 4)
             for _ in range(k):
                 sx = blk * (0.35 + 0.4 * rnd.random())
                 sy = blk * (0.35 + 0.4 * rnd.random())
@@ -604,19 +733,66 @@ def city_view(scene, z, seed=7):
                 lo = 9.0 + 0.04 * d
                 h = lo + rnd.random() ** 2 * (28.0 + 0.12 * d)
                 h = round(h / 3.2) * 3.2
-                per[rnd.randrange(len(pal))].append(
-                    (bx, by, z + 0.2, sx, sy, h))
+                tower = h > 28 and rnd.random() < 0.55
+                if tower:
+                    gl.append((bx, by, z + 0.2, sx * 0.8, sy * 0.8, h))
+                    top = z + 0.2 + h
+                    gl.append((bx, by, top, sx * 0.5, sy * 0.5, 4.5))
+                else:
+                    per[rnd.randrange(len(pal))].append(
+                        (bx, by, z + 0.2, sx, sy, h))
+                    top = z + 0.2 + h
+                    if rnd.random() < 0.6:     # roof plant / lift head
+                        roofs.append((bx + (rnd.random() - 0.5) * sx * 0.4,
+                                      by + (rnd.random() - 0.5) * sy * 0.4,
+                                      top, sx * 0.25, sy * 0.25, 3.0))
+                if rnd.random() < 0.15:        # a stepped podium
+                    per[0].append((bx, by, z + 0.2, sx * 1.15, sy * 1.15,
+                                   6.4))
+            for t_ in range(3):               # street trees on the kerb
+                a = rnd.random() * 2 * math.pi
+                rr = blk / 2 + 4.5
+                _add_tree(tr, cr, x + math.cos(a) * rr * (1 if t_ % 2 else
+                          0.2) + (rnd.random() - 0.5) * blk,
+                          y + math.sin(a) * rr, z, 6.0 + rnd.random() * 3,
+                          rnd, "broad")
+    # lane marks: dashed centre lines along the streets within 230 m
+    for i in range(-4, 5):
+        for j in range(-4, 5):
+            for ax in (0, 1):
+                gx = cx + (i + 0.5) * pitch if ax == 0 else cx + i * pitch
+                gy = cy + j * pitch if ax == 0 else cy + (j + 0.5) * pitch
+                for q in range(-4, 5):
+                    px = gx if ax == 0 else gx + q * 6.5
+                    py = gy + q * 6.5 if ax == 0 else gy
+                    dd = math.hypot(px - cx, py - cy)
+                    if dd < r0 + 10 or dd > 230:
+                        continue
+                    if cam and math.hypot(px - cam[0], py - cam[1]) < 30:
+                        continue
+                    marks.append((px, py, z + 0.01, 0.2 if ax == 0 else 3.0,
+                                  3.0 if ax == 0 else 0.2, 0.01))
     _join_boxes("IngeTrazo city pads", pads, pad_m)
+    if gl:
+        _join_boxes("IngeTrazo city glass", gl, glass)
+    if roofs:
+        _join_boxes("IngeTrazo city roof plant", roofs, roof_m)
+    if marks:
+        _join_boxes("IngeTrazo city lane marks", marks, mark_m)
     for i, bx in enumerate(per):
         if bx:
-            ob = _join_boxes("IngeTrazo city %d" % i, bx, mats[i])
-            _bevel(mats[i], 0.05)
-    say("city view", sum(len(b) for b in per), "buildings")
+            _join_boxes("IngeTrazo city %d" % i, bx, mats[i])
+    _flush_trees(scene, "IngeTrazo city trees", tr, cr,
+                 _pbr("City trunk", (0.2, 0.13, 0.08)),
+                 [_leaf_mat("City leaf %d" % i, c) for i, c in enumerate(
+                     [(0.12, 0.28, 0.08), (0.18, 0.32, 0.09)])])
+    say("city view", sum(len(b) for b in per) + len(gl), "buildings")
 
 
 def forest_view(scene, z, seed=11):
-    """Trees round the site — a wood seen from a house, denser and taller
-    with distance."""
+    """A wood round the site: broadleaf trees (jittered, noise-coloured
+    crowns) mixed with conifers, denser and taller with distance; a mown
+    clearing round the house."""
     import bmesh
     import random
     rnd = random.Random(seed)
@@ -624,49 +800,268 @@ def forest_view(scene, z, seed=11):
     cam = _cam_xy(scene)
     r0 = R + 14.0
     greens = [(0.10, 0.25, 0.07), (0.14, 0.30, 0.08), (0.08, 0.20, 0.06),
-              (0.20, 0.33, 0.09)]
-    gm = [_pbr("Forest leaf %d" % i, c, 0.8) for i, c in enumerate(greens)]
-    tm = _pbr("Forest trunk", (0.18, 0.11, 0.06), 0.9)
+              (0.22, 0.34, 0.09)]
+    lm = [_leaf_mat("Forest leaf %d" % i, c) for i, c in enumerate(greens)]
+    tm = _pbr("Forest trunk", (0.16, 0.10, 0.06), 0.9)
+    con_m = [_leaf_mat("Forest conifer %d" % i, c, 0.25) for i, c in
+             enumerate([(0.04, 0.14, 0.07), (0.06, 0.18, 0.08)])]
     trunk = bmesh.new()
     crowns = [bmesh.new() for _ in greens]
+    ctr = bmesh.new()
+    con = [bmesh.new() for _ in con_m]
     n = 0
-    for _ in range(1700):
+    for _ in range(1500):
         a = rnd.random() * 2 * math.pi
         d = r0 + (rnd.random() ** 0.8) * (420.0 - r0)
         x, y = cx + d * math.cos(a), cy + d * math.sin(a)
         if cam and math.hypot(x - cam[0], y - cam[1]) < 14.0:
             continue
-        h = (7.0 + rnd.random() * 9.0) * (1.0 + d / 500.0)
-        rc = h * (0.22 + 0.1 * rnd.random())
-        r = bmesh.ops.create_cone(trunk, cap_ends=True, segments=6,
-                                  radius1=h * 0.03 + 0.1,
-                                  radius2=h * 0.02 + 0.06, depth=h * 0.55)
-        bmesh.ops.translate(trunk, vec=(x, y, z + h * 0.275),
-                            verts=r["verts"])
-        cb = crowns[rnd.randrange(len(greens))]
-        for lv in range(3):                 # a crown of three blobs
-            r = bmesh.ops.create_icosphere(cb, subdivisions=2,
-                                           radius=rc * (0.75 + 0.3 *
-                                                        rnd.random()))
-            bmesh.ops.scale(cb, vec=(1.0, 1.0, 1.25), verts=r["verts"])
-            bmesh.ops.translate(cb, vec=(
-                x + (rnd.random() - 0.5) * rc * 1.1,
-                y + (rnd.random() - 0.5) * rc * 1.1,
-                z + h * (0.55 + 0.2 * lv) + rnd.random() * rc * 0.3),
-                verts=r["verts"])
+        h = (8.0 + rnd.random() * 10.0) * (1.0 + d / 500.0)
+        if rnd.random() < 0.3:
+            _add_tree(ctr, con, x, y, z, h * 1.15, rnd, "conifer")
+        else:
+            _add_tree(trunk, crowns, x, y, z, h, rnd, "broad")
         n += 1
-    for nm, bm, mat in [("IngeTrazo forest trunks", trunk, tm)] + [
-            ("IngeTrazo forest leaves %d" % i, b, gm[i])
-            for i, b in enumerate(crowns)]:
-        me = bpy.data.meshes.new(nm)
-        bm.to_mesh(me)
-        bm.free()
-        ob = bpy.data.objects.new(nm, me)
-        ob.data.materials.append(mat)
-        scene.collection.objects.link(ob)
-        for p_ in me.polygons:
-            p_.use_smooth = True
+    _flush_trees(scene, "IngeTrazo forest", trunk, crowns, tm, lm)
+    _flush_trees(scene, "IngeTrazo forest conifers", ctr, con, tm, con_m)
     say("forest view", n, "trees")
+
+
+def society_view(scene, z, seed=5):
+    """A housing society: rows of two-storey houses with boundary walls and
+    garages on a street grid, a park with trees every few blocks, street
+    trees."""
+    import bmesh
+    import random
+    rnd = random.Random(seed)
+    cx, cy, R = _site_box(scene)
+    cam = _cam_xy(scene)
+    r0 = R + 22.0
+    lot_w, lot_d, road = 13.0, 26.0, 12.0
+    bw, bd = 6, 2          # lots per block side
+    pitch_x = bw * lot_w + road
+    pitch_y = bd * lot_d + road
+    wall_cols = [(0.86, 0.83, 0.76), (0.90, 0.88, 0.84), (0.80, 0.72, 0.62),
+                 (0.78, 0.76, 0.74)]
+    fac = [_facade("Society %d" % i, c) for i, c in enumerate(wall_cols)]
+    roof_m = _pbr("Society roof", (0.55, 0.28, 0.20), 0.85)
+    flat_m = _pbr("Society flat roof", (0.45, 0.44, 0.42), 0.9)
+    wall_m = _pbr("Society wall", (0.82, 0.80, 0.74), 0.9)
+    lawn_m = _pbr("Society lawn", (0.14, 0.30, 0.08), 0.9)
+    pad_m = _pbr("Society pavement", (0.50, 0.49, 0.47), 0.9)
+    per = [[] for _ in wall_cols]
+    walls, flats, lawns, pads, hip = [], [], [], [], []
+    tr, cr = bmesh.new(), [bmesh.new(), bmesh.new()]
+    n = 9
+    nh = 0
+    for bi in range(-n, n + 1):
+        for bj in range(-n, n + 1):
+            ox, oy = cx + bi * pitch_x, cy + bj * pitch_y
+            d = math.hypot(ox - cx, oy - cy)
+            if d < r0 + 40 or d > 520:
+                continue
+            if cam and math.hypot(ox - cam[0], oy - cam[1]) < 55.0:
+                continue
+            pads.append((ox, oy, z, bw * lot_w + 4, bd * lot_d + 4, 0.15))
+            if rnd.random() < 0.09:        # a park
+                lawns.append((ox, oy, z + 0.15, bw * lot_w - 2,
+                              bd * lot_d - 2, 0.05))
+                for _ in range(26):
+                    _add_tree(tr, cr, ox + (rnd.random() - 0.5) * bw * lot_w
+                              * 0.9, oy + (rnd.random() - 0.5) * bd * lot_d
+                              * 0.9, z + 0.15, 7 + rnd.random() * 5, rnd,
+                              "broad")
+                continue
+            for r_ in range(bd):
+                for c_ in range(bw):
+                    lx = ox - bw * lot_w / 2 + (c_ + 0.5) * lot_w
+                    ly = oy - bd * lot_d / 2 + (r_ + 0.5) * lot_d
+                    fw = lot_w * 0.72
+                    fd = lot_d * 0.52
+                    fl = 2 if rnd.random() < 0.8 else 1
+                    h = 3.4 * fl
+                    fy = ly + (lot_d * 0.5 - fd / 2 - 3.0) * (1 if r_ else
+                                                              -1)
+                    per[rnd.randrange(len(wall_cols))].append(
+                        (lx, fy, z + 0.15, fw, fd, h))
+                    if rnd.random() < 0.45:     # a hipped tiled roof
+                        hip.append((lx, fy, z + 0.15 + h, fw * 1.04,
+                                    fd * 1.04, 1.6))
+                    else:
+                        flats.append((lx, fy, z + 0.15 + h, fw * 1.02,
+                                      fd * 1.02, 0.45))
+                    # lot's boundary wall (four thin boxes)
+                    for (wx, wy, sx, sy) in (
+                            (lx, ly - lot_d / 2, lot_w, 0.2),
+                            (lx, ly + lot_d / 2, lot_w, 0.2),
+                            (lx - lot_w / 2, ly, 0.2, lot_d),
+                            (lx + lot_w / 2, ly, 0.2, lot_d)):
+                        walls.append((wx, wy, z + 0.15, sx, sy, 1.8))
+                    lawns.append((lx, ly, z + 0.15, lot_w - 0.6,
+                                  lot_d - 0.6, 0.04))
+                    if rnd.random() < 0.5:
+                        _add_tree(tr, cr, lx + (rnd.random() - 0.5) * 6, ly
+                                  + (rnd.random() - 0.5) * 8, z + 0.15,
+                                  5 + rnd.random() * 3, rnd, "broad")
+                    nh += 1
+    _join_boxes("IngeTrazo society pads", pads, pad_m)
+    _join_boxes("IngeTrazo society lawns", lawns, lawn_m)
+    _join_boxes("IngeTrazo society walls", walls, wall_m)
+    if flats:
+        _join_boxes("IngeTrazo society slabs", flats, flat_m)
+    if hip:
+        _join_boxes("IngeTrazo society roofs", hip, roof_m)
+    for i, bx in enumerate(per):
+        if bx:
+            _join_boxes("IngeTrazo society houses %d" % i, bx, fac[i])
+    _flush_trees(scene, "IngeTrazo society trees", tr, cr,
+                 _pbr("Society trunk", (0.2, 0.13, 0.08)),
+                 [_leaf_mat("Society leaf %d" % i, c) for i, c in enumerate(
+                     [(0.12, 0.28, 0.08), (0.18, 0.32, 0.09)])])
+    say("housing society", nh, "houses")
+
+
+def sea_view(scene, z, seed=3):
+    """The sea beyond the plot: a beach, a shoreline with foam, waves on
+    the water to the horizon, palms on the sand. The sea lies on the far
+    side of the house as the camera sees it."""
+    import bmesh
+    import random
+    rnd = random.Random(seed)
+    cx, cy, R = _site_box(scene)
+    cam = _cam_xy(scene)
+    if cam:
+        fx, fy = cx - cam[0], cy - cam[1]
+        L = math.hypot(fx, fy) or 1.0
+        fx, fy = fx / L, fy / L
+    else:
+        fx, fy = 0.0, 1.0
+    px, py = -fy, fx                     # along the shore
+    shore = R + 55.0                     # shoreline distance beyond centre
+    # the water: a big plane beyond the shoreline, waves by a bump
+    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0, 0, 0))
+    w = bpy.context.active_object
+    w.name = "IngeTrazo sea"
+    w.scale = (4000.0, 2000.0, 1.0)
+    ang = math.atan2(fy, fx) - math.pi / 2     # plane's Y along (fx, fy)
+    w.rotation_euler = (0, 0, ang + math.pi / 2 * 0)
+    w.rotation_euler = (0, 0, math.atan2(fy, fx))
+    # plane local X -> (fx, fy): its half-length 2000 reaches the horizon
+    w.location = (cx + fx * (shore + 2000.0), cy + fy * (shore + 2000.0),
+                  z + 0.01)
+    w.scale = (4000.0, 6000.0, 1.0)
+    m = bpy.data.materials.new("IngeTrazo sea")
+    m.use_nodes = True
+    nt = m.node_tree
+    b = _bsdf(m)
+    N = nt.nodes
+    L_ = nt.links.new
+    b.inputs["Base Color"].default_value = (0.01, 0.16, 0.22, 1)
+    b.inputs["Roughness"].default_value = 0.06
+    for nm, v in (("Transmission Weight", 0.6), ("IOR", 1.333),
+                  ("Specular IOR Level", 0.8)):
+        try:
+            b.inputs[nm].default_value = v
+        except KeyError:
+            pass
+    try:
+        tc = N.new("ShaderNodeTexCoord")
+        mp = N.new("ShaderNodeMapping")
+        mp.inputs["Scale"].default_value = (0.35, 0.8, 1.0)
+        n1 = N.new("ShaderNodeTexNoise")
+        n1.inputs["Scale"].default_value = 3.0
+        n1.inputs["Detail"].default_value = 5.0
+        n2 = N.new("ShaderNodeTexWave")
+        n2.inputs["Scale"].default_value = 0.6
+        n2.inputs["Distortion"].default_value = 4.0
+        bm = N.new("ShaderNodeBump")
+        bm.inputs["Strength"].default_value = 0.35
+        bm.inputs["Distance"].default_value = 0.4
+        L_(tc.outputs["Object"], mp.inputs["Vector"])
+        L_(mp.outputs["Vector"], n1.inputs["Vector"])
+        L_(mp.outputs["Vector"], n2.inputs["Vector"])
+        mx = N.new("ShaderNodeMath")
+        mx.operation = "ADD"
+        L_(n1.outputs["Fac"], mx.inputs[0])
+        L_(n2.outputs["Fac"], mx.inputs[1])
+        L_(mx.outputs["Value"], bm.inputs["Height"])
+        L_(bm.outputs["Normal"], b.inputs["Normal"])
+        cr = N.new("ShaderNodeValToRGB")      # deeper / lighter water
+        cr.color_ramp.elements[0].color = (0.005, 0.10, 0.16, 1)
+        cr.color_ramp.elements[1].color = (0.03, 0.30, 0.34, 1)
+        L_(n1.outputs["Fac"], cr.inputs["Fac"])
+        L_(cr.outputs["Color"], b.inputs["Base Color"])
+    except Exception:  # noqa: BLE001
+        pass
+    w.data.materials.append(m)
+    # the beach: sand strip between the plot and the water, foam at the edge
+    sand = _pbr("Sea sand", (0.72, 0.62, 0.44), 0.95)
+    try:
+        nz = _tex_noise(sand.node_tree, 6.0, 10.0)
+        cr = sand.node_tree.nodes.new("ShaderNodeValToRGB")
+        cr.color_ramp.elements[0].color = (0.62, 0.52, 0.36, 1)
+        cr.color_ramp.elements[1].color = (0.80, 0.70, 0.52, 1)
+        sand.node_tree.links.new(nz.outputs["Fac"], cr.inputs["Fac"])
+        sand.node_tree.links.new(cr.outputs["Color"],
+                                 _bsdf(sand).inputs["Base Color"])
+    except Exception:  # noqa: BLE001
+        pass
+    bpy.ops.mesh.primitive_plane_add(size=1.0)
+    bch = bpy.context.active_object
+    bch.name = "IngeTrazo beach"
+    bch.scale = (60.0, 6000.0, 1.0)
+    bch.rotation_euler = (0, 0, math.atan2(fy, fx))
+    bch.location = (cx + fx * (shore - 30.0), cy + fy * (shore - 30.0),
+                    z + 0.004)
+    bch.data.materials.append(sand)
+    foam = bpy.data.materials.new("Sea foam")
+    foam.use_nodes = True
+    fnt = foam.node_tree
+    for n_ in list(fnt.nodes):
+        fnt.nodes.remove(n_)
+    out = fnt.nodes.new("ShaderNodeOutputMaterial")
+    mix = fnt.nodes.new("ShaderNodeMixShader")
+    tr_ = fnt.nodes.new("ShaderNodeBsdfTransparent")
+    df = fnt.nodes.new("ShaderNodeBsdfDiffuse")
+    df.inputs["Color"].default_value = (0.95, 0.97, 0.97, 1)
+    tcf = fnt.nodes.new("ShaderNodeTexCoord")
+    nzf = fnt.nodes.new("ShaderNodeTexNoise")
+    nzf.inputs["Scale"].default_value = 1.4
+    nzf.inputs["Detail"].default_value = 8.0
+    crf = fnt.nodes.new("ShaderNodeValToRGB")
+    crf.color_ramp.elements[0].position = 0.5
+    crf.color_ramp.elements[1].position = 0.72
+    fnt.links.new(tcf.outputs["Object"], nzf.inputs["Vector"])
+    fnt.links.new(nzf.outputs["Fac"], crf.inputs["Fac"])
+    fnt.links.new(crf.outputs["Color"], mix.inputs["Fac"])
+    fnt.links.new(tr_.outputs[0], mix.inputs[1])
+    fnt.links.new(df.outputs[0], mix.inputs[2])
+    fnt.links.new(mix.outputs[0], out.inputs["Surface"])
+    bpy.ops.mesh.primitive_plane_add(size=1.0)
+    fm = bpy.context.active_object
+    fm.name = "IngeTrazo foam"
+    fm.scale = (7.0, 6000.0, 1.0)
+    fm.rotation_euler = (0, 0, math.atan2(fy, fx))
+    fm.location = (cx + fx * (shore + 1.0), cy + fy * (shore + 1.0),
+                   z + 0.016)
+    fm.data.materials.append(foam)
+    # palms on the sand, along the shore, and a few scrub bushes
+    tr, cr = bmesh.new(), [bmesh.new()]
+    n = 0
+    for _ in range(70):
+        along = (rnd.random() - 0.5) * 360.0
+        back = shore - 5.0 - rnd.random() * 45.0
+        x, y = cx + fx * back + px * along, cy + fy * back + py * along
+        if math.hypot(x - cx, y - cy) < R + 10:
+            continue
+        if cam and math.hypot(x - cam[0], y - cam[1]) < 14.0:
+            continue
+        _add_tree(tr, cr, x, y, z, 7.0 + rnd.random() * 5.0, rnd, "palm")
+        n += 1
+    _flush_trees(scene, "IngeTrazo palms", tr, cr,
+                 _pbr("Palm trunk", (0.30, 0.22, 0.13)),
+                 [_leaf_mat("Palm frond", (0.10, 0.30, 0.07))])
+    say("sea view", n, "palms, shore at %.0f m" % shore)
 
 
 def environment(scene, job, c2i):
@@ -759,9 +1154,10 @@ def environment(scene, job, c2i):
         say("environment", sky)
     # the ground beyond the plot
     gnd = env.get("ground", "grass")
-    view_ = gnd if gnd in ("city", "forest") else ""
+    view_ = gnd if gnd in ("city", "forest", "society", "sea") else ""
     if view_:                       # 3.64.96: the view beyond the plot
-        gnd = "asphalt" if view_ == "city" else "grass"
+        gnd = {"city": "asphalt", "society": "asphalt", "sea": "sand",
+               "forest": "grass"}[view_]
     if gnd != "none":
         cols = {"grass": (0.07, 0.16, 0.04), "concrete": (0.45, 0.44, 0.42),
                 "asphalt": (0.06, 0.06, 0.065), "plain": (0.42, 0.42, 0.40),
@@ -781,6 +1177,10 @@ def environment(scene, job, c2i):
                 city_view(scene, z)
             elif view_ == "forest":
                 forest_view(scene, z)
+            elif view_ == "society":
+                society_view(scene, z)
+            elif view_ == "sea":
+                sea_view(scene, z)
         except Exception as e_:  # noqa: BLE001
             say("view", "skipped:", e_)
     # haze: a thin volume in the world (Cycles)
