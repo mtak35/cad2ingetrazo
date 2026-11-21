@@ -511,15 +511,15 @@ class ElevationDesigner(QDialog):
         LS.remove_kit(doc)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:              # the windows, railings … as the plans draw them
-            PJ.update_from_cad(doc, as_cad=False)
+            PJ.update_from_cad(doc, as_cad=True)   # 3.64.103: as imported
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("elevdesign.remove")
         finally:
             QApplication.restoreOverrideCursor()
         self.panel.commit(doc, "Elevation design removed")
-        self.panel.flash("Elevation design removed — the elevations as the "
-                         "plans draw them", 8000)
+        self.panel.flash("Design deleted — the model as imported from the CAD "
+                         "plans", 8000)
 
     def _from_picture(self):
         from . import refelev as RE

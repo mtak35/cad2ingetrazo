@@ -1079,6 +1079,27 @@ def remove_kit(doc) -> None:
         for kk in [k for k in st if str(k).startswith(("fin_", "bw_"))]:
             st[kk] = "" if kk.startswith("fin_") else st[kk]
         st.pop("terrace_rail_kind", None)
+        # 3.64.103: the design's settings back to the defaults (as imported)
+        try:
+            from .project import DEFAULTS as _DF
+            from . import site as _ST
+            for kk in ("fin_terrace", "fin_porch", "fin_entrance",
+                       "fin_veranda", "terrace_rail_kind", "terrace_curb_h",
+                       "roof_parapet", "roof_parapet_kind", "parapet_style",
+                       "terrace_mat"):
+                if kk in _DF:
+                    st[kk] = _DF[kk]
+                else:
+                    st.pop(kk, None)
+            _sd = _ST.load_site(None)
+            _s = doc.setdefault("site", {})
+            for kk in ("front_style", "style", "front_finish", "finish",
+                       "gate_color", "wall", "sides_on"):
+                if kk in _sd:
+                    _s[kk] = _sd[kk]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("lookstyle.remove defaults")
         site = doc.setdefault("site", {})
         for kk in ("finish", "front_finish"):
             if site.get(kk) == "match":
