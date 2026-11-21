@@ -829,7 +829,7 @@ class LevelDlg(QDialog):
     """A part's ground level, over (+) or under (−) the main ground — typed
     in metres or in feet-inches; the other follows."""
 
-    def __init__(self, parent, k, z0=0.0):
+    def __init__(self, parent, k, z0=0.0, note=""):
         super().__init__(parent)
         from PySide6.QtWidgets import QFormLayout, QLineEdit
         self.setWindowTitle(f"Level of part {k}")
@@ -840,6 +840,8 @@ class LevelDlg(QDialog):
         self.ft = QLineEdit()
         f.addRow("Metres", self.m)
         f.addRow("Feet-inches", self.ft)
+        if note:
+            f.addRow(QLabel(note))
         self._z = float(z0)
         self._fill(None)
         self.m.editingFinished.connect(lambda: self._read("m"))
@@ -939,10 +941,15 @@ class PlotDialog(QDialog):
             "corner, right-click a corner to delete it; «Done editing» "
             "keeps it (its level can be changed).")
         self.b_edit.clicked.connect(self._edit_pick)
+        self.b_lvl = QPushButton("Fix a part's level…")
+        self.b_lvl.setToolTip("Click a part, then type its level (metres or "
+                              "feet-inches).")
+        self.b_lvl.clicked.connect(self._lvl_pick)
         self.b_done = QPushButton("Done editing")
         self.b_done.clicked.connect(self._edit_done)
         self.cov = QLabel()
-        for w in (self.b_part, self.b_edit, self.b_done, self.b_undo,
+        for w in (self.b_part, self.b_edit, self.b_lvl, self.b_done,
+                  self.b_undo,
                   self.b_wall, self.cov):
             row2.addWidget(w)
         row2.addStretch(1)
@@ -1144,7 +1151,13 @@ class PlotDialog(QDialog):
         best = best.intersection(plot) if best.intersection(plot).area > \
             1e-6 else best
         n0 = len(self._parts)
-        z = v - ref
+        from .host import both_txt as _bt, ft_in_txt as _ft
+        z = self._level_for(
+            len(self._parts) + 1, v - ref,
+            f"The level text reads {_ft(v)} ({v:.3f} m); main ground "
+            f"{_ft(ref)} ({ref:.3f} m). Fix the level here if needed.")
+        if z is None:                     # «Skip this part»
+            return
         self._add([tuple(c) for c in list(best.exterior.coords)[:-1]]
                   if best.geom_type == "Polygon" else
                   [tuple(c) for c in list(max(
@@ -1188,9 +1201,9 @@ class PlotDialog(QDialog):
         self.canvas.parts = list(self._parts)
         return len(self._parts) > n0
 
-    def _level_for(self, k):
+    def _level_for(self, k, z=None, note=""):
         """Ask the level of part k — metres and feet-inches, one value."""
-        d = LevelDlg(self, k, self._last_z)
+        d = LevelDlg(self, k, self._last_z if z is None else z, note)
         if d.exec():
             self._last_z = d.value()
             return self._last_z
@@ -1234,14 +1247,31 @@ class PlotDialog(QDialog):
             c.poly, c.closed = [], False
         return True
 
+    def _lvl_pick(self):
+        if self._need_plot() and self._parts:
+            self._pick_for = "level"
+            self.canvas.poly, self.canvas.closed = [], False
+            self.canvas.mode = "partpick"
+            self.tip.setText("<b>Click the part</b> whose level to fix.")
+            self.canvas.update()
+
     def _edit_pick(self):
         if self._need_plot() and self._parts:
+            self._pick_for = "edit"
             self.canvas.poly, self.canvas.closed = [], False
             self.canvas.mode = "partpick"
             self.tip.setText("<b>Click the part to edit</b> (inside it).")
             self.canvas.update()
 
     def _part_clicked(self, i):
+        if getattr(self, "_pick_for", "edit") == "level":
+            pg, z = self._parts[i]
+            nz = self._level_for(i + 1, z, "")
+            if nz is not None:
+                self._parts[i] = (pg, nz)
+                self.canvas.parts = list(self._parts)
+            self._level_mode()
+            return
         pg, z = self._parts.pop(i)
         self._editing = (i, z)
         self._last_z = z
@@ -1314,6 +1344,7 @@ class PlotDialog(QDialog):
         ph = self._phase
         self.b_rest.setEnabled(ph == "parts")
         self.b_edit.setEnabled(bool(self._parts) and self._editing is None)
+        self.b_lvl.setEnabled(bool(self._parts) and self._editing is None)
         self.b_done.setEnabled(self._editing is not None)
         self.b_undo.setEnabled(ph == "parts" and bool(self._parts))
         self.b_part.setEnabled(ph != "plot" or (c.closed and
