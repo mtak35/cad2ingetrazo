@@ -987,6 +987,15 @@ class PlotDialog(QDialog):
         return [(list(p), z) for p, z in self._parts]
 
     @property
+    def ref(self):
+        """The main ground's level on the drawing's datum (m): the parts'
+        levels are over it."""
+        try:
+            return float(self._level_texts()[1]) if self._parts else 0.0
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @property
     def wall(self):
         """The boundary wall's own line picked here ([] — the layer, else
         the plot limit)."""

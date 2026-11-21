@@ -145,7 +145,12 @@ def load(raw) -> dict:
             doc["plot"].update(_setbacks(plot, n))
             doc["plot"]["survey"] = _survey(plot.get("survey"))
             doc["plot"]["parts"] = _plot_parts(plot.get("parts"))
+            try:       # 3.64.88: the main ground's level on the CAD's datum
+                doc["plot"]["ref"] = float(plot.get("ref", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                doc["plot"]["ref"] = 0.0
             doc["plot"]["wall"] = _plot_wall(plot.get("wall"))
+            doc["plot"]["walls"] = _plot_walls(plot.get("walls"))
             try:                             # contour lines every … m
                 step = float(plot.get("contour", CONTOUR_STEP))
             except (TypeError, ValueError):
@@ -833,6 +838,21 @@ def _setbacks(plot: dict, n: int) -> dict:
                 pass
     return {"sb_front": front, "sb_custom": custom, "sb_role": role,
             "sb_dist": dist}
+
+
+def _plot_walls(raw) -> list:
+    """3.64.88 — the boundary wall in parts: [{"pts": [[x, y]…],
+    "closed": bool}] (open or closed runs)."""
+    out = []
+    for w in raw if isinstance(raw, list) else []:
+        try:
+            pts = [[float(q[0]), float(q[1])] for q in w["pts"]]
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        closed = bool(w.get("closed"))
+        if len(pts) >= (3 if closed else 2):
+            out.append({"pts": pts, "closed": closed})
+    return out
 
 
 def _plot_wall(raw) -> list:

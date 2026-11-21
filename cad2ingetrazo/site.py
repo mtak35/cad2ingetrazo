@@ -83,7 +83,7 @@ def load_site(raw) -> dict:
                     out[k] = round(min(max(float(raw[k]), lo), hi), 3)
             except (TypeError, ValueError):
                 pass
-        for k in ("wall", "pillars", "sides_on", "back_on"):
+        for k in ("wall", "pillars", "sides_on", "back_on", "auto_gate"):
             if k in raw:
                 out[k] = bool(raw[k])
         if raw.get("front_style") in dict(WALL_STYLES):
@@ -393,6 +393,120 @@ def build(corners, site, z0):
                             WALL_FINISHES["stone"][1] if "stone_piers" in
                             pier_sides.values() else SO.BRICK if "picket" in
                             pier_sides.values() else PILLAR_COLOR))
+    _gates_out(gates, site, t, h, z0, out, sym)
+    return out, sym
+
+
+def flat_runs(runs):
+    """3.64.88 — the wall in parts: every run's points one after the other
+    (a closed run closes on its first point again), so a side's number is
+    one number across all the runs and the gates' frames work as ever.
+    Returns (flat points, {real side indices}, [run start offsets])."""
+    flat, real, offs = [], set(), []
+    for pts, closed in runs:
+        o = len(flat)
+        offs.append(o)
+        seq = [tuple(q) for q in pts] + ([tuple(pts[0])] if closed else [])
+        flat += seq
+        real |= set(range(o, o + len(seq) - 1))
+    return flat, real, offs
+
+
+def build_runs(runs, site, z0):
+    """[(name, kind, faces, color)] and the plan symbols for a boundary wall
+    in parts — open or closed runs, each on its own line, the wall to the
+    LEFT of the run (as for the plot's ring). The gates (their side numbers
+    run on across the runs) are optional."""
+    from shapely.geometry import LineString, Polygon
+
+    from .engine import walls as W
+    out, sym = [], []
+    if not site.get("wall") or not runs:
+        return out, sym
+    t, h = float(site["t"]), float(site["h"])
+    flat, real, offs = flat_runs(runs)
+    clip = site.get("_clip")
+    style = site.get("style", "plain")
+    col = WALL_FINISHES.get(site.get("finish", "plaster"),
+                            ("", WALL_COLOR))[1]
+    cap_t = 0.075 if style not in ("plain", "scallop") else 0.0
+    top = z0 + h - cap_t
+    gates = []
+    for g in site["gates"]:
+        if g["side"] in real:
+            quad, frame = gate_box(flat, g, t)
+            if clip is not None and not clip.buffer(0.01).contains(
+                    Polygon(quad).centroid):
+                continue
+            gates.append((g, frame))
+    spots = []
+    s_ = float(site["pillar"])
+    for r, (pts, closed) in enumerate(runs):
+        seq = [tuple(q) for q in pts] + ([tuple(pts[0])] if closed else [])
+        if len(seq) < 2:
+            continue
+        body = LineString(seq).buffer(t, cap_style=2, join_style=2,
+                                      mitre_limit=3.0, single_sided=True)
+        if clip is not None:
+            body = body.intersection(clip)
+        for g, _f in gates:
+            if offs[r] <= g["side"] < offs[r] + len(seq) - 1:
+                body = body.difference(Polygon(gate_box(flat, g, t)[0]))
+        k = 0
+        for pc in getattr(body, "geoms", [body]):
+            if pc.is_empty or pc.geom_type != "Polygon" or pc.area < 1e-4:
+                continue
+            k += 1
+            nm = f"Boundary wall {r + 1}" + (f".{k}" if k > 1 else "")
+            out.append((nm, "boundary", W.solid(_piece(pc), z0, top), col))
+            if cap_t:
+                out.append((nm + " coping", "boundary", W.solid(
+                    _piece(pc.buffer(0.04, join_style=2)), top, top + cap_t),
+                    CAP_COLOR))
+        if site.get("pillars"):                 # ends and turns
+            n = len(seq)
+            for i in range(n - 1 if closed else n):
+                ang = _angle(seq[i], seq[i + 1]) if i < n - 1 else \
+                    _angle(seq[i - 1], seq[i])
+                if 0 < i < n - 1 and not closed:
+                    d1 = _angle(seq[i - 1], seq[i])
+                    if abs((ang - d1 + 180) % 360 - 180) < 8:
+                        continue           # straight on: no pillar
+                a = seq[i]
+                u = (math.cos(math.radians(ang)), math.sin(math.radians(ang)))
+                c = (a[0] - u[1] * t / 2, a[1] + u[0] * t / 2)
+                if clip is None or clip.buffer(0.01).contains(_pt(c)):
+                    spots.append((c, ang))
+    n_c = len(spots)
+    gi_of = {}
+    for g, (p0, p1, u, nv) in gates:
+        if not site.get("pillars") and not g.get("cols"):
+            continue
+        for p in (p0, p1):
+            q = (p[0] + nv[0] * t / 2 - u[0] * s_ / 2 * (1 if p is p0
+                                                         else -1),
+                 p[1] + nv[1] * t / 2 - u[1] * s_ / 2 * (1 if p is p0
+                                                         else -1))
+            gi_of[len(spots)] = site["gates"].index(g)
+            spots.append((q, math.degrees(math.atan2(u[1], u[0]))))
+    for k, (c, ang) in enumerate(spots):
+        fs_ = W.solid({"outer": _ccw(_square(c, s_, ang)), "holes": []},
+                      z0, z0 + h + 0.15)
+        if style != "plain":
+            fs_ = fs_ + W.solid({"outer": _ccw(_square(c, s_ + 0.08, ang)),
+                                 "holes": []}, z0 + h + 0.15, z0 + h + 0.25)
+        if k >= n_c:
+            out.append((f"Gate pillar {k - n_c + 1}", "gatepillar", fs_,
+                        PILLAR_COLOR, gi_of[k]))
+        else:
+            out.append((f"Pillar {k + 1}", "pillar", fs_, PILLAR_COLOR))
+    _gates_out(gates, site, t, h, z0, out, sym)
+    return out, sym
+
+
+def _gates_out(gates, site, t, h, z0, out, sym):
+    """The gates' leaves and their plan symbols (swings / the track)."""
+    from .engine import walls as W
     for k, (g, (p0, p1, u, nv)) in enumerate(gates):
         wv = math.dist(p0, p1)
         mid_d = t / 2
@@ -435,7 +549,6 @@ def build(corners, site, z0):
                     if prev:
                         sym.append((prev, p))
                     prev = p
-    return out, sym
 
 
 def _piece(pc):

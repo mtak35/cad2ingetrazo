@@ -10306,6 +10306,20 @@ def levels_from_cad(doc) -> list:
             want[i] = f[1]
         elif f:
             abs_[i] = f[1]
+    try:                        # 3.64.88: the lower / upper ground floors
+        from . import hillside as HS_       # take the plot's level parts
+        pl_ = part_levels(doc)
+        if pl_ and HS_.on(doc):
+            il_ = next(i for i, r in enumerate(levels)
+                       if r["id"] == doc["hill"]["lower"])
+            iu_ = next(i for i, r in enumerate(levels)
+                       if r["id"] == doc["hill"]["upper"])
+            want[il_], want[iu_] = round(pl_[0], 4), round(pl_[1], 4)
+            abs_.pop(il_, None)
+            abs_.pop(iu_, None)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.levels from parts")
     if abs_:                    # absolute-only floors: from one anchor
         if want:
             # an anchor noted both ways is rare: the absolute floors keep
@@ -13310,10 +13324,12 @@ def _site_groups(doc):
     z0 = plot_top(doc)
     site_ = dict(doc["site"], _front=[      # 3.64.34: the plot's front
         i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
-        if len(plot.get("wall") or []) < 3 else [wall_front_side(doc)])
+        if not wall_own(doc) else [wall_front_side(doc)])
+    parts_wall_ = walls_in_parts(doc)
     try:                    # 3.64.67: on a slope, its sides cut short so
         from . import hillside as HS_     # each piece stands on its own
-        if HS_.on(doc) and not doc["site"].get("gates"):   # ground
+        if HS_.on(doc) and not doc["site"].get("gates") and \
+                not walls_in_parts(doc):                   # ground
             corners, site_["_front"] = HS_.densify(
                 corners, site_["_front"],
                 max(float(doc["site"].get("pier_gap", 3.0) or 3.0), 1.5))
@@ -13326,6 +13342,7 @@ def _site_groups(doc):
         # set back from the plot limit along the roads)
         from . import hillside as HS_
         if HS_.on(doc) and doc.get("bound_lines") and \
+                len(plot_zones(doc)) < 2 and \
                 not doc["site"].get("gates") and \
                 doc["site"].get("from_plan", True):
             parts = HS_.drawn_parts(doc, site_, z0) or None
@@ -13336,22 +13353,25 @@ def _site_groups(doc):
     if parts is None:
         try:                # 3.64.81: a plot of several level parts — the
             from . import hillside as HS_       # wall built part by part,
-            zones_ = [] if HS_.on(doc) else plot_zones(doc)   # each on its
+            zones_ = plot_zones(doc)                          # each on its
         except Exception:  # noqa: BLE001      # own level
             zones_ = []
+        bld_ = (lambda st_, z_: SITE_.build_runs(wall_runs(doc), st_, z_)) \
+            if parts_wall_ else (lambda st_, z_: SITE_.build(corners, st_,
+                                                            z_))
         if len(zones_) > 1:
             parts, sym = [], []
             for zg_, dz_ in zones_:
-                p_, s_ = SITE_.build(corners, dict(site_, _clip=zg_),
-                                     z0 + dz_)
+                p_, s_ = bld_(dict(site_, _clip=zg_), z0 + dz_)
                 parts += p_
                 sym += s_
         else:
             zones_ = []
-            parts, sym = SITE_.build(corners, site_, z0)
+            parts, sym = bld_(site_, z0)
     try:                    # 3.64.66: on a slope, on the ground it crosses
         from . import hillside as HS_
-        parts = HS_.lift(doc, parts, z0)
+        if not zones_:          # (3.64.88: the level parts, when set, rule)
+            parts = HS_.lift(doc, parts, z0)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.hillside lift")
@@ -14178,21 +14198,140 @@ def bwall_ring(drawing, patterns):
     return [tuple(c) for c in list(big.simplify(0.001).exterior.coords)[:-1]]
 
 
-def wall_corners(doc) -> list:
-    """3.64.82 — the corners the boundary wall runs on: the wall's own line
-    (its CAD layer, or picked) when there is one — the plot limit is not
-    always the wall — else the plot's."""
+def bwall_runs(drawing, patterns):
+    """3.64.88 — the boundary wall in parts: the lines of the wall's CAD
+    layer joined end to end into runs [(points, closed)] (drawing units).
+    A run may be open; there may be several. A ring inside another (a wall
+    drawn with both faces) is left out; tiny stubs too."""
+    pats = [q.strip().upper() for q in str(patterns or "").split(",")
+            if q.strip()]
+    if not pats:
+        return []
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import linemerge, unary_union
+    ls = []
+    for lp in drawing.get("loops") or []:
+        if _match(lp["layer"], pats) and len(lp["pts"]) >= 2:
+            ls.append(LineString(list(lp["pts"]) +
+                                 ([lp["pts"][0]] if lp.get("closed", True)
+                                  else [])))
+    for sg in drawing.get("segs") or []:
+        if _match(sg[4], pats):
+            ls.append(LineString([(sg[0], sg[1]), (sg[2], sg[3])]))
+    if not ls:
+        return []
+    m = linemerge(unary_union(ls))
+    runs = []
+    for g in getattr(m, "geoms", [m]):
+        if g.geom_type != "LineString" or len(g.coords) < 2:
+            continue
+        pts = [tuple(c) for c in g.simplify(0.001).coords]
+        closed = g.is_ring or math.dist(pts[0], pts[-1]) < 1e-6
+        if closed and len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if len(pts) >= (3 if closed else 2):
+            runs.append((pts, closed, g.length))
+    if not runs:
+        return []
+    top = max(r[2] for r in runs)
+    runs = [r for r in runs if r[2] >= 0.01 * top]
+    rings = [(Polygon(r[0]).buffer(0), r) for r in runs if r[1]]
+    keep = []
+    for r in runs:
+        if r[1]:
+            pg = Polygon(r[0]).buffer(0)
+            if any(q.area > pg.area * 1.001 and q.buffer(1e-6).contains(pg)
+                   for q, _r in rings):
+                continue
+        keep.append((r[0], r[1]))
+    return keep
+
+
+def wall_runs(doc) -> list:
+    """3.64.88 — the boundary wall's runs [(points, closed)] (m): the
+    picked / layer ones (plot["walls"]), else the old single line, else the
+    plot limit. A closed run runs counter-clockwise; an open run is turned
+    so its LEFT side (where the wall stands) faces the plot."""
     from .engine import plotgeo
     plot = doc["arch"].get("plot") or {}
+    out = []
+    pc = plot.get("corners") or []
+    cen = None
+    if len(pc) >= 3:
+        from shapely.geometry import Polygon
+        cen = Polygon(pc).buffer(0).centroid
+    for w in plot.get("walls") or []:
+        pts = [tuple(q) for q in w.get("pts") or []]
+        closed = bool(w.get("closed"))
+        if len(pts) < (3 if closed else 2):
+            continue
+        if closed:
+            pts = [tuple(q) for q in plotgeo.clean([list(q) for q in pts])]
+            if len(pts) < 3:
+                continue
+            a2 = sum(a[0] * b[1] - b[0] * a[1]
+                     for a, b in zip(pts, pts[1:] + pts[:1]))
+            if a2 < 0:
+                pts.reverse()
+        elif cen is not None:
+            sc = 0.0
+            for a, b in zip(pts, pts[1:]):
+                L = math.dist(a, b)
+                sc += ((b[0] - a[0]) * (cen.y - a[1]) -
+                       (b[1] - a[1]) * (cen.x - a[0]))
+            if sc < 0:                    # the plot is on its right: turn
+                pts.reverse()
+        out.append((pts, closed))
+    if out:
+        return out
     w = plot.get("wall") or []
     if len(w) >= 3:
-        return plotgeo.clean(w)
-    return plotgeo.clean(plot.get("corners") or [])
+        return [([tuple(q) for q in plotgeo.clean(w)], True)]
+    return [([tuple(q) for q in plotgeo.clean(pc)], True)]
+
+
+def walls_in_parts(doc) -> bool:
+    r = wall_runs(doc)
+    return len(r) > 1 or (len(r) == 1 and not r[0][1])
+
+
+def wall_own(doc) -> bool:
+    """The wall is not the plot limit: its own line(s)."""
+    plot = doc["arch"].get("plot") or {}
+    return bool(plot.get("walls")) or len(plot.get("wall") or []) >= 3
+
+
+def wall_corners(doc) -> list:
+    """The points the boundary wall's sides number on: one closed ring's
+    corners, or — a wall in parts — every run's points one after the other
+    (a closed run closing on its first point; ``wall_sides`` says which
+    sides are real)."""
+    runs = wall_runs(doc)
+    if walls_in_parts(doc):
+        return SITE_.flat_runs(runs)[0]
+    return list(runs[0][0])
+
+
+def wall_sides(doc) -> list:
+    """[(side index, run number, length m)] — the real sides of the wall."""
+    runs = wall_runs(doc)
+    flat, real, offs = SITE_.flat_runs(runs)
+    out = []
+    for r, o in enumerate(offs):
+        for i in sorted(real):
+            if o <= i < (offs[r + 1] if r + 1 < len(offs) else len(flat)):
+                out.append((i, r + 1, math.dist(flat[i], flat[(i + 1) %
+                                                              len(flat)])))
+    return out
 
 
 def wall_front_side(doc) -> int:
-    """The wall's side facing the plot's front side."""
+    """The wall's side facing the plot's front side (a wall in parts: its
+    longest side)."""
     plot = doc["arch"].get("plot") or {}
+    if walls_in_parts(doc):
+        ws = wall_sides(doc)
+        return max(ws, key=lambda q: q[2])[0] if ws else 0
     cn = wall_corners(doc)
     pc = plot.get("corners") or []
     fr = [i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
@@ -14216,8 +14355,13 @@ def plot_zones(doc) -> list:
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     pl = Polygon(plot["corners"]).buffer(0)
-    if len(plot.get("wall") or []) >= 3:      # the wall may stand outside
-        pl = unary_union([pl, Polygon(plot["wall"]).buffer(0)]).buffer(1.0)
+    if wall_own(doc):                 # the wall may stand outside the plot
+        try:
+            from shapely.geometry import MultiPoint
+            pts_ = [q for r_, _c in wall_runs(doc) for q in r_]
+            pl = unary_union([pl, MultiPoint(pts_).convex_hull]).buffer(1.0)
+        except Exception:  # noqa: BLE001
+            pass
     out, used = [], None
     for pt in parts:
         g = Polygon(pt["poly"]).buffer(0)
@@ -14245,8 +14389,24 @@ def zone_dz(zones, x, y) -> float:
     return best
 
 
+def part_levels(doc):
+    """3.64.88 — the plot's level parts as levels on the CAD's datum (m):
+    (lowest, highest), or None without parts. The upper / lower ground
+    floors take these — the levels fixed in the model — not their own."""
+    plot = doc["arch"].get("plot") or {}
+    try:
+        zs = plot_zones(doc)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(zs) < 2:
+        return None
+    ref = float(plot.get("ref", 0.0) or 0.0)
+    v = [ref + dz for _g, dz in zs]
+    return min(v), max(v)
+
+
 def set_plot(doc, corners, front=None, dist=None, parts=None,
-             wall=None) -> str | None:
+             wall=None, ref=None, walls=None) -> str | None:
     """The plot from its corners (m); None, or why not."""
     from .engine import plotgeo
     pts = plotgeo.clean([[float(p[0]), float(p[1])] for p in corners])
@@ -14271,7 +14431,9 @@ def set_plot(doc, corners, front=None, dist=None, parts=None,
            "sb_dist": dist or old.get("sb_dist") or
            {"front": 3.0, "back": 1.5, "sides": 1.0},
            "parts": parts if parts is not None else old.get("parts") or [],
-           "wall": wall if wall is not None else old.get("wall") or []}
+           "wall": wall if wall is not None else old.get("wall") or [],
+           "walls": walls if walls is not None else old.get("walls") or [],
+           "ref": ref if ref is not None else old.get("ref") or 0.0}
     arch = dict(doc["arch"], plot=raw)
     doc["arch"]["plot"] = M.load(arch)["plot"]
     try:
@@ -14305,6 +14467,10 @@ def auto_site(doc, force=False) -> bool:
     if site.get("gates") and not force:
         st["auto_site_done"] = True
         return False
+    if st.get("auto_gate") is False and not force:
+        site["wall"] = True              # the wall, no gate: his to add
+        st["auto_site_done"] = True
+        return True
     from .engine import plotgeo
     cn = wall_corners(doc)                 # the wall's own line, if any
     n = len(cn)
