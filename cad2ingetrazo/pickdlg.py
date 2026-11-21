@@ -1110,6 +1110,7 @@ class PlotDialog(QDialog):
             return
         hit = [(g, k0) for g, k0 in getattr(self, "_outl", {}).values()
                if g.contains(Point(x, y))]
+        _g = None
         if hit:                          # inside a line round a level
             _g, k = min(hit, key=lambda h: h[0].area)
         else:
@@ -1131,16 +1132,7 @@ class PlotDialog(QDialog):
         for lp in self.canvas.d.get("loops") or []:
             if len(lp["pts"]) >= 3:
                 ls.append(LineString(list(lp["pts"]) + [lp["pts"][0]]))
-        pt = Point(tx, ty)
-        best = None
-        try:
-            for g in polygonize(unary_union(ls)):
-                if 0.002 * plot.area < g.area < 0.98 * plot.area and \
-                        g.contains(pt) and (best is None or
-                                            g.area < best.area):
-                    best = g
-        except Exception:  # noqa: BLE001
-            best = None
+        best = _g if hit else self._outline_of(k)   # gap-tolerant, as drawn
         if best is None:                  # no closed line round it
             self.tip.setText(
                 "<b>No closed line round this level text.</b> Pick its "
