@@ -171,6 +171,9 @@ def apply(groups, doc, tag_of, all_groups) -> int:
     arch = doc["arch"]
     st = doc["settings"]
     ter = attrs_of(st.get("terrace_mat"))
+    ter_f = attrs_of(st.get("fin_terrace"))      # 3.64.98: the finish by area
+    lvk = {lv["id"]: lv.get("kind") for lv in arch["levels"]}
+    from . import areas as AR_
     rooms = {}
     for lv in arch["levels"]:
         rs = []
@@ -178,11 +181,14 @@ def apply(groups, doc, tag_of, all_groups) -> int:
             rec = r.get("rec") or {}
             m = {k: attrs_of(rec.get(k)) for k in
                  ("mat_floor", "mat_wall", "mat_ceil")}
+            if ter_f and not m["mat_floor"] and (AR_.kind_of(
+                    r.get("name") or rec.get("name")) or ("",))[0] == "terrace":
+                m["mat_floor"] = ter_f
             if any(m.values()):
                 rs.append((r["poly"], m))
         if rs:
             rooms[lv["id"]] = rs
-    if not rooms and not ter:
+    if not rooms and not ter and not ter_f:
         return 0
 
     def room_at(lid, x, y):
@@ -195,8 +201,12 @@ def apply(groups, doc, tag_of, all_groups) -> int:
     for g in all_groups(groups):
         t = tag_of(g) or {}
         kind, lid = t.get("type"), t.get("level")
-        if kind in ("terrace_floor", "finish_edge") and ter:
-            n += _repaint(g, lambda lp, nn: ter if nn[2] > 0.9 else None)
+        if kind in ("terrace_floor", "finish_edge") and (
+                ter or (ter_f and (kind == "terrace_floor"
+                                   or lvk.get(lid) != "ground"))):
+            tt_ = ter or ter_f
+            n += _repaint(g, lambda lp, nn, _t=tt_: _t if nn[2] > 0.9
+                          else None)
             continue
         if lid not in rooms:
             continue

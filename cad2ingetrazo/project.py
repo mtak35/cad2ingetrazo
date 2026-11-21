@@ -13137,6 +13137,17 @@ def _platform_groups(doc):
                       or []]) if parts.get("finish") else None
     except Exception:  # noqa: BLE001
         land_u = None
+    try:             # 3.64.98: the entrance finish on the steps too
+        from . import matlib as ML9_
+        ent_at_ = ML9_.attrs_of(st.get("fin_entrance") or "")
+    except Exception:  # noqa: BLE001
+        ent_at_ = None
+
+    def _ent_tex(fl_):
+        if not ent_at_:
+            return fl_
+        return [dict(fc, attrs=ent_at_) if fc.get("color") is not None
+                else fc for fc in fl_]
     for k, (name, pcs) in enumerate(parts["steps"], 1):
         f_ = []
         for p_ in pcs:
@@ -13238,6 +13249,7 @@ def _platform_groups(doc):
                     f_ += [dict(fc, color=fcol) for fc in
                            _prism(rs2, max(zg, zt - rr), zt - ft, 0.002)]
         if f_:
+            f_ = _ent_tex(f_)
             out.append(grp(name, f_, "steps", k))
     # the entrance landings / porch at the top of the steps: the steps'
     # finish on them (tread with its nosing, and the top riser)
@@ -13265,7 +13277,7 @@ def _platform_groups(doc):
                 from .host import log_error
                 log_error("project landing finish")
     if lf:
-        out.append(grp("Entrance landing finish", lf, "steps", 0))
+        out.append(grp("Entrance landing finish", _ent_tex(lf), "steps", 0))
     for k, (name, f_) in enumerate(parts["ramps"], 1):
         out.append(grp(name, f_, "ramp", k))
     # 3.64.6: the walkways round the building, paved
@@ -13312,6 +13324,12 @@ def _site_groups(doc):
         i for i, f_ in enumerate(plot.get("sb_front") or []) if f_]
         if not wall_own(doc) else [wall_front_side(doc)])
     parts_wall_ = walls_in_parts(doc)
+    try:                    # 3.64.98: «same as the external walls»
+        mc_ = (doc.get("look") or {}).get("wall")
+        if mc_:
+            site_["match_col"] = list(mc_)[:3]
+    except Exception:  # noqa: BLE001
+        pass
     try:                    # 3.64.67: on a slope, its sides cut short so
         from . import hillside as HS_     # each piece stands on its own
         if HS_.on(doc) and not doc["site"].get("gates") and \

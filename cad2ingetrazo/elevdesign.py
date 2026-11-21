@@ -149,7 +149,9 @@ FIN_KEYS = ("fin_terrace", "fin_porch", "fin_entrance", "bw_front_style",
 def suggest(style) -> dict:
     fam = _FAMILY.get(style, "gulf" if str(style).startswith("mosque")
                       else "mediterranean")
-    return dict(zip(FIN_KEYS, _F[fam]))
+    d = dict(zip(FIN_KEYS, _F[fam]))
+    d["bw_front_finish"] = d["bw_finish"] = "match"   # 3.64.98: as the house
+    return d
 
 
 def _combo(items):

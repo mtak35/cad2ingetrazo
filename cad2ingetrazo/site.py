@@ -61,13 +61,23 @@ WALL_STYLES += SO.STYLES
 #: the designs that are a low wall with something over it: its kind
 OVER_KINDS = {"grille": "ms_grill", "wood_screen": "wood",
               "glass_top": "glass_post", "pipe": "pipe", "ss_top": "ss_bars"}
-WALL_FINISHES = {"plaster": ("Plaster, cream", (0.86, 0.83, 0.76)),
+WALL_FINISHES = {"match": ("Same as the building's external walls",
+                           (0.86, 0.83, 0.76)),
+                 "plaster": ("Plaster, cream", (0.86, 0.83, 0.76)),
                  "white": ("Plaster, white", (0.93, 0.93, 0.91)),
                  "brick": ("Exposed brick", (0.66, 0.36, 0.27)),
                  "stone": ("Stone cladding", (0.72, 0.67, 0.58)),
                  "concrete": ("Fair-faced concrete", (0.70, 0.70, 0.69))}
 CAP_COLOR = (0.62, 0.61, 0.59)
 BAND_COLOR = (0.52, 0.50, 0.47)
+
+
+def finish_col(site, fin):
+    """The wall's colour for a finish key; «match»: the building's external
+    wall colour (``site["match_col"]``, set from the elevations' design)."""
+    if fin == "match" and site.get("match_col"):
+        return tuple(float(c) for c in site["match_col"][:3])
+    return WALL_FINISHES.get(fin, ("", WALL_COLOR))[1]
 
 
 def load_site(raw) -> dict:
@@ -258,7 +268,7 @@ def build(corners, site, z0):
         if done_ is not None:
             ring_g = ring_g.difference(done_)
         done_ = band_ if done_ is None else done_.union(band_)
-        col = WALL_FINISHES.get(fin_, ("", WALL_COLOR))[1]
+        col = finish_col(site, fin_)
         over = OVER_KINDS.get(style) or (style in SO.OVER_CUSTOM)
         cap_t = 0.075 if style not in ("plain", "scallop") else 0.0
         solid_top = z0 + (min(float(site.get("solid_h", 0.9)), h - 0.2)
@@ -427,8 +437,7 @@ def build_runs(runs, site, z0):
     flat, real, offs = flat_runs(runs)
     clip = site.get("_clip")
     style = site.get("style", "plain")
-    col = WALL_FINISHES.get(site.get("finish", "plaster"),
-                            ("", WALL_COLOR))[1]
+    col = finish_col(site, site.get("finish", "plaster"))
     cap_t = 0.075 if style not in ("plain", "scallop") else 0.0
     top = z0 + h - cap_t
     gates = []
