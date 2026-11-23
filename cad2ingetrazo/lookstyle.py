@@ -98,16 +98,6 @@ def palette(img) -> dict:
 
 
 def detect(pal) -> str:
-    # 3.64.114: warm limestone walls and little roof tile showing: a Gulf
-    # palace villa (a Mediterranean villa shows a big terracotta roof)
-    try:
-        w = pal.get("light") or pal["wall"]
-        w2 = pal["wall"]
-        warm = 0.08 <= (w2[0] - w2[2]) <= 0.38 and sum(w2) / 3 > 0.62
-        if warm and pal["tile_share"] < 0.06 and sum(w) / 3 > 0.6:
-            return "gulf_palace"
-    except Exception:  # noqa: BLE001
-        pass
     return "mediterranean" if pal["tile_share"] > 0.015 else "modern"
 
 
