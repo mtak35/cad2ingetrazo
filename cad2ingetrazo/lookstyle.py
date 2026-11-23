@@ -1067,7 +1067,7 @@ def remove_kit(doc) -> None:
         have = {e.get("id") for e in cur}
         cur += [r for r in d.get("removed") or [] if r.get("id") not in have]
         a[k] = cur
-    if True:        # 3.64.103: always the full clean-up (a delete, not an undo)
+    if not u:         # 3.64.106: no record → the clean-up by defaults
         st = doc.setdefault("settings", {})
         ft = st.get("fin_terrace")
         for r_ in a["rooms"]:

@@ -1128,6 +1128,12 @@ def _dialog_class():
             self.engine.setCurrentIndex(max(0, self.engine.findData(
                 self._qs.value(SK + "engine", "cycles"))))
             f.addRow("Engine", self.engine)
+            self.simple = QCheckBox("Simple render — clean and fast: EEVEE "
+                                    "draft, plain sky, plain ground, no "
+                                    "lamps / haze / bloom (overrides the "
+                                    "settings below)")
+            self.simple.setChecked(self._qs.value(SK + "simple", "0") == "1")
+            f.addRow(self.simple)
             self.quality = QComboBox()
             for lab in ("Draft", "Good", "High"):
                 self.quality.addItem(lab)
@@ -1216,6 +1222,7 @@ def _dialog_class():
                           ("lmode", self.lmode)):
                 q.setValue(SK + k, wd.currentData())
             q.setValue(SK + "quality", self.quality.currentIndex())
+            q.setValue(SK + "simple", "1" if self.simple.isChecked() else "0")
             for k, wd in (("sun_custom", self.sun_custom),
                           ("bloom", self.bloom), ("transp", self.transp),
                           ("auto_ev", self.auto_ev),
@@ -1251,7 +1258,7 @@ def _dialog_class():
             mats = {k: cb.currentData() for k, cb in self.mat.items()}
             mats["detail"] = self.detail.value()
             mats["glow"] = self.glow.value()
-            return {
+            return self._simplified({
                 "engine": self.engine.currentData(),
                 "quality": self.quality.currentIndex(),
                 "width": w_, "height": max(2, round(w_ / asp)),
@@ -1274,7 +1281,21 @@ def _dialog_class():
                         "look": self.look.currentData(),
                         "bloom": self.bloom.isChecked(),
                         "lights_mode": self.lmode.currentData(),
-                        "transparent": self.transp.isChecked()}}
+                        "transparent": self.transp.isChecked()}})
+
+        def _simplified(self, st):
+            """3.64.106: «Simple render» — EEVEE draft, a plain overcast
+            sky, plain ground, no lamps, haze, bloom or entourage."""
+            if not self.simple.isChecked():
+                return st
+            st["engine"], st["quality"] = "eevee", 0
+            e = st["env"]
+            e.update(sky="overcast", hdri="", h_bg=False, sun_custom=False,
+                     ground="plain", haze=0.0, bloom=False,
+                     lights_mode="off", auto_exposure=True, simple=True)
+            st["mats"]["detail"] = 0
+            st["mats"]["glow"] = 0
+            return st
 
         def _hdri_path(self):
             k = self.sky.currentData() or ""

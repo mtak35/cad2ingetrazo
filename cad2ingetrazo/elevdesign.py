@@ -508,18 +508,11 @@ class ElevationDesigner(QDialog):
     def _remove(self):
         from . import project as PJ
         doc = self.panel.doc()
+        # 3.64.106: only what the design itself did is taken off; the
+        # plans are NOT read again, so everything edited by hand stays
         LS.remove_kit(doc)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:              # the windows, railings … as the plans draw them
-            PJ.update_from_cad(doc, as_cad=True)   # 3.64.103: as imported
-        except Exception:  # noqa: BLE001
-            from .host import log_error
-            log_error("elevdesign.remove")
-        finally:
-            QApplication.restoreOverrideCursor()
         self.panel.commit(doc, "Elevation design removed")
-        self.panel.flash("Design deleted — the model as imported from the CAD "
-                         "plans", 8000)
+        self.panel.flash("Design removed — your own edits are kept", 8000)
 
     def _from_picture(self):
         from . import refelev as RE
