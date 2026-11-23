@@ -599,6 +599,73 @@ def simpler_find(saved=None):
     return None
 
 
+def simpler_engine_ports(exe) -> list:
+    """3.64.112: the local ports Simpler's engine (its own Blender) listens
+    on — found from its processes — plus the engine's default one."""
+    import os
+    import re
+    import subprocess
+    ports = []
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        folder = os.path.dirname(os.path.abspath(exe)).replace("'", "''")
+        ps = ("Get-Process -ErrorAction SilentlyContinue | Where-Object "
+              "{ $_.Path -like '" + folder + "*' } | ForEach-Object "
+              "{ $_.Id }")
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=15,
+                             creationflags=flags).stdout
+        pids = set(re.findall(r"\d+", out))
+        net = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                             capture_output=True, text=True, timeout=15,
+                             creationflags=flags).stdout
+        for ln in net.splitlines():
+            p = ln.split()
+            if len(p) >= 5 and p[3].upper() == "LISTENING" and \
+                    p[4] in pids:
+                m = re.search(r"127\.0\.0\.1:(\d+)$", p[1])
+                if m:
+                    ports.append(int(m.group(1)))
+    except Exception:  # noqa: BLE001
+        pass
+    if 8787 not in ports:
+        ports.append(8787)
+    return ports
+
+
+def simpler_import(exe, glb, wait=150, log=None):
+    """3.64.112: Simpler started, then the model put into its scene through
+    its engine (POST /api/import). (ok, message)."""
+    import json
+    import time
+    import urllib.request
+    log = log or (lambda m: None)
+    t0 = time.time()
+    tried = set()
+    while time.time() - t0 < wait:
+        for port in simpler_engine_ports(exe):
+            if port in tried:
+                continue
+            try:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/busy", timeout=3).read()
+            except Exception:  # noqa: BLE001
+                continue
+            tried.add(port)
+            log("Simpler is ready — importing the model…")
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/import",
+                    data=json.dumps({"path": str(glb)}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"})
+                body = urllib.request.urlopen(req, timeout=3600).read()
+                return True, body.decode("utf-8", "ignore")[:200]
+            except Exception as e:  # noqa: BLE001
+                return False, f"Simpler refused the import: {e}"
+        time.sleep(2.0)
+    return False, "Simpler's engine did not answer in time"
+
+
 def d5_export(app, folder="IngeTrazo D5"):
     """The model for D5 Render / Simpler: a GLB (colours kept) in its own
     folder, with the view and the sun written beside it. Returns (folder,
@@ -1568,9 +1635,22 @@ def _dialog_class():
             except Exception:  # noqa: BLE001
                 pass
             if exe:
-                QProcess.startDetached(exe, [str(glb)])
-                msg += ("Simpler is opening with the model; if it is empty: "
-                        "File > Import model, the path is on the clipboard.")
+                QProcess.startDetached(exe, [])
+                msg += ("Simpler is opening — the model is imported into it "
+                        "as soon as it is ready (a minute)…")
+                self._sp_state = {"done": False, "msg": ""}
+                import threading
+
+                def job(st=self._sp_state, e=exe, g=glb):
+                    st["msg"] = ""
+                    ok, m = simpler_import(
+                        e, g, log=lambda t: st.__setitem__("note", t))
+                    st["ok"], st["msg"], st["done"] = ok, m, True
+                threading.Thread(target=job, daemon=True).start()
+                from PySide6.QtCore import QTimer
+                self._sp_timer = QTimer(self)
+                self._sp_timer.timeout.connect(self._sp_poll)
+                self._sp_timer.start(1000)
             else:
                 msg += ("Simpler was not found — open it yourself, or "
                         "«Simpler location…».")
@@ -1579,6 +1659,21 @@ def _dialog_class():
             except (AttributeError, OSError):
                 pass
             self.status.setText(msg)
+
+        def _sp_poll(self):
+            st = getattr(self, "_sp_state", None)
+            if not st:
+                return
+            if st.get("note") and not st["done"]:
+                self.status.setText(st["note"])
+            if st["done"]:
+                self._sp_timer.stop()
+                if st.get("ok"):
+                    self.status.setText("Model imported into Simpler.")
+                else:
+                    self.status.setText(
+                        f"{st['msg']} — in Simpler: File > Import model "
+                        "(the path is on the clipboard).")
 
         def closeEvent(self, ev):
             self._remember()
