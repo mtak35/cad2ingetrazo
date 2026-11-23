@@ -126,6 +126,13 @@ def _floor_outline(arch, lid, fallback):
                     ps.append(q)
         if not ps:
             return fallback
+        if fallback is None:        # 3.64.109: a floor with no walls of its own
+            u = unary_union(ps).buffer(0.02).buffer(-0.02)
+            if u.is_empty:
+                return None
+            if u.geom_type != "Polygon":
+                u = max(u.geoms, key=lambda g: g.area)
+            return Polygon(u.exterior).simplify(0.03)
         u = unary_union(ps + [fallback]).buffer(0.02).buffer(-0.02)
         if u.geom_type != "Polygon":
             u = max(u.geoms, key=lambda g: g.area)
@@ -346,9 +353,14 @@ def faces(doc) -> list:
         if i == g and on("plinth"):                  # the plinth
             fs += _ring(p, z0 - 0.35, z0 + PLINTH_H - 0.35, PLINTH_D, stone)
         nxt = [j for j in order if el[j] > z0 + 0.5]
-        if nxt and nxt[0] in polys and on("bands"):  # a floor band over it
+        pb = None
+        if nxt and on("bands"):                      # a floor band over it
             zb = el[nxt[0]]
-            pb = _floor_outline(arch, levels[nxt[0]]["id"], p)
+            # 3.64.109: the floor slab's edge (a terrace slab with no walls
+            # of its own too), never the walls' outline
+            pb = _floor_outline(arch, levels[nxt[0]]["id"],
+                                p if nxt[0] in polys else None)
+        if pb is not None:
             # 3.64.108: the band's top at the floor finish's top, along
             # the floor slab's edge
             st_ = doc.get("settings") or {}
