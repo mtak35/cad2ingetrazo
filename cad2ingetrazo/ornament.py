@@ -125,6 +125,18 @@ def _floor_outline(arch, lid, fallback):
                 if not q.is_empty:
                     ps.append(q)
         if not ps:
+            # 3.64.109: no slab record on this floor: the floor is what its
+            # rooms (terraces, open lobbies included) cover
+            try:
+                from .engine import spaces as SP_
+                for r_ in SP_.of_level(arch, lid):
+                    q = r_.get("poly")
+                    if q is not None and not q.is_empty and r_.get(
+                            "area", 2.0) >= 1.0:
+                        ps.append(q.buffer(0))
+            except Exception:  # noqa: BLE001
+                pass
+        if not ps:
             return fallback
         if fallback is None:        # 3.64.109: a floor with no walls of its own
             u = unary_union(ps).buffer(0.02).buffer(-0.02)
