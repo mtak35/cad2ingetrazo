@@ -1489,6 +1489,15 @@ def c2i_main():
 
     if hasattr(bpy.app.handlers, "render_stats"):
         bpy.app.handlers.render_stats.append(_stats)
+    if job.get("export_only"):          # 3.64.107: to open in Blender
+        try:
+            bpy.ops.file.pack_all()      # the textures travel in the file
+        except Exception:                # noqa: BLE001
+            pass
+        bpy.ops.wm.save_as_mainfile(filepath=job["blend"])
+        say("blend", job["blend"])
+        say("done", job["blend"])
+        return
     say("rendering", w, "x", h)
     bpy.ops.render.render(write_still=True)
     if job.get("blend"):

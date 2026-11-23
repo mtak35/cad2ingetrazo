@@ -584,9 +584,25 @@ def d5_find(saved=None):
     return None
 
 
-def d5_export(app):
-    """The model for D5 Render: a GLB (colours kept) in its own folder, with
-    the view and the sun written beside it. Returns (folder, glb path)."""
+def simpler_find(saved=None):
+    """3.64.107: Simpler's program: the saved path, else its usual places."""
+    import os
+    if saved and os.path.isfile(saved):
+        return saved
+    for root in (os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+                 os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)"), "C:/", "D:/"):
+        if root:
+            p = os.path.join(root, "Simpler", "Simpler.exe")
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def d5_export(app, folder="IngeTrazo D5"):
+    """The model for D5 Render / Simpler: a GLB (colours kept) in its own
+    folder, with the view and the sun written beside it. Returns (folder,
+    glb path)."""
     import json
     import time
     from pathlib import Path
@@ -594,7 +610,7 @@ def d5_export(app):
     from core import render_blender as rb
     from formats.gltf import save_glb
     scene, vp = app.viewport.scene, app.viewport
-    work = Path.home() / "Documents" / "IngeTrazo D5" / \
+    work = Path.home() / "Documents" / folder / \
         time.strftime("%Y%m%d-%H%M%S")
     work.mkdir(parents=True, exist_ok=True)
     cam = vp.camera
@@ -1163,6 +1179,13 @@ def _dialog_class():
             self.save.clicked.connect(self._save)
             self.save.setEnabled(False)
             b.addWidget(self.save)
+            self.expbl = QPushButton("Export to Blender…")
+            self.expbl.setToolTip(
+                "Builds the model in Blender (finishes, glass, sky, sun, "
+                "your view as the camera) and saves it as a .blend, then "
+                "opens it in Blender — render it there yourself (F12).")
+            self.expbl.clicked.connect(lambda: self._render(export=True))
+            b.addWidget(self.expbl)
             self.inbl = QPushButton("Open in Blender")
             self.inbl.clicked.connect(self._open_blend)
             self.inbl.setEnabled(False)
@@ -1183,6 +1206,20 @@ def _dialog_class():
             d5.addWidget(d5p)
             d5.addStretch(1)
             v.addLayout(d5)
+            sp = QHBoxLayout()
+            spb = QPushButton("Send to Simpler")
+            spb.setToolTip(
+                "Alternative to Blender: the model is exported (GLB, colours "
+                "kept) with the view and sun and Simpler is opened with it "
+                "(if it does not load by itself: File > Import model, the "
+                "path is on the clipboard).")
+            spb.clicked.connect(self._send_simpler)
+            sp.addWidget(spb)
+            spp = QPushButton("Simpler location…")
+            spp.clicked.connect(self._simpler_where)
+            sp.addWidget(spp)
+            sp.addStretch(1)
+            v.addLayout(sp)
             self.bar = QProgressBar()
             self.bar.setRange(0, 100)
             self.bar.setVisible(False)
@@ -1367,9 +1404,17 @@ def _dialog_class():
                                   "extension is not loaded.")
 
         # ---- render
-        def _render(self):
+        def _render(self, export=False):
             if self._proc is not None:
                 return
+            self._export = bool(export)
+            xp = None
+            if export:
+                xp, _f = QFileDialog.getSaveFileName(
+                    self, "Export the model for Blender", "model.blend",
+                    "Blender (*.blend)")
+                if not xp:
+                    return
             self._remember()
             k = self.sky.currentData() or ""
             if k == "hdri_ph" and not hdri_cached(
@@ -1395,7 +1440,11 @@ def _dialog_class():
             self._job, self._work = job, work
             import json
             data = json.loads(job.read_text(encoding="utf-8"))
-            self._out = data["output"]
+            if export:              # 3.64.107: only the .blend, no render
+                data["export_only"] = True
+                data["blend"] = xp
+                job.write_text(json.dumps(data), encoding="utf-8")
+            self._out = None if export else data["output"]
             self._blend = data.get("blend")
             self._found = found
             proc = QProcess(self)
@@ -1438,6 +1487,20 @@ def _dialog_class():
             self.go.setEnabled(True)
             self.stop.setEnabled(False)
             self.bar.setVisible(False)
+            if getattr(self, "_export", False):
+                self._export = False
+                if self._blend and os.path.exists(self._blend):
+                    self.inbl.setEnabled(True)
+                    self.status.setText(f"Exported — {self._blend}. "
+                                        "Opening it in Blender…")
+                    QProcess.startDetached(self._found.command[0],
+                                           [*self._found.command[1:],
+                                            self._blend])
+                else:
+                    tail = "<br>".join(self._log[-8:])
+                    self.status.setText(f"<b>Export failed</b> (code {code})."
+                                        f"<br><small>{tail}</small>")
+                return
             if self._out and os.path.exists(self._out):
                 pm = QPixmap(self._out)
                 self.preview.setPixmap(pm.scaled(
@@ -1498,6 +1561,42 @@ def _dialog_class():
                         "«D5 location…».")
             try:
                 os.startfile(str(work))      # the folder, to drag from
+            except (AttributeError, OSError):
+                pass
+            self.status.setText(msg)
+
+        def _simpler_where(self):
+            path, _f = QFileDialog.getOpenFileName(
+                self, "Simpler program (Simpler.exe)", "",
+                "Programs (*.exe);;All files (*)")
+            if path:
+                self._qs.setValue(SK + "simpler", path)
+                self.status.setText(f"Simpler: {path}")
+
+        def _send_simpler(self):
+            import os
+            try:
+                work, glb = d5_export(self.panel.app, "IngeTrazo Simpler")
+            except Exception as e:  # noqa: BLE001
+                self.status.setText(f"<b>Could not export for Simpler:</b> "
+                                    f"{e}")
+                return
+            exe = simpler_find(self._qs.value(SK + "simpler", "") or None)
+            msg = f"Exported — {glb} (the view and sun: view.json). "
+            try:
+                from PySide6.QtWidgets import QApplication as _QA
+                _QA.clipboard().setText(str(glb))
+            except Exception:  # noqa: BLE001
+                pass
+            if exe:
+                QProcess.startDetached(exe, [str(glb)])
+                msg += ("Simpler is opening with the model; if it is empty: "
+                        "File > Import model, the path is on the clipboard.")
+            else:
+                msg += ("Simpler was not found — open it yourself, or "
+                        "«Simpler location…».")
+            try:
+                os.startfile(str(work))
             except (AttributeError, OSError):
                 pass
             self.status.setText(msg)
