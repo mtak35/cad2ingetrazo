@@ -124,6 +124,7 @@ def _floor_outline(arch, lid, fallback):
                 q = Polygon([tuple(v[:2]) for v in c]).buffer(0)
                 if not q.is_empty:
                     ps.append(q)
+        has_slab = bool(ps)
         if not ps:
             # 3.64.109: no slab record on this floor: the floor is what its
             # rooms (terraces, open lobbies included) cover
@@ -136,8 +137,29 @@ def _floor_outline(arch, lid, fallback):
                         ps.append(q.buffer(0))
             except Exception:  # noqa: BLE001
                 pass
+        # 3.64.111: the railings of the floor stand on the slab's OUTER
+        # edge: they are part of the floor's extent
+        try:
+            from shapely.geometry import LineString
+            for w_ in arch.get("walls") or []:
+                if w_.get("level") == lid and w_.get("rail") and "a" in w_:
+                    ps.append(LineString([tuple(w_["a"][:2]),
+                                          tuple(w_["b"][:2])]).buffer(0.08))
+        except Exception:  # noqa: BLE001
+            pass
         if not ps:
             return fallback
+        if len(ps) > 1 and not has_slab:
+            # no slab record: close the notches between the rooms and the
+            # railings (the floor runs on to the railing): the outer edge
+            try:
+                cl = unary_union(ps + ([fallback] if fallback is not None
+                                       else [])).buffer(0.9, join_style=2) \
+                    .buffer(-0.9, join_style=2)
+                if not cl.is_empty:
+                    ps = [cl]
+            except Exception:  # noqa: BLE001
+                pass
         if fallback is None:        # 3.64.109: a floor with no walls of its own
             u = unary_union(ps).buffer(0.02).buffer(-0.02)
             if u.is_empty:
