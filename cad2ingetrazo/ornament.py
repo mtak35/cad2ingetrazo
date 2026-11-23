@@ -349,7 +349,16 @@ def faces(doc) -> list:
         if nxt and nxt[0] in polys and on("bands"):  # a floor band over it
             zb = el[nxt[0]]
             pb = _floor_outline(arch, levels[nxt[0]]["id"], p)
-            fs += _ring(pb, zb - 0.10, zb - 0.10 + STRING_H, STRING_D, trim)
+            # 3.64.108: the band's top at the floor finish's top, along
+            # the floor slab's edge
+            st_ = doc.get("settings") or {}
+            ft_ = float(st_.get("finish_t", 0.0508) or 0.0) \
+                if st_.get("finish_on", True) else 0.0
+            try:
+                zb += float(PJ.open_offset(doc, levels[nxt[0]]["id"]))
+            except Exception:  # noqa: BLE001
+                pass
+            fs += _ring(pb, zb + ft_ - STRING_H, zb + ft_, STRING_D, trim)
         if levels[i]["id"] in roofed and on("cornice"):  # the eaves' cornice
             zc = z1
             for h_, d_ in CORNICE:
