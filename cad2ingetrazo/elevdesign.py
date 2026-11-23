@@ -98,7 +98,9 @@ CHECKS = [("Mouldings", [("plinth", "Stone plinth round the ground floor"),
               ("shutters", "Cape Cod: shutters by every window"),
               ("siding", "Cape Cod: clapboard siding"),
               ("eave_brackets", "Italianate: paired brackets under the "
-               "eaves")])]
+               "eaves"),
+              ("arch_panels", "Moorish / Gulf: carved panels round the big "
+               "arched doors and windows")])]
 COLOURS = [("wall", "Walls"), ("trim", "Mouldings / trims"),
            ("stone", "Stone (plinth, quoins, door cladding)"),
            ("clad", "Cladding panels"), ("roof_c", "Roof tiles"),
@@ -142,7 +144,7 @@ _FAMILY = {"classical": "classic", "neoclassical": "classic",
            "hightech": "modern", "artdeco": "modern", "midcentury": "timber",
            "brutalist": "raw", "industrial": "raw", "tudor": "brick",
            "georgian": "brick", "victorian": "brick", "capecod": "cottage",
-           "farmhouse": "cottage", "tropical": "timber", "arabian": "gulf"}
+           "farmhouse": "cottage", "tropical": "timber", "arabian": "gulf", "gulf_palace": "gulf"}
 FIN_KEYS = ("fin_terrace", "fin_porch", "fin_entrance", "bw_front_style",
             "bw_style", "bw_front_finish", "bw_finish")
 

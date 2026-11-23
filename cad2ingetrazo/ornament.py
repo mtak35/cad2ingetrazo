@@ -483,6 +483,7 @@ def faces(doc) -> list:
     try:                         # 3.64.113: geometrical wall panels
         from . import wallpanels as WP
         out += WP.faces(doc)
+        out += WP.arch_faces(doc)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("wallpanels.faces")

@@ -98,6 +98,16 @@ def palette(img) -> dict:
 
 
 def detect(pal) -> str:
+    # 3.64.114: warm limestone walls and little roof tile showing: a Gulf
+    # palace villa (a Mediterranean villa shows a big terracotta roof)
+    try:
+        w = pal.get("light") or pal["wall"]
+        w2 = pal["wall"]
+        warm = 0.08 <= (w2[0] - w2[2]) <= 0.38 and sum(w2) / 3 > 0.62
+        if warm and pal["tile_share"] < 0.06 and sum(w) / 3 > 0.6:
+            return "gulf_palace"
+    except Exception:  # noqa: BLE001
+        pass
     return "mediterranean" if pal["tile_share"] > 0.015 else "modern"
 
 
@@ -275,6 +285,7 @@ KIT_DEFAULT = {
     # 3.64.113: geometrical wall panels (wallpanels.py); the parapet
     # cornice (None: leave the model's setting)
     "geo_panel": "none", "geo_where": "front", "geo_size": 0.30,
+    "arch_panels": False,
     "parapet_style": None,
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
@@ -446,6 +457,20 @@ PRESETS = {
         "wall": [0.94, 0.92, 0.86], "trim": [0.88, 0.84, 0.76],
         "stone": [0.60, 0.55, 0.48], "roof_c": [0.55, 0.30, 0.20],
         "accent": [0.40, 0.26, 0.16], "gate_color": "black"}),
+    "gulf_palace": ("Gulf palace villa (Moorish arches, carved panels, "
+                    "slate hip roofs, limestone)", {
+        **OFF, "roof": "hip", "roof_slope": 14.0, "roof_eave": 0.75,
+        "annex_roof": True, "win_head": "arch", "win_frame": "black",
+        "win_style": "asdrawn", "rail": "solid", "columns": "round_smooth",
+        "door_arch": True, "arcades": True, "plinth": True, "cornice": True,
+        "bands": True, "surrounds": False, "pilasters": True,
+        "lanterns": True, "light_style": "sconce", "entrance_canopy": True,
+        "entry_clad": True, "arch_panels": True, "fascia": False,
+        "parapet_style": "stepped",
+        "wall": [0.92, 0.86, 0.75], "trim": [0.94, 0.89, 0.80],
+        "stone": [0.90, 0.84, 0.72], "clad": [0.90, 0.84, 0.72],
+        "roof_c": [0.27, 0.28, 0.30], "metal": [0.18, 0.12, 0.08],
+        "accent": [0.45, 0.26, 0.13], "gate_color": "brown"}),
     "arabian": ("Arabian / Gulf villa (arches, jali screens, sand "
                 "tones)", {
         **OFF, "roof": "asdrawn", "win_head": "arch", "win_frame": "aluminium",
@@ -1333,6 +1358,8 @@ STYLES = dict(STYLES, **{k: v[0] for k, v in PRESETS.items()})
 _GENERAL = {"plinth", "bands", "cornice", "fascia", "surrounds", "lanterns",
             "gf_grille", "door_arch", "arcades", "sills_lintels"}
 ELEMENT_STYLES = {
+    "arch_panels": {"gulf_palace", "arabian", "royal", "royal_villa",
+                    "mosque"},
     "quoins": {"royal", "royal_villa", "classical", "neoclassical", "italianate", "mediterranean",
                "georgian", "tudor"},
     "corbels": {"royal", "royal_villa", "mediterranean", "classical", "italianate", "victorian",
