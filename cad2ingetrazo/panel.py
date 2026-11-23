@@ -1586,6 +1586,16 @@ class Panel(QWidget):
             "3.64.56: lights for the whole model — the fittings it shows, "
             "every room, facade up-lights, porches — put in IngeTrazo's "
             "«Render with Blender» tab and rendered by your Blender"))
+        _row2 = QWidget()
+        _h2 = QHBoxLayout(_row2)
+        _h2.setContentsMargins(0, 0, 0, 0)
+        _h2.addWidget(_btn("Floor height — selected floor only",
+                           self._update_level_one,
+                           "3.64.116: only the floor picked at the top gets "
+                           "the floor height typed above (its walls, slab, "
+                           "stairs and what stands on it follow); the other "
+                           "floors stay as they are"))
+        f.addRow(_row2)
         f.addRow(_btn("Update floors and levels (all levels)",
                       self._update_levels,
                       "Every floor made again at the ground floor level and "
@@ -3514,6 +3524,36 @@ class Panel(QWidget):
                          + (PJ.ffl_text(v) if v > 0 else "the CAD's note")
                          + (f", {len(noted)} floor(s) as the CAD notes them"
                             if noted else ""))
+
+    def _update_level_one(self):
+        """3.64.116: the storey height typed, for the selected floor only."""
+        doc = self.doc()
+        lid, lv_ = self.level()
+        if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        h = round(float(self.i_floor_h.value()), 4)
+        if str(lv_.get("name", "")).strip().lower() == "roof":
+            self.flash("The roof level has no floor height")
+            return
+        lv_["height"] = h
+        doc["arch"]["levels"] = M.fix_levels(doc["arch"]["levels"])
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                from . import stairs as ST
+                ST.refit_heights(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel._update_level_one stairs")
+            try:
+                PJ.recut_wells(doc)
+            except Exception:  # noqa: BLE001
+                log_error("panel._update_level_one recut")
+        finally:
+            QApplication.restoreOverrideCursor()
+        from .host import len_txt
+        self.commit(doc, f"«{lv_.get('name', '')}»: floor height set to "
+                         f"{len_txt(h)} (this floor only)")
 
     def _apply_gffl(self):
         doc = self.doc()

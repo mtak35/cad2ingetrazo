@@ -251,6 +251,8 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Floors as groups** (checkbox beside Select level): each floor's whole 3D model one group «Level · Ground Floor» — move, hide, copy or export a floor as one; double-click a floor group to reach its elements. Off: the elements loose, as before.
 - **Align beams with the columns**: right-click a beam (or a column: all its beams) ▸ «Align beam(s) with the columns» ▸ left / top face, centre, or right / bottom face of the columns at its ends.
 - **Update floors and levels (all levels)** under Floor height: every storey set to the floor height typed and the ground floor to the level typed (the CAD's level notes still applied when that option is on), then the model, stairs and ramps made again — like Update from CAD, for the levels.
+- **Floor height — selected floor only** (3.64.116), above it: the floor height typed is set for the floor picked at the top only; the other floors stay.
+- 3.64.116: the tiled roofs over annexes now go only over rooms — a terrace, roof terrace or open deck stays as the CAD plan draws it (no roof added).
 - **Shoring along**: the plot limits, or round the basement's outer (RCC) walls (one shoring all the way round, just outside them).
 - **Sliding windows**: no pulls on the panels (doors keep theirs).
 - **Shafts on a drawn rectangle**: draw a rectangle on a slab (Rectangle tool), select it, right-click ▸ «CAD2IngeTrazo · Shaft» ▸ «Open a shaft here», «… through every floor», or «Close the shaft / opening here» (the openings it covers closed again).

@@ -21,6 +21,7 @@ elevations are followed again.
 from __future__ import annotations
 
 import math
+import re
 
 STYLES = {"auto": "Auto (from the picture)",
           "mediterranean": "Mediterranean / Spanish villa",
@@ -1287,6 +1288,37 @@ def front_arcades(doc, outer, gid, bay=1.1, pier=0.24) -> int:
     return n
 
 
+def _over_rooms(doc, slab, poly) -> bool:
+    """True when the roof slab covers rooms (a guard room, a porch block);
+    False for a terrace, a roof terrace or an open deck: those have no
+    tiled roof — the model stays as the CAD plan draws it."""
+    from . import project as PJ
+    from .engine import spaces
+    if slab.get("auto_annex"):
+        return True
+    if str(slab.get("id")) in set(doc.get("roof_terraces") or []):
+        return False
+    if re.search(r"terrace|balcon|deck|roof garden|sit.?out|patio|court",
+                 str(slab.get("name", "")), re.I):
+        return False
+    try:
+        rooms = [r["poly"] for r in spaces.of_level(doc["arch"],
+                                                    slab["level"])]
+    except Exception:  # noqa: BLE001
+        return True
+    if not rooms:
+        return True
+    from shapely.ops import unary_union
+    indoor = [r["poly"] for r in spaces.of_level(doc["arch"], slab["level"])
+              if not PJ.OUTDOOR_WORDS.search(str(r.get("name") or ""))]
+    if not indoor:
+        return False
+    try:
+        return poly.intersection(unary_union(indoor)).area >= 0.5 * poly.area
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75, kind="hip") -> int:
     """A clay-tile hip roof over each single-storey annex (a guard room,
     a porch block: a slab marked as a roof on a lower floor): over its
@@ -1308,6 +1340,8 @@ def annex_roofs(doc, slope=SLOPE, eave=EAVE * 0.75, kind="hip") -> int:
         if r.geom_type != "Polygon" or p.area < 0.8 * r.area or \
                 p.area < 2.0:
             continue
+        if not _over_rooms(doc, e, p):      # 3.64.116: a terrace / open
+            continue                        # deck stays as the CAD plan
         cs = [[round(x, 4), round(y, 4)]
               for x, y in list(r.exterior.coords)[:4]]
         rec = {"type": "roof", "level": e["level"], "kind": kind,
