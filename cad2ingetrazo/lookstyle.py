@@ -272,6 +272,10 @@ KIT_DEFAULT = {
     # 3.64.75: more window / facade detail (stylekit.py)
     "brise_soleil": False, "sills_lintels": False, "jali": False,
     "pilasters": False,
+    # 3.64.113: geometrical wall panels (wallpanels.py); the parapet
+    # cornice (None: leave the model's setting)
+    "geo_panel": "none", "geo_where": "front", "geo_size": 0.30,
+    "parapet_style": None,
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)
@@ -921,6 +925,9 @@ def _apply_kit(doc, kit) -> dict:
     except Exception:  # noqa: BLE001
         pass
     rep["rails"] = n_r
+    # 4a. 3.64.113: the parapet cornice design
+    if k.get("parapet_style"):
+        doc["settings"]["parapet_style"] = k["parapet_style"]
     # 4b. 3.64.97: the finishes by area (terraces, car porch, entrance,
     # boundary wall), as the elevation type suggests
     try:

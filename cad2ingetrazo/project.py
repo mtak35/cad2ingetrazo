@@ -9938,7 +9938,59 @@ PARAPET_STYLES = [("plain", "Plain (plastered)"),
                   ("band", "Coping + a band under it"),
                   ("grille", "Coping + MS grille over it (1'-0\")"),
                   ("bands2", "Coping + two bands (classic)"),
-                  ("dentil", "Coping + dentil course under it")]
+                  ("dentil", "Coping + dentil course under it"),
+                  # 3.64.113: more cornice designs
+                  ("ogee", "Cornice: ogee (S-curve) moulding"),
+                  ("cove", "Cornice: cove (crown moulding)"),
+                  ("stepped", "Cornice: three-step classical"),
+                  ("bullnose", "Cornice: rounded (bullnose) cap"),
+                  ("slab", "Cornice: modern thin slab cap"),
+                  ("weathered", "Cornice: weathered (sloped) cap"),
+                  ("merlon", "Battlement merlons (kangura)"),
+                  ("merlon_step", "Stepped merlons (Mughal / Islamic)"),
+                  ("pillars", "Coping + small capped piers every 1.5 m"),
+                  ("diamonds", "Coping + diamond relief band")]
+#: 3.64.113: the cornice profiles — layers (from, to, projection), metres
+#: from the wall's top (the layers stepped into one moulding)
+PARAPET_PROFILES = {
+    "ogee": [(-0.16, -0.12, 0.02), (-0.12, -0.08, 0.045),
+             (-0.08, -0.04, 0.06), (-0.04, 0.0, 0.05), (0.0, 0.04, 0.035),
+             (0.04, 0.075, 0.05)],
+    "cove": [(-0.20, -0.15, 0.01), (-0.15, -0.10, 0.03),
+             (-0.10, -0.05, 0.05), (-0.05, 0.0, 0.07), (0.0, 0.075, 0.09)],
+    "stepped": [(-0.30, -0.22, 0.03), (-0.22, -0.12, 0.07),
+                (-0.12, 0.0, 0.11), (0.0, 0.075, 0.13)],
+    "bullnose": [(0.0, 0.02, 0.02), (0.02, 0.05, 0.045),
+                 (0.05, 0.075, 0.03), (0.075, 0.09, 0.012)],
+    "slab": [(0.0, 0.12, 0.06)],
+    "weathered": [(0.0, 0.02, 0.05), (0.02, 0.04, 0.038),
+                  (0.04, 0.06, 0.026), (0.06, 0.08, 0.014)],
+}
+
+
+def _along_blocks(w, pitch, length, across, z0, z1, first=None):
+    """Blocks standing along a straight wall's centre line (merlons,
+    piers): ``length`` along it, ``across`` its width, every ``pitch``."""
+    from shapely.geometry import Polygon as _Pg
+    c_ = W.centre(w)
+    if getattr(c_, "kind", "line") != "line":
+        return []
+    L_ = math.dist(c_.p0, c_.p1)
+    if L_ < length + 0.1:
+        return []
+    ux_ = ((c_.p1[0] - c_.p0[0]) / L_, (c_.p1[1] - c_.p0[1]) / L_)
+    nx_ = (-ux_[1], ux_[0])
+    n_ = max(1, int(round((L_ - length) / pitch)))
+    step_ = (L_ - length) / n_
+    out = []
+    for k_ in range(n_ + 1):
+        a0_ = k_ * step_
+        q_ = [(c_.p0[0] + ux_[0] * (a0_ + da_) + nx_[0] * db_,
+               c_.p0[1] + ux_[1] * (a0_ + da_) + nx_[1] * db_)
+              for da_, db_ in ((0, -across / 2), (length, -across / 2),
+                               (length, across / 2), (0, across / 2))]
+        out += _prism(_Pg(q_), z0, z1, 1e-4)
+    return out
 
 
 def _parapet_groups(doc, groups):
@@ -10038,8 +10090,49 @@ def _parapet_groups(doc, groups):
 
         def _cp(g_):
             return g_.difference(cut_) if cut_ is not None else g_
-        faces = _prism(_cp(foot.buffer(0.04, join_style=2, mitre_limit=1.5)),
-                       top, top + 0.075)
+        if style in PARAPET_PROFILES:
+            faces = []
+            for z0_, z1_, o_ in PARAPET_PROFILES[style]:
+                faces += _prism(_cp(foot.buffer(o_, join_style=2,
+                                                mitre_limit=1.5)),
+                                top + z0_, top + z1_)
+        else:
+            faces = _prism(_cp(foot.buffer(0.04, join_style=2,
+                                           mitre_limit=1.5)), top, top + 0.075)
+        tw_ = float(w.get("t", 0.11))
+        if style == "merlon":
+            faces += _along_blocks(w, 0.60, 0.30, tw_ + 0.04, top + 0.075,
+                                   top + 0.40)
+        if style == "merlon_step":
+            faces += _along_blocks(w, 0.60, 0.30, tw_ + 0.04, top + 0.075,
+                                   top + 0.30)
+            faces += _along_blocks(w, 0.60, 0.16, tw_ + 0.0, top + 0.30,
+                                   top + 0.42)
+        if style == "pillars":
+            faces += _along_blocks(w, 1.50, 0.22, tw_ + 0.10, top + 0.075,
+                                   top + 0.38)
+            faces += _along_blocks(w, 1.50, 0.30, tw_ + 0.18, top + 0.38,
+                                   top + 0.43)
+        if style == "diamonds":
+            c_ = W.centre(w)
+            L_ = math.dist(c_.p0, c_.p1)
+            if L_ > 0.3 and getattr(c_, "kind", "line") == "line":
+                from . import modern as _MD
+                ux_ = ((c_.p1[0] - c_.p0[0]) / L_,
+                       (c_.p1[1] - c_.p0[1]) / L_)
+                h_ = 0.07
+                for sg_ in (1, -1):
+                    fr_ = _MD._Frame(c_.p0, ux_, (-ux_[1] * sg_,
+                                                  ux_[0] * sg_))
+                    k_ = 0.12
+                    while k_ < L_ - 0.1:
+                        quad_ = [(k_ - h_, top - 0.095), (k_, top - 0.165),
+                                 (k_ + h_, top - 0.095), (k_, top - 0.025)]
+                        for f_ in fr_.plate(quad_, tw_ / 2,
+                                            tw_ / 2 + 0.025, None):
+                            f_.pop("color", None)
+                            faces.append(f_)
+                        k_ += 0.2
         if style == "band":
             faces += _prism(_cp(foot.buffer(0.02, join_style=2)), top - 0.20,
                             top - 0.14)

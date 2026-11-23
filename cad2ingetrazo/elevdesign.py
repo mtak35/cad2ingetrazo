@@ -282,6 +282,27 @@ class ElevationDesigner(QDialog):
         for k, (label, _c) in GATE_COLORS.items():
             self.gate.addItem(label, k)
         f2.addRow("Gate colour", self.gate)
+        # 3.64.113: the parapet cornice, the geometrical wall panels
+        from . import project as PJ_
+        from . import wallpanels as WP
+        self.pstyle = _combo(PJ_.PARAPET_STYLES)
+        self.pstyle.setToolTip(
+            "The cornice / coping on every solid parapet wall: the "
+            "terraces', the balconies', the roof's (set the railings to "
+            "«Solid parapet» to have the walls)")
+        f2.addRow("Parapet cornice (terraces, balconies)", self.pstyle)
+        self.geo = _combo(WP.PATTERNS)
+        self.geo.setToolTip("A raised geometric pattern over the blank "
+                            "stretches of the outside walls (clear of the "
+                            "windows, doors and corners)")
+        f2.addRow("Geometric wall panels", self.geo)
+        self.geo_where = _combo(WP.WHERE)
+        f2.addRow("… on", self.geo_where)
+        self.geo_size = QDoubleSpinBox()
+        self.geo_size.setRange(0.12, 1.0)
+        self.geo_size.setSingleStep(0.05)
+        self.geo_size.setSuffix(" m")
+        f2.addRow("… cell size", self.geo_size)
         grid.addWidget(g2, 1, 0)
         # the check groups
         self.checks = {}
@@ -402,6 +423,14 @@ class ElevationDesigner(QDialog):
         _set(self.rail, k.get("rail", "ms_grill"))
         _set(self.columns, k.get("columns", "ionic"))
         _set(self.gate, k.get("gate_color", "black"))
+        try:                       # 3.64.113 (None: the model's own)
+            _set(self.pstyle, k.get("parapet_style") or self.panel.doc()
+                 ["settings"].get("parapet_style", "coping"))
+        except Exception:  # noqa: BLE001
+            pass
+        _set(self.geo, k.get("geo_panel", "none"))
+        _set(self.geo_where, k.get("geo_where", "front"))
+        self.geo_size.setValue(float(k.get("geo_size", 0.30) or 0.30))
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         self._relevance()
@@ -452,6 +481,10 @@ class ElevationDesigner(QDialog):
              "rail": self.rail.currentData(),
              "columns": self.columns.currentData(),
              "gate_color": self.gate.currentData(),
+             "parapet_style": self.pstyle.currentData(),
+             "geo_panel": self.geo.currentData(),
+             "geo_where": self.geo_where.currentData(),
+             "geo_size": round(self.geo_size.value(), 3),
              "manual": True}
         for key in FIN_KEYS:
             k[key] = self.fin[key].currentData()

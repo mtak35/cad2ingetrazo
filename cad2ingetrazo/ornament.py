@@ -480,6 +480,12 @@ def faces(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("modern.faces")
+    try:                         # 3.64.113: geometrical wall panels
+        from . import wallpanels as WP
+        out += WP.faces(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("wallpanels.faces")
     try:                         # 3.64.47: the front's main door
         from . import lookstyle as LS2
         _fr, fw, fo = LS2.front_side(doc, outer)
