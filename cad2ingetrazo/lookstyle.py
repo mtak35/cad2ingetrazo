@@ -545,6 +545,9 @@ KIT_DEFAULT = {
     "louver": "none", "louver_where": "front", "louver_col": "timber",
     # 3.64.128: a crown over the main entrance
     "entrance_crown": "none",
+    # 3.64.130: carved trims / crowns round the windows, doors and arches
+    "carving": "none", "carving_on": "all", "carving_where": "front",
+    "carving_col": "trim",
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)

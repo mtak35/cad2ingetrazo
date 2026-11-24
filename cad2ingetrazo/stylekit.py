@@ -773,7 +773,7 @@ def faces(doc) -> list:
     keys = ("pediment", "deco_fins", "deco_bands", "deco_crown",
             "window_boxes", "half_timber", "gf_clad", "shutters", "siding",
             "eave_brackets", "brise_soleil", "sills_lintels", "jali",
-            "pilasters", "entrance_crown")
+            "pilasters", "entrance_crown", "carving")
     if not any(look.get(k) for k in keys):
         return []
     from .host import log_error
@@ -817,6 +817,9 @@ def faces(doc) -> list:
              lambda: _jali(doc, fcs, _c4(accent))),
             ("pilasters", "Look pilasters",
              lambda: _pilasters(doc, fcs, trim)),
+            ("carving", "Look carved trims",
+             lambda: __import__(__package__ + ".carving", fromlist=["x"])
+             .carving_faces(doc, fcs, look, trim, stone, _c4(accent))),
             ("entrance_crown", "Look entrance crown",
              lambda: _entrance_crown(doc, fcs, look.get("entrance_crown"),
                                      trim, stone, _c4(accent)))):

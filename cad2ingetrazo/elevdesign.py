@@ -342,6 +342,18 @@ class ElevationDesigner(QDialog):
                               "entrance: stepped block, arched / triangular "
                               "/ curved pediment")
         f2.addRow("Entrance crown (roof)", self.crown)
+        from . import carving as CV_
+        self.carve = _combo(CV_.CARVINGS)
+        self.carve.setToolTip("Carved trims and crowns round the windows, "
+                              "doors and arches: a stepped frame, a "
+                              "rosette band, a carved crown or a keystone")
+        f2.addRow("Carving / crown (openings)", self.carve)
+        self.carve_on = _combo(CV_.CARVE_ON)
+        f2.addRow("… on", self.carve_on)
+        self.carve_where = _combo(CV_.CARVE_WHERE)
+        f2.addRow("… where", self.carve_where)
+        self.carve_col = _combo(CV_.CARVE_COL)
+        f2.addRow("… colour  ", self.carve_col)
         grid.addWidget(g2, 1, 0)
         # the check groups
         self.checks = {}
@@ -477,6 +489,10 @@ class ElevationDesigner(QDialog):
         _set(self.louver_where, k.get("louver_where", "front"))
         _set(self.louver_col, k.get("louver_col", "timber"))
         _set(self.crown, k.get("entrance_crown", "none"))
+        _set(self.carve, k.get("carving", "none"))
+        _set(self.carve_on, k.get("carving_on", "all"))
+        _set(self.carve_where, k.get("carving_where", "front"))
+        _set(self.carve_col, k.get("carving_col", "trim"))
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         self._relevance()
@@ -538,6 +554,10 @@ class ElevationDesigner(QDialog):
              "louver_where": self.louver_where.currentData(),
              "louver_col": self.louver_col.currentData(),
              "entrance_crown": self.crown.currentData(),
+             "carving": self.carve.currentData(),
+             "carving_on": self.carve_on.currentData(),
+             "carving_where": self.carve_where.currentData(),
+             "carving_col": self.carve_col.currentData(),
              "manual": True}
         for key in FIN_KEYS:
             k[key] = self.fin[key].currentData()
