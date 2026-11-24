@@ -622,16 +622,32 @@ def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
     else:
         _k, fc, sp = best
     f, face, L = fc["f"], fc["face"], fc["L"]
-    Wc = min(max((op[1] - op[0]) + 2.6, 3.4), 7.0, L - 0.4)
+    # the crown covers the whole front cornice of the entrance block
+    # (its wall from corner to corner), turning round the corners
+    Wc = min(L + 2 * face, 12.0)
+    if Wc < 3.0:
+        Wc = min(max((op[1] - op[0]) + 2.6, 3.4), 7.0)
     hw = Wc / 2
-    s = min(max(sp, hw + 0.1), L - hw - 0.1)
+    s = (L / 2) if Wc >= L + 2 * face - 1e-6 else min(
+        max(sp, hw - face), L + face - hw)
     zb = fc["z1"]
     a0 = face - 0.05
     shade = _shade(trim, 0.92)
     out = []
 
-    def box(x0, x1, p1, z0, z1, col=trim):
-        return f.box(x0, x1, a0, face + p1, zb + z0, zb + z1, col)
+    RET = 0.9                              # how far it turns round a corner
+
+    def box(x0, x1, p1, z0, z1, col=trim, ret=False):
+        o = f.box(x0, x1, a0, face + p1, zb + z0, zb + z1, col)
+        if ret:                           # the moulding turns left and right
+            pr = max(p1 - 0.05, 0.1)
+            if x0 <= s - hw + 0.25:
+                o += f.box(x0 - pr, x0 + 0.04, face + p1 - RET, face + p1,
+                           zb + z0, zb + z1, col)
+            if x1 >= s + hw - 0.25:
+                o += f.box(x1 - 0.04, x1 + pr, face + p1 - RET, face + p1,
+                           zb + z0, zb + z1, col)
+        return o
 
     def shape(poly, p0, p1, col):
         return f.holed(poly, face + p0, face + p1, col)
@@ -658,14 +674,17 @@ def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
         return o
 
     if kind == "stepped":
-        out += box(s - hw, s + hw, 0.30, 0.0, 0.30)
-        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.30, 0.42)
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.30, ret=True)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.30, 0.42,
+                  ret=True)
         out += box(s - hw + 0.05, s + hw - 0.05, 0.24, 0.42, 1.30)
         out += f.box(s - hw + 0.28, s + hw - 0.28, face + 0.24, face + 0.265,
                      zb + 0.60, zb + 1.12, shade)
         out += medallion(0.86, 0.30)
-        out += box(s - hw - 0.14, s + hw + 0.14, 0.46, 1.30, 1.42)
-        out += box(s - hw - 0.06, s + hw + 0.06, 0.38, 1.42, 1.52)
+        out += box(s - hw - 0.14, s + hw + 0.14, 0.46, 1.30, 1.42,
+                  ret=True)
+        out += box(s - hw - 0.06, s + hw + 0.06, 0.38, 1.42, 1.52,
+                  ret=True)
         for sg in (-1, 1):              # the corner piers and their caps
             x = s + sg * (hw - 0.16)
             out += box(x - 0.14, x + 0.14, 0.34, 1.52, 1.74)
@@ -674,7 +693,7 @@ def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
     elif kind == "arch":
         rise = min(Wc * 0.26, 1.3)
         zs_ = 0.55
-        out += box(s - hw - 0.12, s + hw + 0.12, 0.34, 0.0, 0.18)
+        out += box(s - hw - 0.12, s + hw + 0.12, 0.34, 0.0, 0.18, ret=True)
         ihw = hw - 0.75
         for sg in (-1, 1):              # the returns the arch springs from
             x0, x1 = (s - hw - 0.12, s - ihw) if sg < 0 else \
@@ -701,15 +720,16 @@ def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
         out += f.box(s - 0.28, s + 0.28, a0, face + 0.40, zc + 0.20,
                      zc + 0.30, trim)
     elif kind == "triangle":
-        out += box(s - hw, s + hw, 0.30, 0.0, 0.25)
-        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40)
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.25, ret=True)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40,
+                  ret=True)
         nd = int((Wc - 0.2) / 0.2)
         if nd <= 45:
             for k in range(nd + 1):
                 x = s - hw + 0.1 + k * (Wc - 0.2) / max(nd, 1)
                 out += f.box(x - 0.04, x + 0.04, face + 0.04, face + 0.36,
                              zb + 0.18, zb + 0.25, shade)
-        h = Wc * 0.20
+        h = min(Wc * 0.20, 1.5)
         out += f.plate([(s - hw - 0.10, zb + 0.40), (s + hw + 0.10, zb + 0.40),
                         (s, zb + 0.40 + h)], a0, face + 0.30, trim)
         k_ = 0.20
@@ -722,9 +742,10 @@ def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
             out += box(s + sg * (hw + 0.10) - 0.12, s + sg * (hw + 0.10) + 0.12,
                        0.34, 0.40, 0.66)
     else:                                # segmental
-        out += box(s - hw, s + hw, 0.30, 0.0, 0.25)
-        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40)
-        rise = Wc * 0.15
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.25, ret=True)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40,
+                  ret=True)
+        rise = min(Wc * 0.15, 1.1)
         top = S_.arch_pts(s - hw - 0.10, s + hw + 0.10, zb + 0.40,
                           zb + 0.40 + rise, 20, "segmental")
         mass = Polygon(top + [(s - hw - 0.10, zb + 0.40)]).buffer(0)

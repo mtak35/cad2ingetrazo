@@ -147,7 +147,7 @@ def extend_rects(poly, rects, step=0.1, slack=0.08) -> list:
     return keep
 
 
-def fill_rects(poly, rects, min_side=0.55) -> list:
+def fill_rects(poly, rects, min_side=0.3) -> list:
     """3.64.125: the narrow strips of the roof boundary the big rectangles
     leave (a block under 1 m wide) get a roof of their own, so the roof
     covers the whole available space."""
@@ -483,6 +483,8 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []
     terr = terrace_union(arch, lid)
+    if roof_plan(arch, lid) is not None:      # 3.64.128: the eave meets the
+        eave = min(eave, CORNICE_EAVE)        # cornice's outer edge
     for x0, y0, x1, y1 in fill_rects(p0, rectangles(p0)):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
