@@ -346,7 +346,7 @@ class ElevationDesigner(QDialog):
         self.carve = _combo(CV_.CARVINGS)
         self.carve.setToolTip("Carved trims and crowns round the windows, "
                               "doors and arches: a stepped frame, a "
-                              "rosette band, a carved crown or a keystone")
+                              "rosette band, a carved crown or a keystone; or a full order: classic hood, pilastered, baroque")
         f2.addRow("Carving / crown (openings)", self.carve)
         self.carve_on = _combo(CV_.CARVE_ON)
         f2.addRow("… on", self.carve_on)
