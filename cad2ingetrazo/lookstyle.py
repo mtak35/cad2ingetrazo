@@ -30,9 +30,11 @@ STYLES = {"auto": "Auto (from the picture)",
           "industrial": "Industrial (metal cladding, plain)"}
 EAVE = 0.6096                     # 2'-0" eaves
 SLOPE = 22.0
-# 3.64.125: roofs as in 3.64.115 — one hip roof per rectangle of the
-# available space (the one-piece roof of 3.64.123 is off)
-SKEL_ROOF = False
+# 3.64.126: ONE roof over the roof plan's boundary (hip / pyramid), its
+# eave at the cornice's outer edge; False: a hip per rectangle (3.64.115)
+SKEL_ROOF = True
+#: the eave: the cornice ring's projection — the roof's edge meets it
+CORNICE_EAVE = 0.22
 MIN_SIDE = 1.0                    # a block narrower than this: no roof of its own
 
 
@@ -426,6 +428,12 @@ def one_roof(arch, lid, p0, c, ang, slope, eave):
     for g in getattr(p0, "geoms", [p0]):
         if g.geom_type != "Polygon" or g.area < 4.0:
             continue
+        try:                  # the tiny steps (under 0.2 m) of the boundary
+            g2 = g.buffer(-0.1, join_style=2).buffer(0.1, join_style=2)
+            if g2.geom_type == "Polygon" and g2.area > 0.9 * g.area:
+                g = g2
+        except Exception:  # noqa: BLE001
+            pass
         og = _ortho(g)
         if og is None:
             return []
@@ -435,8 +443,9 @@ def one_roof(arch, lid, p0, c, ang, slope, eave):
                 "corners": world(list(pg.exterior.coords)[:-1]),
                 "holes": [world(list(h.coords)[:-1]) for h in pg.interiors],
                 "ang": ang, "notch": notch, "slope": slope,
-                "overhang": eave, "t": 0.15, "ridge": "long",
-                "parapet": 0.0, "pt": 0.15, "tiles": True, "look": True})
+                "overhang": min(eave, CORNICE_EAVE), "t": 0.15,
+                "ridge": "long", "parapet": 0.0, "pt": 0.15, "tiles": True,
+                "look": True})
     return recs
 
 
@@ -458,7 +467,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     c = poly.centroid
     p0 = affinity.rotate(poly, -ang, origin=c, use_radians=True)
     p0 = p0.simplify(0.05)
-    if kind == "hip" and SKEL_ROOF:
+    if kind in ("hip", "pyramid") and SKEL_ROOF:
         try:                   # 3.64.123: one roof over the whole outline
             recs = [r_ for r_ in one_roof(arch, lid, p0, c, ang, slope, eave)
                     if not S.why_not(r_)]
