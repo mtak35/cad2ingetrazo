@@ -263,7 +263,7 @@ def apply(doc, color=None) -> dict:
                          if not LS.is_look_roof(e)]
     recs, flat, pitched = [], 0, []
     terr_ = LS.terrace_union(arch, under)
-    for x0, y0, x1, y1 in LS.rectangles(p0):
+    for x0, y0, x1, y1 in LS.extend_rects(p0, LS.rectangles(p0)):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
             dx, dy = x - c.x, y - c.y

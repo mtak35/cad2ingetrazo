@@ -103,6 +103,45 @@ def detect(pal) -> str:
 
 
 # ---- the roof outline as rectangles -------------------------------------------------
+def extend_rects(poly, rects, step=0.1, slack=0.08) -> list:
+    """3.64.120: roofs that MEET. The rectangles abut, so each hip roof
+    sloped down to its eave at the shared edge and left a hole (a dark
+    diamond) where blocks join. Each rectangle is run on along its ridge
+    (the long side) as far as the outline allows, so the roofs overlap and
+    meet in valleys at one slope; rectangles that end up inside another
+    one are dropped."""
+    from shapely.geometry import box
+    ok = poly.buffer(slack, join_style=2)
+    out = []
+    for x0, y0, x1, y1 in rects:
+        along_x = (x1 - x0) >= (y1 - y0)
+        a0, a1 = (x0, x1) if along_x else (y0, y1)
+
+        def mk(lo, hi):
+            return box(lo, y0, hi, y1) if along_x else box(x0, lo, x1, hi)
+        lo, hi = a0, a1
+        for _ in range(400):
+            if mk(lo - step, hi).within(ok):
+                lo -= step
+            else:
+                break
+        for _ in range(400):
+            if mk(lo, hi + step).within(ok):
+                hi += step
+            else:
+                break
+        out.append((lo, y0, hi, y1) if along_x else (x0, lo, x1, hi))
+    keep = []
+    for i, r in enumerate(out):
+        bi = box(*r)
+        if any(j != i and box(*o).buffer(0.01).contains(bi) and
+               (box(*o).area > bi.area + 1e-6 or j < i)
+               for j, o in enumerate(out)):
+            continue
+        keep.append(r)
+    return keep
+
+
 def rectangles(poly, min_side=MIN_SIDE) -> list:
     """An outline (shapely, square-cornered) split into few rectangles,
     the biggest first: [(x0, y0, x1, y1)] in the outline's own frame."""
@@ -275,7 +314,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []
     terr = terrace_union(arch, lid)
-    for x0, y0, x1, y1 in rectangles(p0):
+    for x0, y0, x1, y1 in extend_rects(p0, rectangles(p0)):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
             dx, dy = x - c.x, y - c.y
