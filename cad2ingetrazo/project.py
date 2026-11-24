@@ -4956,12 +4956,36 @@ def _parking_slab(walls, segs, blocks, ratio=0.4):
     if hull.geom_type != "Polygon":
         return blocks
     bp = [Polygon(b) for b in blocks]
-    big = unary_union([hull] + [b for b in bp if b.intersects(hull)])
-    big = big.buffer(0.01, join_style=2).buffer(-0.01, join_style=2)
-    if big.geom_type != "Polygon":
-        big = max(big.geoms, key=lambda g: g.area)
-    out = [list(big.simplify(0.01).exterior.coords)[:-1]]
-    out += [b for b, p in zip(blocks, bp) if not p.intersects(big)]
+    # 3.64.134: the hull only where the plan has something under it — the
+    # blocks, and the bay / ramp lines' reach (a drive aisle: 3.2 m). A hull
+    # over points alone bridges two blocks that stand at different angles
+    # (an orthogonal wing and a hall turned to the qibla) with wedges of
+    # ground the plan does not floor.
+    try:
+        from shapely.geometry import LineString as _LSp
+        allow = unary_union(
+            [p_.buffer(0.3, join_style=2) for p_ in bp if not p_.is_empty]
+            + [_LSp([(s_[0], s_[1]), (s_[2], s_[3])]).buffer(3.2)
+               for s_ in segs
+               if (s_[0], s_[1]) != (s_[2], s_[3])])
+        hull = hull.intersection(allow)
+        hull = hull.buffer(-0.4, join_style=2).buffer(0.4, join_style=2)
+    except Exception:  # noqa: BLE001
+        pass
+    parts = [g_ for g_ in getattr(hull, "geoms", [hull])
+             if g_.geom_type == "Polygon" and g_.area >= 4.0]
+    if not parts:
+        return blocks
+    out, taken = [], []
+    for g_ in sorted(parts, key=lambda q: -q.area):
+        big = unary_union([g_] + [b for b in bp if b.intersects(g_)])
+        big = big.buffer(0.01, join_style=2).buffer(-0.01, join_style=2)
+        if big.geom_type != "Polygon":
+            big = max(big.geoms, key=lambda q: q.area)
+        out.append(list(big.simplify(0.01).exterior.coords)[:-1])
+        taken.append(big)
+    out += [b for b, p in zip(blocks, bp)
+            if not any(p.intersects(t_) for t_ in taken)]
     return out
 
 
@@ -5729,20 +5753,27 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             cl_ = []
             for o_ in outlines:
                 try:
-                    g_ = Polygon(o_).buffer(0).intersection(lim_)
-                    g_ = max((q for q in getattr(g_, "geoms", [g_])
-                              if q.geom_type == "Polygon"),
-                             key=lambda q: q.area, default=None)
+                    g0_ = Polygon(o_).buffer(0).intersection(lim_)
                     a0_ = Polygon(o_).buffer(0).area
+                    pcs_ = sorted((q for q in getattr(g0_, "geoms", [g0_])
+                                   if q.geom_type == "Polygon"
+                                   and q.area > 0.5),
+                                  key=lambda q: -q.area)
                     # (a plan whose outer walls are on a layer not read as
                     # walls closes no outline: its limit is islands round
                     # the rooms — a floor cut down to them is not what it
                     # draws; the outline stays)
-                    if g_ is not None and g_.area > 0.5 and \
-                            g_.area < a0_ - 0.05 and g_.area > 0.7 * a0_:
-                        o_ = [[round(x, 4), round(y, 4)] for x, y in
-                              list(g_.simplify(0.005).exterior.coords)[:-1]]
+                    # 3.64.134: every piece the plan draws stays — a block
+                    # at another angle, joined by a bridge, is its own
+                    # slab, not dropped with the bridge
+                    tot_ = sum(q.area for q in pcs_)
+                    if pcs_ and tot_ < a0_ - 0.05 and tot_ > 0.7 * a0_:
+                        cl_.extend(
+                            [[round(x, 4), round(y, 4)] for x, y in
+                             list(q.simplify(0.005).exterior.coords)[:-1]]
+                            for q in pcs_)
                         rep["slab_limited"] = rep.get("slab_limited", 0) + 1
+                        continue
                 except Exception:  # noqa: BLE001
                     pass
                 cl_.append(o_)
