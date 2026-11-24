@@ -21,7 +21,20 @@ TYPES = [("solid", "Solid parapet (masonry, plastered)"),
          ("wood", "Timber handrail on timber balusters"),
          ("wall_rail", "Low wall + steel railing over it"),
          ("baluster", "Stone balustrade — turned balusters, newel posts, "
-                      "coping")]
+                      "coping"),
+         # 3.64.122: more types (the reference sheets)
+         ("baluster_vase", "Stone balustrade — fat vase balusters, square "
+                           "piers"),
+         ("baluster_pier", "Stone balustrade — slim balusters, ball-topped "
+                           "piers"),
+         ("baluster_panel", "Stone balustrade — panelled piers, pyramid "
+                            "caps"),
+         ("iron_belly", "Wrought iron — belly (lens) bars"),
+         ("iron_wave", "Wrought iron — wavy scroll bars"),
+         ("iron_mesh", "Square mesh screen — dark steel"),
+         ("iron_geo", "Geometric nested-square panels — dark steel"),
+         ("panel_diamond", "Solid panel with diamond inlays"),
+         ("alu_bars", "Grey aluminium — flat bars, posts, fascia")]
 LABEL = dict(TYPES)
 
 SS = (0.78, 0.79, 0.80, 1.0)          # stainless steel
@@ -30,6 +43,10 @@ GLASS = (0.66, 0.82, 0.90, 0.35)
 TIMBER = (0.55, 0.38, 0.22, 1.0)
 MASONRY = (0.88, 0.86, 0.82, 1.0)
 STONE = (0.93, 0.91, 0.86, 1.0)       # a cast-stone balustrade
+IRON = (0.10, 0.10, 0.11, 1.0)        # black wrought iron
+ALU = (0.52, 0.54, 0.57, 1.0)         # grey powder-coated aluminium
+PANEL = (0.66, 0.64, 0.60, 1.0)       # a painted panel
+INLAY = (0.97, 0.97, 0.95, 1.0)
 
 
 def _bar(p, q, w, h, color):
@@ -176,6 +193,218 @@ def _baluster_rail(pts, H, t, gap, run_on):
     return out
 
 
+# ---- 3.64.122: more railing types --------------------------------------------
+_VASE = [(0.70, 0.0), (0.70, 0.07), (0.44, 0.10), (0.40, 0.20),
+         (0.78, 0.38), (0.98, 0.54), (0.78, 0.70), (0.42, 0.86),
+         (0.56, 0.90), (0.56, 1.0)]
+_BALL = [(0.35, 0.0), (0.80, 0.14), (1.0, 0.5), (0.80, 0.86), (0.35, 1.0)]
+_PYR = [(1.0, 0.0), (0.04, 1.0)]
+
+
+def _plate(p, q, pts_sz, a0, a1, color):
+    """A flat shape standing on p → q: ``pts_sz`` = [(s metres along, z
+    over the walking line)] convex, a0..a1 across the path."""
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return []
+    ux, uy = dx / L, dy / L
+    nx, ny = -uy, ux
+    n = len(pts_sz)
+
+    def P(s, z, a):
+        f = s / L
+        return (p[0] + dx * f + nx * a, p[1] + dy * f + ny * a,
+                p[2] + (q[2] - p[2]) * f + z)
+    front = [P(s, z, a1) for s, z in pts_sz]
+    back = [P(s, z, a0) for s, z in reversed(pts_sz)]
+    out = [{"loop": front, "holes": [], "color": color},
+           {"loop": back, "holes": [], "color": color}]
+    for i in range(n):
+        j = (i + 1) % n
+        out.append({"loop": [P(*pts_sz[i], a0), P(*pts_sz[j], a0),
+                             P(*pts_sz[j], a1), P(*pts_sz[i], a1)],
+                    "holes": [], "color": color})
+    return out
+
+
+def _pier_posts(pts, step):
+    posts = []
+    for p, q in zip(pts, pts[1:]):
+        for s in _stations(p, q, step):
+            if not posts or math.hypot(s[0] - posts[-1][0],
+                                       s[1] - posts[-1][1]) > 0.05:
+                posts.append(s)
+    return posts
+
+
+def _stone_rail(pts, H, gap, prof, rr, step_b, pier_w, pier_cap, pier_step,
+                rail_h=0.14, cop_h=0.10, panels=False):
+    out = []
+    segs = list(zip(pts, pts[1:]))
+    bal_h = max(H - rail_h - cop_h, 0.2)
+    for p, q in segs:
+        out += _panel(p, q, 0.0, rail_h, 0.22, STONE)
+        out += _panel(p, q, H - cop_h, H, 0.26, STONE)
+        for s in _stations(p, q, max(gap or 0.0, 0.05) if gap else step_b
+                           )[1:-1]:
+            out += _lathe(s[0], s[1], s[2] + rail_h, bal_h, rr, prof, STONE,
+                          n=10)
+    for s in _pier_posts(pts, pier_step):
+        a = pier_w / 2
+        out += _box_xy([(s[0] - a, s[1] - a), (s[0] + a, s[1] - a),
+                        (s[0] + a, s[1] + a), (s[0] - a, s[1] + a)],
+                       s[2], s[2] + H + 0.04, STONE)
+        if panels:                      # a raised panel band, a pyramid cap
+            b = a + 0.015
+            out += _box_xy([(s[0] - b, s[1] - b), (s[0] + b, s[1] - b),
+                            (s[0] + b, s[1] + b), (s[0] - b, s[1] + b)],
+                           s[2] + H * 0.30, s[2] + H * 0.80, STONE)
+        c = a + 0.05
+        out += _box_xy([(s[0] - c, s[1] - c), (s[0] + c, s[1] - c),
+                        (s[0] + c, s[1] + c), (s[0] - c, s[1] + c)],
+                       s[2] + H + 0.04, s[2] + H + 0.10, STONE)
+        if pier_cap == "ball":
+            out += _lathe(s[0], s[1], s[2] + H + 0.10, 0.28, 0.14, _BALL,
+                          STONE, n=12)
+        elif pier_cap == "pyramid":
+            out += _lathe(s[0], s[1], s[2] + H + 0.10, 0.26, c * 1.42, _PYR,
+                          STONE, n=4)
+    return out
+
+
+def _iron_posts(pts, H, color, step=1.5, w=0.05):
+    out = []
+    for s in _pier_posts(pts, step):
+        out += _bar(s, _up(s, H - 0.02), w, w, color)
+    return out
+
+
+def _iron_frame(pts, H, color, bottom=0.06):
+    out = []
+    for p, q in zip(pts, pts[1:]):
+        out += _bar(_up(p, H - 0.025), _up(q, H - 0.025), 0.05, 0.05, color)
+        out += _bar(_up(p, bottom), _up(q, bottom), 0.04, 0.04, color)
+        out += _bar(_up(p, bottom + 0.14), _up(q, bottom + 0.14), 0.03,
+                    0.03, color)
+    return out
+
+
+def _curved_bars(pts, H, gap, bulge, wave, pair):
+    """Bars bulging along the path (belly pairs) or waving (scrolls)."""
+    out = []
+    z0, z1 = 0.10, H - 0.07
+    nseg = 4
+    for p, q in zip(pts, pts[1:]):
+        L = math.hypot(q[0] - p[0], q[1] - p[1])
+        if L < 1e-6:
+            continue
+        ux, uy = (q[0] - p[0]) / L, (q[1] - p[1]) / L
+        step = max(gap or 0.0, 0.05) if gap else (0.16 if pair else 0.11)
+        sts = _stations(p, q, step)[1:-1]
+        for k, s in enumerate(sts):
+            bars = ((-0.5, 1.0), (0.5, -1.0)) if pair else ((0.0, 1.0),)
+            for off, sg in bars:
+                pts3 = []
+                for m in range(nseg + 1):
+                    f = m / nseg
+                    z = z0 + (z1 - z0) * f
+                    if pair:
+                        d = off * 0.05 + sg * bulge * math.sin(math.pi * f)
+                    else:
+                        d = sg * bulge * math.sin(2 * math.pi * f * wave)
+                    pts3.append((s[0] + ux * d, s[1] + uy * d, s[2] + z))
+                for a, b in zip(pts3, pts3[1:]):
+                    out += _bar(a, b, 0.014, 0.014, IRON)
+    return out
+
+
+def _custom_rail(pts, H, kind, gap, t):
+    segs = list(zip(pts, pts[1:]))
+    out = []
+    if kind == "baluster_vase":
+        return _stone_rail(pts, H, gap, _VASE, 0.085, 0.30, 0.22, None, 3.0)
+    if kind == "baluster_pier":
+        return _stone_rail(pts, H, gap, _BAL, 0.06, 0.17, 0.30, "ball", 2.5,
+                           rail_h=0.12, cop_h=0.09)
+    if kind == "baluster_panel":
+        return _stone_rail(pts, H, gap, _BAL, 0.06, 0.17, 0.30, "pyramid",
+                           2.2, rail_h=0.12, cop_h=0.09, panels=True)
+    if kind == "iron_belly":
+        out += _iron_posts(pts, H, IRON) + _iron_frame(pts, H, IRON)
+        return out + _curved_bars(pts, H, gap, 0.035, 1, True)
+    if kind == "iron_wave":
+        out += _iron_posts(pts, H, IRON) + _iron_frame(pts, H, IRON)
+        return out + _curved_bars(pts, H, gap, 0.05, 1, False)
+    if kind == "iron_mesh":
+        out += _iron_posts(pts, H, IRON, 1.5, 0.06)
+        for p, q in segs:
+            out += _bar(_up(p, H - 0.03), _up(q, H - 0.03), 0.06, 0.06, IRON)
+            out += _bar(_up(p, 0.03), _up(q, 0.03), 0.05, 0.06, IRON)
+            pit = max(gap or 0.0, 0.04) if gap else 0.075
+            for s in _stations(p, q, pit)[1:-1]:
+                out += _bar(_up(s, 0.05), _up(s, H - 0.05), 0.012, 0.012,
+                            IRON)
+            z = 0.05 + pit
+            while z < H - 0.06:
+                out += _bar(_up(p, z), _up(q, z), 0.012, 0.012, IRON)
+                z += pit
+        return out
+    if kind == "iron_geo":
+        out += _iron_posts(pts, H, IRON, 0.9, 0.05)
+        for p, q in segs:
+            out += _bar(_up(p, H - 0.025), _up(q, H - 0.025), 0.05, 0.05,
+                        IRON)
+            out += _bar(_up(p, 0.05), _up(q, 0.05), 0.04, 0.04, IRON)
+            L = math.hypot(q[0] - p[0], q[1] - p[1])
+            n = max(1, int(round(L / 0.9)))
+            w = L / n
+            for k in range(n):
+                s0, s1 = k * w, (k + 1) * w
+                for r in range(3):
+                    d = 0.10 + 0.075 * r
+                    a, b = s0 + d, s1 - d
+                    z0, z1 = 0.05 + d, H - 0.05 - d
+                    if b - a < 0.05 or z1 - z0 < 0.05:
+                        continue
+                    A, B = _lerp(p, q, a / L), _lerp(p, q, b / L)
+                    out += _bar(_up(A, z0), _up(B, z0), 0.014, 0.014, IRON)
+                    out += _bar(_up(A, z1), _up(B, z1), 0.014, 0.014, IRON)
+                    out += _bar(_up(A, z0), _up(A, z1), 0.014, 0.014, IRON)
+                    out += _bar(_up(B, z0), _up(B, z1), 0.014, 0.014, IRON)
+        return out
+    if kind == "panel_diamond":
+        for p, q in segs:
+            L = math.hypot(q[0] - p[0], q[1] - p[1])
+            out += _panel(p, q, 0.0, H - 0.07, max(t, 0.10), PANEL)
+            out += _panel(p, q, H - 0.07, H, max(t, 0.10) + 0.06, ALU)
+            n = max(1, int(round(L / 0.9)))
+            zc = (H - 0.07) / 2
+            h_ = min(0.12, (H - 0.07) * 0.3)
+            for k in range(n):
+                sc = (k + 0.5) * L / n
+                d = [(sc - h_, zc), (sc, zc - h_), (sc + h_, zc),
+                     (sc, zc + h_)]
+                ta = max(t, 0.10) / 2
+                out += _plate(p, q, d, -ta - 0.012, -ta, INLAY)
+                out += _plate(p, q, d, ta, ta + 0.012, INLAY)
+        return out
+    if kind == "alu_bars":
+        out += _iron_posts(pts, H, ALU, 1.2, 0.06)
+        for p, q in segs:
+            out += _panel(p, q, 0.0, 0.12, 0.08, ALU)
+            out += _bar(_up(p, H - 0.03), _up(q, H - 0.03), 0.07, 0.05, ALU)
+            for s in _stations(p, q, max(gap or 0.0, 0.05) if gap else 0.10
+                               )[1:-1]:
+                out += _bar(_up(s, 0.12), _up(s, H - 0.05), 0.02, 0.02, ALU)
+        return out
+    return []
+
+
+_CUSTOM = ("baluster_vase", "baluster_pier", "baluster_panel", "iron_belly",
+           "iron_wave", "iron_mesh", "iron_geo", "panel_diamond", "alu_bars")
+
+
 def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
           floor=None, no_post=(False, False), run_on=(0.0, 0.0)) -> list:
     """The railing along ``path`` ([(x, y, z)…]) — see the module doc.
@@ -193,6 +422,8 @@ def faces(path, height=1.0, kind="ss_bars", t=0.115, gap=0.0,
     H = max(float(height), 0.3)
     out = []
     segs = list(zip(pts, pts[1:]))
+    if kind in _CUSTOM:                        # 3.64.122
+        return _custom_rail(pts, H, kind, gap, t)
     if kind == "solid":                        # a masonry upstand + coping
         for p, q in segs:
             out += _panel(p, q, 0.0, H - 0.05, t, MASONRY)

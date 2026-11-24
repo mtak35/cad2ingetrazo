@@ -157,7 +157,7 @@ FIELDS = {
                "blue_ref", "silver_ref", "frosted")),
              ("rail", "Build as railing", "choice",
               ("solid", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
-               "wood", "wall_rail", "baluster")),
+               "wood", "wall_rail", "baluster", "baluster_vase", "baluster_pier", "baluster_panel", "iron_belly", "iron_wave", "iron_mesh", "iron_geo", "panel_diamond", "alu_bars")),
              ("t", "Thickness", "len", (0.02, 3.0)),
              ("grid", "Curtain wall: mullions every", "len", (0.3, 6.0)),
              ("tgrid", "Curtain wall: transoms every", "len", (0.3, 6.0)),
@@ -267,7 +267,7 @@ FIELDS = {
                 "strip")),
               ("rail", "Railing", "choice",
                ("none", "ss_bars", "ms_grill", "glass", "glass_post", "pipe",
-                "wood", "wall_rail", "solid", "baluster")),
+                "wood", "wall_rail", "solid", "baluster", "baluster_vase", "baluster_pier", "baluster_panel", "iron_belly", "iron_wave", "iron_mesh", "iron_geo", "panel_diamond", "alu_bars")),
               ("rail_h", "Railing height", "len", (0.3, 2.0)),
               ("rail_sides", "Railing sides", "choice",
                ("inner", "outer", "both", "none")),
@@ -279,7 +279,7 @@ FIELDS = {
                (0.0, 1.0))],
     "stairrail": [("rail", "Railing type", "choice",
                    ("none", "ss_bars", "ms_grill", "glass", "glass_post",
-                    "pipe", "wood", "wall_rail", "solid", "baluster")),
+                    "pipe", "wood", "wall_rail", "solid", "baluster", "baluster_vase", "baluster_pier", "baluster_panel", "iron_belly", "iron_wave", "iron_mesh", "iron_geo", "panel_diamond", "alu_bars")),
                   ("rail_h", "Railing height", "len", (0.3, 2.0)),
                   ("rail_sides", "Railing sides", "choice",
                    ("inner", "outer", "both", "none")),
@@ -6097,7 +6097,8 @@ class Panel(QWidget):
                 continue
             if w.get("rail"):          # 3.64.38: a railing's solid part
                 if which != "in" and (w.get("rail") in ("solid",
-                                                        "wall_rail") or
+                                                        "wall_rail",
+                                                        "panel_diamond") or
                                       float(w.get("curb_h") or 0.0) > 0.01):
                     for s_ in ("l", "r"):      # (both its faces outside)
                         faces[(w["id"], s_)] = w

@@ -6969,7 +6969,7 @@ def apply_elev_fin(doc) -> int:
                 or "a" not in w:
             continue
         if w.get("rail"):            # 3.64.38: a railing's solid part —
-            if w.get("rail") in ("solid", "wall_rail") or float(
+            if w.get("rail") in ("solid", "wall_rail", "panel_diamond") or float(
                     w.get("curb_h") or 0.0) > 0.01:   # both its faces
                 for s_ in ("l", "r"):
                     if not any(f_.get("side") == s_
