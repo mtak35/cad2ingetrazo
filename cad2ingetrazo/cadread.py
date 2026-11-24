@@ -231,6 +231,11 @@ def _read(path, unit=None) -> dict:
     key = (str(path), path.stat().st_mtime, unit)
     if key in _cache and _cache[key].get("v") == READ_V:
         return _cache[key]
+    disk_ = _disk_cache_path(path, unit)
+    got_ = _disk_cache_load(disk_)
+    if got_ is not None:        # 3.64.135: the read of a big drawing (a
+        _cache[key] = got_      # million block lines) kept on disk — a new
+        return got_             # session or an update does not redo it
     tmp = None
     if path.suffix.lower() == ".dwg":
         try:
@@ -276,7 +281,59 @@ def _read(path, unit=None) -> dict:
     if len(_cache) > 8:
         _cache.clear()
     _cache[key] = out
+    if len(out["segs"]) > 150_000:      # (only the slow ones: small plans
+        _disk_cache_save(disk_, out)    # read in a second or two)
     return out
+
+
+def _disk_cache_path(path, unit):
+    try:
+        import hashlib
+        import tempfile
+        st = path.stat()
+        h = hashlib.sha1(("%s|%s|%s|%s|%s" % (
+            path.resolve(), st.st_mtime_ns, st.st_size, unit, READ_V)
+        ).encode("utf-8", "replace")).hexdigest()[:20]
+        return Path(tempfile.gettempdir()) / "c2i_read_cache" / (h + ".pkl")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _disk_cache_load(p):
+    if p is None:
+        return None
+    try:
+        if not p.is_file():
+            return None
+        import pickle
+        with open(p, "rb") as f_:
+            out = pickle.load(f_)
+        if isinstance(out, dict) and out.get("v") == READ_V and \
+                out.get("segs"):
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _disk_cache_save(p, out):
+    if p is None:
+        return
+    try:
+        import pickle
+        p.parent.mkdir(parents=True, exist_ok=True)
+        for old_ in sorted(p.parent.glob("*.pkl"),
+                           key=lambda q: q.stat().st_mtime)[:-3]:
+            try:                     # (the last few drawings only)
+                old_.unlink()
+            except OSError:
+                pass
+        tmp_ = p.with_suffix(".tmp")
+        with open(tmp_, "wb") as f_:
+            pickle.dump(out, f_, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_.replace(p)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---- line weights and line types (the plan's linework, as the CAD plots it) --

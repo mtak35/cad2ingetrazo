@@ -5209,6 +5209,35 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     arch = doc["arch"]
     raw = cadread.read(path, how.get("unit"))
     drawing = cadread.crop(raw, how.get("region"))
+    # 3.64.135: a part picked on an ELEVATION or a SECTION (the roof level
+    # taken from the facade row of a drawing, 344 "walls" from a minaret and
+    # its arches) is not a plan — refused, with what to do
+    try:
+        rg_ = how.get("region")
+        if rg_:
+            # (the title of a drawing sits just under it: the part and a
+            # strip below it)
+            k_ = float(raw.get("unit") or 0.0254)
+            z_ = [rg_[0] - 1.0 / k_, rg_[1] - 3.0 / k_,
+                  rg_[2] + 1.0 / k_, rg_[3]]
+            tt_ = [str(t_.get("text", "")).upper() for t_ in
+                   raw.get("texts") or []
+                   if z_[0] <= float(t_["x"]) <= z_[2]
+                   and z_[1] <= float(t_["y"]) <= z_[3]]
+            el_ = sum(1 for x_ in tt_ if re.match(
+                r"^\s*(ELEVATION|SECTION|SEC\.?)\s*[-:]?\s*[A-Z0-9]", x_))
+            pn_ = sum(1 for x_ in tt_ if re.search(
+                r"\bPLAN\b|\bLAYOUT\b", x_))
+            if el_ >= 1 and pn_ == 0:
+                raise ValueError(
+                    "the part picked on the drawing is an elevation / "
+                    "section, not a plan — «Select floor on drawing…» on "
+                    "the plan of this floor (the Roof level: the roof plan, "
+                    "or the top floor's plan); nothing was changed")
+    except ValueError:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     drawing = cadread.without_layers(drawing, [
         n for n, r in (how.get("layer_roles") or {}).items() if r == "off"])
     base = cadread.base_point(drawing, how.get("base", "origin"),
@@ -17168,6 +17197,26 @@ def update_from_cad(doc, as_cad=False) -> list:
                 log_error("project.apply_removed")
         except Exception as e:  # noqa: BLE001
             rep = {"error": str(e)}
+            if "elevation / section" in str(e):
+                # 3.64.135: what an earlier import made from an elevation
+                # is not a floor: taken out (what was drawn by hand stays)
+                try:
+                    ar_ = doc["arch"]
+                    gone_ = {w["id"] for w in ar_["walls"]
+                             if w["level"] == lv["id"] and not w.get("user")}
+                    ar_["walls"] = [w for w in ar_["walls"]
+                                    if w["id"] not in gone_]
+                    ar_["openings"] = [o for o in ar_["openings"]
+                                       if o["wall"] not in gone_]
+                    ar_["structure"] = [
+                        x for x in ar_["structure"]
+                        if x["level"] != lv["id"] or x.get("user")
+                        or x["type"] in ("footing", "roof")]
+                    rep["error"] = str(e).replace(
+                        "nothing was changed",
+                        "its earlier walls from that part were removed")
+                except Exception:  # noqa: BLE001
+                    pass
         out.append((lv["name"], rep))
     if not any(h_.get("roof") for h_ in doc["imports"].values()):
         try:                  # 3.64.30: the roof plan the drawing holds
