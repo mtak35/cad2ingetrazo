@@ -606,7 +606,7 @@ def _structure(raw, level_ids: set) -> list[dict]:
                 from . import structure as _S3
                 kind = e.get("kind") if e.get("kind") in \
                     _S3.ROOF_KINDS else "flat"
-                if kind != "flat" and len(cs) != 4:
+                if kind not in ("flat", "skel") and len(cs) != 4:
                     kind = "flat"           # a pitched roof: a rectangle
                 rec.update(kind=kind, corners=cs,
                            slope=min(max(float(e.get("slope", 30.0)), 5.0),
@@ -619,6 +619,12 @@ def _structure(raw, level_ids: set) -> list[dict]:
                            parapet=min(max(float(e.get("parapet", 0.0)),
                                            0.0), 3.0),
                            pt=min(max(float(e.get("pt", 0.15)), 0.05), 1.0))
+                if kind == "skel":          # 3.64.123: one roof, any outline
+                    rec["ang"] = float(e.get("ang", 0.0))
+                    rec["holes"] = [[_pt(p) for p in h] for h in
+                                    (e.get("holes") or []) if len(h) >= 3]
+                    rec["notch"] = [[_pt(p) for p in nt] for nt in
+                                    (e.get("notch") or []) if len(nt) >= 3]
                 for k_ in ("from_cad", "tiles", "apex", "look", "annex"):  # 3.64.40: read
                     if e.get(k_):                   # the roof plan
                         rec[k_] = True

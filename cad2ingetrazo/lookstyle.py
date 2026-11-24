@@ -292,6 +292,90 @@ PITCHED = ("hip", "gable", "pyramid", "dutch", "jerkinhead", "gambrel",
            "clerestory")
 
 
+def _ortho(poly, tol=0.06):
+    """3.64.123: ``poly`` with its coordinates snapped onto a grid of its
+    own (values closer than ``tol`` become one), or None when it is not
+    square-cornered — the one-piece hip roof needs that."""
+    from shapely.geometry import Polygon
+
+    def snap(vals):
+        vs = sorted(set(round(v, 4) for v in vals))
+        grp, cur = {}, [vs[0]]
+        for v in vs[1:]:
+            if v - cur[-1] <= tol:
+                cur.append(v)
+            else:
+                for u in cur:
+                    grp[u] = round(sum(cur) / len(cur), 4)
+                cur = [v]
+        for u in cur:
+            grp[u] = round(sum(cur) / len(cur), 4)
+        return grp
+
+    rings = [poly.exterior] + list(poly.interiors)
+    gx = snap([x for r in rings for x, _y in r.coords])
+    gy = snap([y for r in rings for _x, y in r.coords])
+    out = []
+    for r in rings:
+        pts = []
+        for x, y in r.coords:
+            q = (gx[round(x, 4)], gy[round(y, 4)])
+            if not pts or q != pts[-1]:
+                pts.append(q)
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts.pop()
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            if abs(a[0] - b[0]) > 1e-6 and abs(a[1] - b[1]) > 1e-6:
+                return None
+        out.append(pts)
+    if len(out[0]) < 4:
+        return None
+    g = Polygon(out[0], [h for h in out[1:] if len(h) >= 4]).buffer(0)
+    return g if g.geom_type == "Polygon" and g.area > 1.0 else None
+
+
+def one_roof(arch, lid, p0, c, ang, slope, eave):
+    """3.64.123: ONE hip roof per block of the level's outline (turned
+    ``p0``, about ``c``): every plane at the same slope, the hips and the
+    valleys where the planes meet — no ridge of its own for each
+    rectangle. The roof records; [] when the outline is not
+    square-cornered."""
+    terr = terrace_union(arch, lid)
+    notch = []
+    if terr is not None and not terr.is_empty:
+        t_ = terr.buffer(-0.12)
+        notch = [[[round(x, 4), round(y, 4)] for x, y in g.exterior.coords]
+                 for g in getattr(t_, "geoms", [t_])
+                 if g.geom_type == "Polygon" and not g.is_empty]
+
+    def world(pts):
+        out = []
+        for x, y in pts:
+            dx, dy = x - c.x, y - c.y
+            out.append([round(c.x + dx * math.cos(ang) - dy * math.sin(ang),
+                              4),
+                        round(c.y + dx * math.sin(ang) + dy * math.cos(ang),
+                              4)])
+        return out
+    recs = []
+    for g in getattr(p0, "geoms", [p0]):
+        if g.geom_type != "Polygon" or g.area < 4.0:
+            continue
+        og = _ortho(g)
+        if og is None:
+            return []
+        for pg in getattr(og, "geoms", [og]):
+            recs.append({
+                "type": "roof", "level": lid, "kind": "skel",
+                "corners": world(list(pg.exterior.coords)[:-1]),
+                "holes": [world(list(h.coords)[:-1]) for h in pg.interiors],
+                "ang": ang, "notch": notch, "slope": slope,
+                "overhang": eave, "t": 0.15, "ridge": "long",
+                "parapet": 0.0, "pt": 0.15, "tiles": True, "look": True})
+    return recs
+
+
 def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     """Clay-tile hip roofs over the level's blocks: its outline split in
     rectangles (in the building's own frame), one hip roof each. The
@@ -310,6 +394,18 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     c = poly.centroid
     p0 = affinity.rotate(poly, -ang, origin=c, use_radians=True)
     p0 = p0.simplify(0.05)
+    if kind == "hip":
+        try:                   # 3.64.123: one roof over the whole outline
+            recs = [r_ for r_ in one_roof(arch, lid, p0, c, ang, slope, eave)
+                    if not S.why_not(r_)]
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            recs = []
+        if recs:
+            arch["structure"] += M.new_elements(arch["structure"], recs)
+            del PJ
+            return len(recs)
     if p0.geom_type != "Polygon":
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []

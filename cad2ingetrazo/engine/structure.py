@@ -2038,7 +2038,7 @@ def lift_door(dr: dict, z0: float, top: float) -> list:
 #: one is a rectangle, its ridge along the longer side)
 ROOF_KINDS = ("gable", "hip", "flat", "pyramid", "dutch", "jerkinhead",
               "gambrel", "saltbox", "butterfly", "shed", "bonnet", "m_roof",
-              "arched", "clerestory")
+              "arched", "clerestory", "skel")
 ROOF_LABELS = {"flat": "Flat (parapet)", "gable": "Gable", "hip": "Hip",
                "pyramid": "Pyramid", "dutch": "Dutch gable",
                "jerkinhead": "Jerkinhead (clipped gable)",
@@ -2132,6 +2132,162 @@ def _gable_oculus(tri, ocs, x0, x1, P) -> list:
     return faces
 
 
+# ---- 3.64.123: ONE hip roof over a whole (square-cornered) outline --------------------
+def skel_facets(E) -> list:
+    """The planes of the hip roof over ``E`` (shapely, square-cornered,
+    axis-aligned): every plane of one slope, hips and valleys where they
+    meet. [[(x, y, depth)…]] — the depth is the distance in from the
+    eave (the L-infinity distance to the outline, which is the mitred
+    offset of a square-cornered outline). The outline is eroded between
+    the distances where its shape changes (half the gaps between its
+    coordinates); each band between two of them is one quad per edge."""
+    from shapely.geometry.polygon import orient
+    E = orient(E.buffer(0), 1.0)
+    rings = [E.exterior] + list(E.interiors)
+    xs = sorted({round(x, 5) for r in rings for x, _y in r.coords})
+    ys = sorted({round(y, 5) for r in rings for _x, y in r.coords})
+    ds = set()
+    for v in (xs, ys):
+        for i, a in enumerate(v):
+            for b in v[i + 1:]:
+                d = (b - a) / 2
+                if d > 1e-3:
+                    ds.add(round(d, 4))
+    lv = [0.0]
+    for d in sorted(ds):
+        if d - lv[-1] > 1e-3:
+            lv.append(d)
+    out = []
+    for d0, d1 in zip(lv, lv[1:]):
+        dm = (d0 + d1) / 2
+        ring = E.buffer(-dm, join_style=2, mitre_limit=10.0)
+        if ring.is_empty:
+            break
+        for pg in getattr(ring, "geoms", [ring]):
+            if pg.geom_type != "Polygon" or pg.area < 1e-6:
+                continue
+            pg = orient(pg, 1.0)
+            for rg in [pg.exterior] + list(pg.interiors):
+                pts = []
+                for q in list(rg.coords)[:-1]:
+                    if not pts or math.dist(q, pts[-1]) > 1e-7:
+                        pts.append(q)
+                if len(pts) > 1 and math.dist(pts[0], pts[-1]) < 1e-7:
+                    pts.pop()
+                n = len(pts)
+                if n < 3:
+                    continue
+                nr = []                       # each edge's inward normal
+                for i in range(n):
+                    a, b = pts[i], pts[(i + 1) % n]
+                    L = math.dist(a, b)
+                    nr.append((-(b[1] - a[1]) / L, (b[0] - a[0]) / L))
+                mv = []                       # each corner's mitre move
+                for i in range(n):
+                    n1, n2 = nr[i - 1], nr[i]
+                    k = 1.0 + n1[0] * n2[0] + n1[1] * n2[1]
+                    k = max(k, 0.25)
+                    mv.append(((n1[0] + n2[0]) / k, (n1[1] + n2[1]) / k))
+
+                def at(i, d):
+                    return (pts[i][0] + (d - dm) * mv[i][0],
+                            pts[i][1] + (d - dm) * mv[i][1], d)
+                for i in range(n):
+                    j = (i + 1) % n
+                    out.append([at(i, d0), at(j, d0), at(j, d1), at(i, d1)])
+    return out
+
+
+def _skel_plane(f):
+    """(a, b, c): depth = a*x + b*y + c through the facet's corners."""
+    import numpy as np
+    P = np.array(f, dtype=float)
+    A = np.c_[P[:, 0], P[:, 1], np.ones(len(P))]
+    sol, *_ = np.linalg.lstsq(A, P[:, 2], rcond=None)
+    return float(sol[0]), float(sol[1]), float(sol[2])
+
+
+def _skel_roof_faces(r, base, tan, dz, o):
+    """The faces of a «skel» roof: one hip roof over the polygon
+    ``corners`` (square-cornered in the frame turned by ``ang``),
+    eaves ``o`` out, its eave line cut back where ``notch`` shapes (the
+    terraces) are."""
+    from shapely import affinity
+    from shapely.geometry import Polygon
+    from shapely.geometry.polygon import orient
+    ang = float(r.get("ang", 0.0))
+    poly = Polygon([tuple(p[:2]) for p in r["corners"]],
+                   [[tuple(q[:2]) for q in h] for h in r.get("holes") or []
+                    if len(h) >= 3]).buffer(0)
+    c = poly.centroid
+    loc = affinity.rotate(poly, -ang, origin=c, use_radians=True)
+    E = loc.buffer(o, join_style=2, mitre_limit=10.0) if o > 1e-6 else loc
+    if E.geom_type != "Polygon":
+        E = max(E.geoms, key=lambda g: g.area)
+    cut = None
+    for nt in r.get("notch") or []:
+        try:
+            g = affinity.rotate(Polygon([tuple(p[:2]) for p in nt]), -ang,
+                                origin=c, use_radians=True)
+            cut = g if cut is None else cut.union(g)
+        except Exception:  # noqa: BLE001
+            pass
+    keep = E.difference(cut) if cut is not None and not cut.is_empty else E
+    ca, sa = math.cos(ang), math.sin(ang)
+
+    def W3(x, y, z):                          # back to the world
+        dx, dy = x - c.x, y - c.y
+        return (c.x + dx * ca - dy * sa, c.y + dx * sa + dy * ca, z)
+
+    def z_(a, b, c0, x, y):                   # the roof's underside
+        return base - o * tan + tan * (a * x + b * y + c0)
+    faces = []
+    bd = keep.boundary
+    from shapely.ops import unary_union
+    planes = {}                      # the bands' quads of one plane: one
+    for f in skel_facets(E):         # face (not hundreds of slivers)
+        pl = Polygon([(x, y) for x, y, _d in f]).buffer(0)
+        if pl.is_empty or pl.area < 1e-7:
+            continue
+        a, b, c0 = _skel_plane(f)
+        planes.setdefault((round(a, 3), round(b, 3), round(c0, 2)),
+                          [a, b, c0, []])[3].append(pl)
+    for a, b, c0, pls in planes.values():
+        pl = unary_union([g.buffer(2e-4, join_style=2) for g in pls]
+                         ).buffer(-2e-4, join_style=2)
+        if pl.is_empty:
+            continue
+        for pc in getattr(pl.intersection(keep), "geoms",
+                          [pl.intersection(keep)]):
+            if pc.geom_type != "Polygon" or pc.area < 1e-6:
+                continue
+            pc = orient(pc, 1.0)
+            ring = list(pc.exterior.coords)[:-1]
+            top = [W3(x, y, z_(a, b, c0, x, y) + dz) for x, y in ring]
+            under = [W3(x, y, z_(a, b, c0, x, y)) for x, y in ring]
+            faces.append({"loop": top, "holes": [], "color": ROOF_COLOR})
+            faces.append({"loop": list(reversed(under)), "holes": [],
+                          "color": ROOF_COLOR})
+            for i in range(len(ring)):     # the fascia on the eave line
+                p, q = ring[i], ring[(i + 1) % len(ring)]
+                if math.dist(p, q) < 1e-4:
+                    continue
+                if bd.distance(Point_((p[0] + q[0]) / 2,
+                                      (p[1] + q[1]) / 2)) > 1e-4:
+                    continue
+                zp, zq = z_(a, b, c0, p[0], p[1]), z_(a, b, c0, q[0], q[1])
+                faces.append({"loop": [W3(p[0], p[1], zp), W3(q[0], q[1], zq),
+                                       W3(q[0], q[1], zq + dz),
+                                       W3(p[0], p[1], zp + dz)],
+                              "holes": [], "color": ROOF_COLOR})
+    return faces
+
+
+def Point_(x, y):
+    from shapely.geometry import Point
+    return Point(x, y)
+
+
 def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
     """A roof's faces, resting on ``base`` (its level's wall tops): a
     pitched roof's underside passes through the walls' outer top edge."""
@@ -2157,6 +2313,10 @@ def roof_faces(r: dict, base: float, wall_t: float = 0.20) -> list:
             faces += _faces(W.solid(ring, base + t, base + t + ph),
                             GABLE_COLOR)
         return faces
+    if kind == "skel":
+        ang_ = math.radians(float(r.get("slope", 22.0)))
+        return _skel_roof_faces(r, base, math.tan(ang_),
+                                t / math.cos(ang_), o)
     if kind == "pyramid":
         r = dict(r, kind="hip", apex=True)
         kind = "hip"
@@ -2364,7 +2524,7 @@ def roof_corners(corners, kind: str) -> list:
     """A roof's corners as stored: a flat roof's as drawn; a pitched
     roof's, the rectangle round them (turned with them)."""
     pts = _ccw([tuple(p) for p in corners])
-    if kind != "flat":
+    if kind not in ("flat", "skel"):
         from shapely.geometry import Polygon
         rect = Polygon(pts).minimum_rotated_rectangle
         pts = _ccw(list(rect.exterior.coords)[:-1])
