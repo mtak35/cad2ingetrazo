@@ -3527,9 +3527,17 @@ class Panel(QWidget):
 
     def _update_level_one(self):
         """3.64.116: the storey height typed, for the selected floor only."""
+        if self.level_box.currentData() in (NEW, ROOF_NEW, NEW_BELOW,
+                                            FOUNDATION, SITE_LV):
+            self.flash("Pick an existing floor at the top first")
+            return
         doc = self.doc()
-        lid, lv_ = self.level()
+        lid, _lv0 = self.level()
         if not lid:
+            self.flash("Pick a level at the top first")
+            return
+        lv_ = PJ.level_by_id(doc["arch"], lid)     # in THIS document (doc()
+        if lv_ is None:                            # may be read afresh)
             self.flash("Pick a level at the top first")
             return
         h = round(float(self.i_floor_h.value()), 4)
