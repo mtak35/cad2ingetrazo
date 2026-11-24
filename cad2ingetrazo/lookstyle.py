@@ -295,6 +295,9 @@ KIT_DEFAULT = {
     "geo_panel": "none", "geo_where": "front", "geo_size": 0.30,
     "arch_panels": False,
     "parapet_style": None,
+    # 3.64.119: pergolas over the terraces, louvers on the windows
+    "pergola": "none", "pergola_h": 2.7, "pergola_col": "timber",
+    "louver": "none", "louver_where": "front", "louver_col": "timber",
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)

@@ -23,7 +23,7 @@ from .engine.structure import _box
 
 STRING_H = 0.25        # a floor band's height
 STRING_D = 0.07        # … its projection
-CORNICE = ((0.30, 0.06), (0.16, 0.14), (0.08, 0.22))   # (height, projection)
+CORNICE = ((0.08, 0.22), (0.16, 0.14), (0.30, 0.06))   # (height, projection), top first: the widest ring on top (3.64.119; was upside down)
 PLINTH_H = 0.45
 PLINTH_D = 0.05
 QUOIN_H = 0.30
@@ -487,6 +487,12 @@ def faces(doc) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("wallpanels.faces")
+    try:                         # 3.64.119: pergolas, louvers
+        from . import elevparts as EP
+        out += EP.faces(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("elevparts.faces")
     try:                         # 3.64.47: the front's main door
         from . import lookstyle as LS2
         _fr, fw, fo = LS2.front_side(doc, outer)

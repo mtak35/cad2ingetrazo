@@ -305,6 +305,28 @@ class ElevationDesigner(QDialog):
         self.geo_size.setSingleStep(0.05)
         self.geo_size.setSuffix(" m")
         f2.addRow("… cell size", self.geo_size)
+        # 3.64.119: pergolas and louvers
+        from . import elevparts as EP
+        self.pergola = _combo(EP.PERGOLAS)
+        self.pergola.setToolTip("A pergola over every terrace / balcony / "
+                                "sit-out the plan names (posts, beams, "
+                                "slats or blades)")
+        f2.addRow("Pergola (over terraces)", self.pergola)
+        self.pergola_h = QDoubleSpinBox()
+        self.pergola_h.setRange(2.2, 4.5)
+        self.pergola_h.setSingleStep(0.1)
+        self.pergola_h.setSuffix(" m")
+        f2.addRow("… height above the floor", self.pergola_h)
+        self.pergola_col = _combo(EP.COLOURS)
+        f2.addRow("… colour", self.pergola_col)
+        self.louver = _combo(EP.LOUVERS)
+        self.louver.setToolTip("Louvers in front of the windows: blades, "
+                               "fins or open shutters")
+        f2.addRow("Louvers (windows)", self.louver)
+        self.louver_where = _combo(EP.LOUVER_WHERE)
+        f2.addRow("… on", self.louver_where)
+        self.louver_col = _combo(EP.COLOURS)
+        f2.addRow("… colour ", self.louver_col)
         grid.addWidget(g2, 1, 0)
         # the check groups
         self.checks = {}
@@ -433,6 +455,12 @@ class ElevationDesigner(QDialog):
         _set(self.geo, k.get("geo_panel", "none"))
         _set(self.geo_where, k.get("geo_where", "front"))
         self.geo_size.setValue(float(k.get("geo_size", 0.30) or 0.30))
+        _set(self.pergola, k.get("pergola", "none"))
+        self.pergola_h.setValue(float(k.get("pergola_h", 2.7) or 2.7))
+        _set(self.pergola_col, k.get("pergola_col", "timber"))
+        _set(self.louver, k.get("louver", "none"))
+        _set(self.louver_where, k.get("louver_where", "front"))
+        _set(self.louver_col, k.get("louver_col", "timber"))
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         self._relevance()
@@ -487,6 +515,12 @@ class ElevationDesigner(QDialog):
              "geo_panel": self.geo.currentData(),
              "geo_where": self.geo_where.currentData(),
              "geo_size": round(self.geo_size.value(), 3),
+             "pergola": self.pergola.currentData(),
+             "pergola_h": round(self.pergola_h.value(), 2),
+             "pergola_col": self.pergola_col.currentData(),
+             "louver": self.louver.currentData(),
+             "louver_where": self.louver_where.currentData(),
+             "louver_col": self.louver_col.currentData(),
              "manual": True}
         for key in FIN_KEYS:
             k[key] = self.fin[key].currentData()
