@@ -253,6 +253,7 @@ Modelling engine (walls, openings, structure, roofs, rooms) from
 - **Update floors and levels (all levels)** under Floor height: every storey set to the floor height typed and the ground floor to the level typed (the CAD's level notes still applied when that option is on), then the model, stairs and ramps made again — like Update from CAD, for the levels.
 - **Floor height — selected floor only** (3.64.116), above it: the floor height typed is set for the floor picked at the top only; the other floors stay.
 - 3.64.116: the tiled roofs over annexes now go only over rooms — a terrace, roof terrace or open deck stays as the CAD plan draws it (no roof added).
+- 3.64.117: rooms the plan names TERRACE / BALCONY / SIT-OUT / DECK / PATIO stay open — the look's pitched roofs are cut round them and no flat annex roof slab is made over them.
 - **Shoring along**: the plot limits, or round the basement's outer (RCC) walls (one shoring all the way round, just outside them).
 - **Sliding windows**: no pulls on the panels (doors keep theirs).
 - **Shafts on a drawn rectangle**: draw a rectangle on a slab (Rectangle tool), select it, right-click ▸ «CAD2IngeTrazo · Shaft» ▸ «Open a shaft here», «… through every floor», or «Close the shaft / opening here» (the openings it covers closed again).

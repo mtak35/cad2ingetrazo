@@ -234,7 +234,7 @@ def apply(doc, color=None) -> dict:
     ui = next(i for i, lv in enumerate(levels) if lv["id"] == under)
     slab_t = float(doc["settings"].get("slab_t", 0.1016) or 0.1016)
     z_wall = el[ui] + float(levels[ui]["height"]) + slab_t
-    poly, ws = LS._outline(arch, under)
+    poly, ws = LS._outline(arch, under, roof=True)
     if poly is None:
         return {"note": "the top floor has no outline"}
     b = poly.bounds

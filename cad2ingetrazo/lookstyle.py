@@ -174,7 +174,7 @@ def _frame_angle(walls) -> float:
     return math.radians(max(acc.items(), key=lambda kv: kv[1])[0])
 
 
-def _outline(arch, lid):
+def _outline(arch, lid, roof=False):
     """The level's built outline: its outer walls' contour (railings
     left out), holes filled."""
     from shapely.geometry import LineString, Polygon
@@ -194,7 +194,24 @@ def _outline(arch, lid):
               if p.geom_type == "Polygon" and p.area > 4.0]
     if not shells:
         return None, ws
-    return unary_union(shells), ws
+    out = unary_union(shells)
+    try:                     # 3.64.117: a terrace / balcony the plan names
+        if not roof:
+            raise ValueError
+
+        from . import project as PJ_     # stays open: no roof over it
+        from .engine import spaces as SP_
+        terr = [r["poly"] for r in SP_.of_level(arch, lid)
+                if PJ_.TERRACE_WORDS.search(str(r.get("name") or ""))]
+        if terr:
+            cut = unary_union(terr).buffer(-0.15)
+            res = out.difference(cut)
+            res = res.buffer(-0.1, join_style=2).buffer(0.1, join_style=2)
+            if not res.is_empty and res.area > 4.0:
+                out = res
+    except Exception:  # noqa: BLE001
+        pass
+    return out, ws
 
 
 #: the tiled roof forms the design can put over every block
@@ -214,7 +231,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     arch = doc["arch"]
     arch["structure"] = [e for e in arch["structure"] if not (
         is_look_roof(e) and not e.get("annex") and e["level"] == lid)]
-    poly, ws = _outline(arch, lid)
+    poly, ws = _outline(arch, lid, roof=True)
     if poly is None:
         return 0
     ang = _frame_angle(ws)
@@ -1298,8 +1315,7 @@ def _over_rooms(doc, slab, poly) -> bool:
         return True
     if str(slab.get("id")) in set(doc.get("roof_terraces") or []):
         return False
-    if re.search(r"terrace|balcon|deck|roof garden|sit.?out|patio|court",
-                 str(slab.get("name", "")), re.I):
+    if PJ.TERRACE_WORDS.search(str(slab.get("name", ""))):
         return False
     try:
         rooms = [r["poly"] for r in spaces.of_level(doc["arch"],
@@ -1310,7 +1326,8 @@ def _over_rooms(doc, slab, poly) -> bool:
         return True
     from shapely.ops import unary_union
     indoor = [r["poly"] for r in spaces.of_level(doc["arch"], slab["level"])
-              if not PJ.OUTDOOR_WORDS.search(str(r.get("name") or ""))]
+              if not PJ.OUTDOOR_WORDS.search(str(r.get("name") or ""))
+              and not PJ.TERRACE_WORDS.search(str(r.get("name") or ""))]
     if not indoor:
         return False
     try:

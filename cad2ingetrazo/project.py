@@ -864,6 +864,12 @@ OUTDOOR_WORDS = re.compile(
     r"\bYARD\b|SET\s*BACK|GREEN\s*(AREA|BELT)|BOUNDARY", re.I)
 
 
+#: open-to-the-sky areas on a plan: never roofed (3.64.117)
+TERRACE_WORDS = re.compile(
+    r"TERRACE|BALCON|SIT\s*-?\s*OUT|\bDECK\b|PATIO|ROOF\s*GARDEN|OPEN\s*TO\s*SKY",
+    re.I)
+
+
 def drawn_floor(doc, lid, pl, P):
     """The floor as the plan draws it: every area its walls, glazing,
     railings and columns close (rooms, corridors, balconies out to their
@@ -7222,7 +7228,8 @@ def annex_roofs(doc) -> int:
             continue
         try:
             rooms_ = [r["poly"] for r in spaces.of_level(arch, lid)
-                      if not OUTDOOR_WORDS.search(str(r.get("name") or ""))]
+                      if not OUTDOOR_WORDS.search(str(r.get("name") or ""))
+                      and not TERRACE_WORDS.search(str(r.get("name") or ""))]
             ru = _uu(rooms_) if rooms_ else None
         except Exception:  # noqa: BLE001
             ru = None
