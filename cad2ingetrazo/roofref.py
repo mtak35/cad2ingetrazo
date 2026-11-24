@@ -262,6 +262,7 @@ def apply(doc, color=None) -> dict:
     arch["structure"] = [e for e in arch["structure"]
                          if not LS.is_look_roof(e)]
     recs, flat, pitched = [], 0, []
+    terr_ = LS.terrace_union(arch, under)
     for x0, y0, x1, y1 in LS.rectangles(p0):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
@@ -274,7 +275,8 @@ def apply(doc, color=None) -> dict:
             continue
         rec = {"type": "roof", "level": under, "kind": fit["kind"],
                "corners": cs, "slope": fit["slope"],
-               "overhang": fit["eave"], "t": 0.15, "ridge": fit["ridge"],
+               "overhang": LS.eave_clear(cs, fit["eave"], terr_),
+               "t": 0.15, "ridge": fit["ridge"],
                "parapet": 0.0, "pt": 0.15, "tiles": True, "look": True}
         if S.why_not(rec):
             continue

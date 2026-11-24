@@ -159,6 +159,39 @@ def rectangles(poly, min_side=MIN_SIDE) -> list:
     return rects
 
 
+def terrace_union(arch, lid):
+    """The open rooms (terrace / balcony / sit-out …) the plan names on a
+    level, as one shape (or None) — roofs and their eaves keep off them."""
+    try:
+        from shapely.ops import unary_union
+        from . import project as PJ_
+        from .engine import spaces as SP_
+        terr = [r["poly"] for r in SP_.of_level(arch, lid)
+                if PJ_.TERRACE_WORDS.search(str(r.get("name") or ""))]
+        return unary_union(terr) if terr else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def eave_clear(cs, eave, terr, floor=0.15):
+    """The largest eave (≤ ``eave``) at which the rectangle ``cs`` does not
+    overhang a terrace: 3.64.120 — the eaves over a terrace hid its
+    railings and dropped below their tops."""
+    if terr is None or terr.is_empty:
+        return eave
+    from shapely.geometry import Polygon
+    p = Polygon(cs)
+    inner = terr.buffer(-0.12)       # (the walls' own edge band is allowed)
+    if inner.is_empty:
+        return eave
+    for e in sorted({eave, 0.60, 0.45, 0.30, floor}, reverse=True):
+        if e > eave + 1e-9:
+            continue
+        if p.buffer(e, join_style=2).intersection(inner).area < 0.05:
+            return e
+    return min(floor, eave)
+
+
 def _frame_angle(walls) -> float:
     """The building's main direction (radians), from its long walls."""
     acc = {}
@@ -241,6 +274,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     if p0.geom_type != "Polygon":
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []
+    terr = terrace_union(arch, lid)
     for x0, y0, x1, y1 in rectangles(p0):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
@@ -248,7 +282,8 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
             cs.append([round(c.x + dx * math.cos(ang) - dy * math.sin(ang), 4),
                        round(c.y + dx * math.sin(ang) + dy * math.cos(ang), 4)])
         rec = {"type": "roof", "level": lid, "kind": kind, "corners": cs,
-               "slope": slope, "overhang": eave, "t": 0.15, "ridge": "long",
+               "slope": slope, "overhang": eave_clear(cs, eave, terr),
+               "t": 0.15, "ridge": "long",
                "parapet": 0.0, "pt": 0.15, "tiles": True, "look": True}
         if S.why_not(rec):
             continue
