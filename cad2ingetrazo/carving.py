@@ -144,44 +144,15 @@ def _opening_faces(fc, op, kind, look, cols, budget):
         out += f.box(s_mid - kw * 1.35, s_mid + kw * 1.35, face, face + 0.17,
                      kz1, kz1 + 0.05, trim)
     if kind == "crown":
-        sc = min(max(w / 1.2, 0.8), 1.7)
+        em = _Em(f, face, cols)
+        sc = min(max(w / 1.2, 0.8), 1.6)
         z0 = top_z - 0.02
-        base_w = 0.42 * sc
-        out += f.box(s_mid - base_w, s_mid + base_w, face, face + 0.12, z0,
-                     z0 + 0.07 * sc, trim)
-        from shapely.geometry import Polygon
-        out += f.holed(Polygon([(s_mid - base_w * 0.8, z0 + 0.07 * sc),
-                                (s_mid + base_w * 0.8, z0 + 0.07 * sc),
-                                (s_mid + base_w * 0.35, z0 + 0.30 * sc),
-                                (s_mid - base_w * 0.35, z0 + 0.30 * sc)]),
-                       face, face + 0.13, trim)
-        # the shell medallion on it
-        cz = z0 + 0.31 * sc
-        out += f.holed(_ellipse(s_mid, cz, 0.2 * sc, 0.2 * sc),
-                       face, face + 0.15, trim)
-        shell = None
-        from shapely.ops import unary_union
-        fan = [_ellipse(s_mid + 0.1 * sc * math.cos(t),
-                        cz + 0.1 * sc * math.sin(t), 0.075 * sc, 0.03 * sc,
-                        math.degrees(t))
-               for t in (math.radians(v) for v in range(20, 170, 28))]
-        shell = unary_union(fan)
-        out += f.holed(shell, face + 0.15, face + 0.185, relief)
-        out += f.holed(_ellipse(s_mid, cz, 0.07 * sc, 0.07 * sc),
-                       face + 0.15, face + 0.19, relief)
-        # leaf scrolls either side, a finial over it
+        em.box(s_mid - 0.42 * sc, s_mid + 0.42 * sc, 0, 0.14, z0,
+               z0 + 0.08 * sc)
         for sg in (-1, 1):
-            for j, (dx, dz, rx, ang) in enumerate(((0.36, 0.02, 0.22, 10),
-                                                   (0.62, 0.10, 0.17, 28),
-                                                   (0.82, 0.02, 0.12, -10))):
-                out += f.holed(_ellipse(s_mid + sg * dx * sc,
-                                        z0 + (0.14 + dz) * sc, rx * sc,
-                                        0.045 * sc, sg * ang),
-                               face, face + 0.10, trim)
-        out += f.box(s_mid - 0.045 * sc, s_mid + 0.045 * sc, face, face + 0.10,
-                     cz + 0.2 * sc, cz + 0.36 * sc, trim)
-        out += f.holed(_ellipse(s_mid, cz + 0.42 * sc, 0.06 * sc, 0.06 * sc),
-                       face, face + 0.10, relief)
+            _wing(em, s_mid, z0 + 0.16 * sc, sc * 1.4, sg, 0.0)
+        _cartouche(em, s_mid, z0 + 0.08 * sc + 0.15 * sc, sc, 0.0)
+        out += em.out
     if kind == "classic":
         out += _classic_extras(fc, op, cols, g0, bw)
     return out
@@ -217,52 +188,95 @@ def _head(op):
     return arched, (zb - rise if arched else zb), (o.get("arch") or "semi")
 
 
-def _curl(cx, cz, r):
-    """A volute: a ring with an eye."""
+def _lens(cx, cz, L, Wd, ang):
+    """A pointed leaf: base at (cx, cz), length L along ``ang`` degrees from
+    the +s axis, widest Wd."""
+    from shapely import affinity
     from shapely.geometry import Point
-    return Point(cx, cz).buffer(r, 3).difference(
-        Point(cx, cz).buffer(r * 0.5, 3)).union(
-        Point(cx, cz).buffer(r * 0.22, 3))
+    hw = Wd / 2.0
+    R = (L * L / 4.0 + hw * hw) / (2.0 * hw)
+    o = R - hw
+    a = Point(L / 2.0, -o).buffer(R, 5)
+    b = Point(L / 2.0, o).buffer(R, 5)
+    g = a.intersection(b)
+    g = affinity.rotate(g, ang, origin=(0, 0))
+    return affinity.translate(g, cx, cz)
+
+
+def _leaf(em, cx, cz, L, Wd, ang, p0, h=0.05):
+    """A domed leaf: the blade, then a narrower raised heart."""
+    if L < 0.11:
+        em.shp(_lens(cx, cz, L, Wd, ang), p0, p0 + h)
+        return
+    em.shp(_lens(cx, cz, L, Wd, ang), p0, p0 + h * 0.55)
+    em.shp(_lens(cx, cz, L * 0.88, Wd * 0.48, ang), p0 + h * 0.55, p0 + h)
+
+
+def _rose(em, cx, cz, r, p0, h=0.05):
+    """A domed rosette: eight petals, a raised ring, a button."""
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    ps = [_lens(cx, cz, r, r * 0.62, a) for a in range(0, 360, 45)]
+    em.shp(unary_union(ps), p0, p0 + h * 0.5)
+    em.shp(Point(cx, cz).buffer(r * 0.46, 3), p0 + h * 0.5, p0 + h * 0.8)
+    em.shp(Point(cx, cz).buffer(r * 0.2, 3), p0 + h * 0.8, p0 + h)
 
 
 def _acanthus(em, cx, cz, sc, p0, up=True):
-    """A fan of five leaves with a bud, rising (or hanging) from a point."""
+    """A palmette: seven pointed leaves fanning from a point, with a bud."""
     d = 1 if up else -1
-    ls = []
-    for ang in (-64, -32, 0, 32, 64):
-        r = 0.17 * sc * (1.0 - 0.2 * abs(ang) / 64.0)
-        t = math.radians(90 - ang)
-        ls.append(_ellipse(cx + 0.55 * r * math.cos(t),
-                           cz + d * 0.55 * r * math.sin(t), 0.55 * r,
-                           0.05 * sc, d * (90 - ang)))
+    for ang, k in ((-66, 0.8), (-33, 1.0), (0, 1.15), (33, 1.0),
+                   (66, 0.8)):
+        t = d * (90 - ang)
+        _leaf(em, cx, cz, 0.20 * sc * k, 0.075 * sc, t, p0, 0.05)
+    em.shp(_ellipse(cx, cz + d * 0.02 * sc, 0.05 * sc, 0.045 * sc),
+           p0 + 0.05, p0 + 0.075)
+
+
+def _spiral(cx, cz, R, sg, rot=0.0, turns=1.1):
+    """A volute: a chain of shrinking discs winding in towards its eye."""
+    from shapely.geometry import Point
     from shapely.ops import unary_union
-    em.shp(unary_union(ls), p0, p0 + 0.035)
-    em.shp(_ellipse(cx, cz + d * 0.04 * sc, 0.035 * sc, 0.05 * sc),
-           p0 + 0.035, p0 + 0.06, em.rl)
+    ds = []
+    n = 9
+    for i in range(n + 1):
+        t = i / float(n)
+        th = math.radians(rot) + sg * t * 2 * math.pi * turns
+        r = R * (1.0 - 0.78 * t)
+        rho = R * (0.17 - 0.09 * t)
+        ds.append(Point(cx + r * math.cos(th), cz + r * math.sin(th))
+                  .buffer(rho, 2))
+    return unary_union(ds)
+
+
+def _curl(em, cx, cz, r, sg, p0, rot=90.0):
+    em.shp(_spiral(cx, cz, r, sg, rot), p0, p0 + 0.04)
+    from shapely.geometry import Point
+    em.shp(Point(cx, cz).buffer(r * 0.2, 3), p0 + 0.04, p0 + 0.06)
 
 
 def _wing(em, cx, cz, sc, sg, p0):
-    """A leaf scroll reaching out sideways from (cx, cz)."""
-    em.shp(_curl(cx + sg * 0.27 * sc, cz + 0.02 * sc, 0.075 * sc), p0,
-           p0 + 0.04)
-    em.shp(_ellipse(cx + sg * 0.14 * sc, cz - 0.01 * sc, 0.15 * sc,
-                    0.028 * sc), p0, p0 + 0.035)
-    em.shp(_ellipse(cx + sg * 0.17 * sc, cz + 0.07 * sc, 0.10 * sc,
-                    0.03 * sc, sg * 32), p0, p0 + 0.035)
-    em.shp(_ellipse(cx + sg * 0.15 * sc, cz - 0.07 * sc, 0.10 * sc,
-                    0.03 * sc, -sg * 30), p0, p0 + 0.035)
+    """A leaf scroll reaching out sideways from (cx, cz): a stem ending in a
+    volute with leaves along it."""
+    _curl(em, cx + sg * 0.30 * sc, cz + 0.02 * sc, 0.10 * sc, -sg, p0, 90.0)
+    em.shp(_ellipse(cx + sg * 0.12 * sc, cz - 0.01 * sc, 0.13 * sc,
+                    0.03 * sc, -sg * 6), p0, p0 + 0.04)
+    _leaf(em, cx + sg * 0.05 * sc, cz + 0.0, 0.2 * sc, 0.07 * sc,
+          90 - sg * 55, p0, 0.04)
+    _leaf(em, cx + sg * 0.10 * sc, cz - 0.01, 0.17 * sc, 0.06 * sc,
+          270 + sg * 58, p0, 0.04)
 
 
 def _cartouche(em, cx, cz, sc, p0):
-    """An oval shield with a rosette, leaf scrolls either side and a leaf
-    fan over it."""
+    """An oval shield with a rosette, leaf scrolls either side and a
+    palmette over it."""
     em.shp(_ellipse(cx, cz, 0.16 * sc, 0.12 * sc), p0, p0 + 0.05)
-    em.shp(_ellipse(cx, cz, 0.105 * sc, 0.075 * sc), p0 + 0.05, p0 + 0.075,
+    em.shp(_ellipse(cx, cz, 0.12 * sc, 0.085 * sc), p0 + 0.05, p0 + 0.08,
            em.sh)
-    em.shp(_rosette(cx, cz, 0.055 * sc), p0 + 0.075, p0 + 0.095, em.rl)
+    _rose(em, cx, cz, 0.065 * sc, p0 + 0.08, 0.045)
     for sg in (-1, 1):
-        _wing(em, cx + sg * 0.12 * sc, cz, sc * 0.8, sg, p0)
-    _acanthus(em, cx, cz + 0.1 * sc, 0.7 * sc, p0)
+        _wing(em, cx + sg * 0.12 * sc, cz, sc * 0.85, sg, p0)
+    _acanthus(em, cx, cz + 0.1 * sc, 0.75 * sc, p0)
 
 
 def _bracket(em, s, zt, h, w, d):
@@ -273,7 +287,7 @@ def _bracket(em, s, zt, h, w, d):
     em.shp(Polygon([(s - w * 0.36, zt - 0.03), (s + w * 0.36, zt - 0.03),
                     (s + w * 0.12, zt - h * 0.92),
                     (s - w * 0.12, zt - h * 0.92)]), d, d + 0.03, em.sh)
-    em.shp(_curl(s, zt - h * 0.8, w * 0.17), d + 0.03, d + 0.06)
+    _curl(em, s, zt - h * 0.78, w * 0.2, 1, d + 0.03)
     _acanthus(em, s, zt - 0.05, h * 1.5, d + 0.03, up=False)
 
 
@@ -310,7 +324,7 @@ def _pilaster(em, s_in, sg, pw, z0, z1, rich):
         for i in range(n):
             zc = zs0 + 0.1 + (i + 0.5) * (zs1 - zs0 - 0.2) / n
             if i % 3 == 1:
-                em.shp(_rosette(sm, zc, pw * 0.2), 0.10, 0.13, em.rl)
+                _rose(em, sm, zc, pw * 0.24, 0.10, 0.04)
             else:
                 em.shp(_ellipse(sm, zc, pw * 0.09, pw * 0.2), 0.10, 0.13,
                        em.rl)
@@ -319,8 +333,8 @@ def _pilaster(em, s_in, sg, pw, z0, z1, rich):
     em.box(s0 - 0.07, s1 + 0.07, 0, 0.19, z1 - 0.05, z1)
     _acanthus(em, sm, z1 - ch * 0.95, max(0.8, pw * 2.4), 0.16)
     if rich:
-        for x in (s0 + 0.03, s1 - 0.03):
-            em.shp(_curl(x, z1 - 0.1, 0.055), 0.16, 0.2)
+        for x, sg in ((s0 + 0.05, 1), (s1 - 0.05, -1)):
+            _curl(em, x, z1 - 0.11, 0.065, sg, 0.16)
 
 
 def _order_faces(fc, op, kind, cols, g0):
@@ -372,7 +386,7 @@ def _order_faces(fc, op, kind, cols, g0):
                     q = p.interpolate((i + 0.5) * p.length / m)
                     if abs(q.x - smid) < 0.2:
                         continue
-                    em.shp(_rosette(q.x, q.y, pw * 0.2), 0.08, 0.115, em.rl)
+                    _rose(em, q.x, q.y, pw * 0.26, 0.08, 0.04)
                     k += 1
         kt = zb + g0 + aw + 0.18
         kw = 0.09 + 0.04 * w
@@ -380,7 +394,7 @@ def _order_faces(fc, op, kind, cols, g0):
                         (smid + kw * 0.9, zb + g0 + 0.02),
                         (smid + kw * 1.3, kt), (smid - kw * 1.3, kt)]), 0,
                0.17)
-        em.shp(_rosette(smid, kt - 0.17, kw * 0.75), 0.17, 0.2, em.rl)
+        _rose(em, smid, kt - 0.17, kw * 0.8, 0.17, 0.04)
         em.box(smid - kw * 1.55, smid + kw * 1.55, 0, 0.19, kt, kt + 0.06)
         z_top = kt + 0.06
         if rich:
@@ -405,8 +419,7 @@ def _order_faces(fc, op, kind, cols, g0):
         k = 0
         while x < half and k < 5:
             for sg in (-1, 1):
-                em.shp(_rosette(smid + sg * x, zfm, fh * 0.2), 0.05, 0.085,
-                       em.rl)
+                _rose(em, smid + sg * x, zfm, fh * 0.26, 0.05, 0.04)
             x += 0.36
             k += 1
         _cornice(em, sl - pw, sr + pw, z_pt, 0.24, 0.22, dentils=True)
@@ -432,7 +445,7 @@ def _order_faces(fc, op, kind, cols, g0):
         if rich and (sr - sl) > 0.9:
             _cartouche(em, smid, zam, min(ah / 0.30, 1.1), 0.085)
         elif (sr - sl) > 0.9:
-            em.shp(_rosette(smid, zam, ah * 0.28), 0.085, 0.115, em.rl)
+            _rose(em, smid, zam, ah * 0.3, 0.085, 0.04)
         if z_pb - 0.34 > gnd + 0.05:
             for sx in (sl - pw / 2, sr + pw / 2):
                 _bracket(em, sx, z_pb, 0.32, pw * 0.95, 0.16)
@@ -496,11 +509,10 @@ def carving_faces(doc, fcs, look, trim, stone, accent) -> list:
     cols = (base, tuple(max(0.0, min(1.0, v * 0.9)) for v in base[:3]) + (1.0,),
             accent if ck != "accent" else tuple(
                 max(0.0, min(1.0, v * 0.85)) for v in base[:3]) + (1.0,))
-    if kind in ("classic", "pilaster", "baroque"):
-        # stone carving reads in the stone's own tone, a shade deeper
-        cols = (base, tuple(max(0.0, min(1.0, v * 0.93)) for v in base[:3])
-                + (1.0,), tuple(max(0.0, min(1.0, v * 0.84))
-                                for v in base[:3]) + (1.0,))
+    # stone carving reads in the stone's own tone, a shade deeper
+    cols = (base, tuple(max(0.0, min(1.0, v * 0.93)) for v in base[:3])
+            + (1.0,), tuple(max(0.0, min(1.0, v * 0.84)) for v in base[:3])
+            + (1.0,))
     out, budget = [], MAX_FACES
     for fc in fcs:
         if where == "front" and not fc.get("front"):
