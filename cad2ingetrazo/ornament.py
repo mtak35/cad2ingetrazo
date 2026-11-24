@@ -263,8 +263,13 @@ def _surround(w, o, z0, poly, trim, stone, door=False) -> list:
     zs = z0 + float(o.get("sill", 0.0) or 0.0)
     zt = zs + float(o["h"])
     arched = o.get("head") == "arch"
-    r = wd / 2
-    zspr = zt - r if arched else zt
+    # 3.64.123: the arch as the window is drawn (its rise and shape), not
+    # always a semicircle — the ring sits on the frame's own edge
+    from .engine import structure as S_
+    rise = min(S_.head_size(o), zt - zs - 0.05) if arched else 0.0
+    if arched and rise <= 0.02:
+        arched = False
+    zspr = zt - rise if arched else zt
     out = []
     sw = SURR_W * (1.6 if door else 1.0)
     # jambs
@@ -272,13 +277,15 @@ def _surround(w, o, z0, poly, trim, stone, door=False) -> list:
     out += _box(p0, u, nl, s1, s1 + sw, a0, a1, zs, zspr, trim)
     if arched:
         cx = float(o["pos"])
-        inner = _arc_pts(cx, zspr, r)
-        outer = _arc_pts(cx, zspr, r + sw)
-        for (x0_, z0_), (x1_, z1_), (X0, Z0), (X1, Z1) in zip(
-                inner, inner[1:], outer, outer[1:]):
-            # a voussoir: the quad between the two arcs, given depth
-            quad = [(x0_, z0_), (x1_, z1_), (X1, Z1), (X0, Z0)]
-            out += _prism(p0, u, nl, quad, a0, a1, trim)
+        sty = o.get("arch") or "semi"
+        inner = S_.arch_pts(s0, s1, zspr, zt, 16, sty)
+        outer = S_.arch_pts(s0 - sw, s1 + sw, zspr, zt + sw, 16, sty)
+        if len(inner) == len(outer) and len(inner) >= 3:
+            for (x0_, z0_), (x1_, z1_), (X0, Z0), (X1, Z1) in zip(
+                    inner, inner[1:], outer, outer[1:]):
+                # a voussoir: the quad between the two arcs, given depth
+                quad = [(x0_, z0_), (x1_, z1_), (X1, Z1), (X0, Z0)]
+                out += _prism(p0, u, nl, quad, a0, a1, trim)
         # the keystone
         out += _box(p0, u, nl, cx - 0.09, cx + 0.09, a0 - 0.02, a1 + 0.02,
                     zt - 0.02, zt + sw + 0.10, stone)

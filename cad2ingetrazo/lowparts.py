@@ -590,10 +590,23 @@ def _ring_faces(w, o, z0):
     step = 1 if m <= 24 else 2
     blocks = [(i, min(i + step, m - 1)) for i in range(0, m - 1, step)]
     th = 0.025
+    polys = []
     for bi, (i, j) in enumerate(blocks):
         poly = Polygon(inner[i:j + 1] + list(reversed(outer[i:j + 1])))
         if not poly.is_valid:
             poly = poly.buffer(0)
+        polys.append((bi, poly))
+    # 3.64.123: the jambs — the ring runs on down both sides of the opening
+    # (the same width, in stones) to its sill / the floor, so the edge of
+    # the window is framed the whole way round, as on the front
+    nb = max(1, int(round((zsp - zs) / 0.34))) if zsp - zs > 0.05 else 0
+    for sx0, sx1 in ((s0 - rw, s0), (s1, s1 + rw)):
+        for q in range(nb):
+            ya = zs + (zsp - zs) * q / nb
+            yb = zs + (zsp - zs) * (q + 1) / nb
+            polys.append((len(blocks) + q, Polygon(
+                [(sx0, ya), (sx1, ya), (sx1, yb), (sx0, yb)])))
+    for bi, poly in polys:
         if poly.is_empty or poly.area < 1e-5:
             continue
         col = (dark if bi % 2 else light) if ablaq else light
