@@ -581,6 +581,169 @@ def _pilasters(doc, fcs, trim) -> list:
     return out
 
 
+# ---- 3.64.128: the crown over the main entrance -------------------------------------
+CROWNS = [("none", "None"),
+          ("stepped", "Stepped cornice block with a medallion"),
+          ("arch", "Arched pediment with a keystone"),
+          ("triangle", "Triangular pediment (dentils, acroteria)"),
+          ("segmental", "Curved pediment with a medallion")]
+
+
+def _entrance_crown(doc, fcs, kind, trim, stone, accent) -> list:
+    """A crown standing on the top of the wall over the main entrance (the
+    highest level's front wall at the door): ``kind`` of CROWNS."""
+    if kind in (None, "", "none"):
+        return []
+    import math as _m
+
+    from shapely.geometry import Point, Polygon
+    from shapely import affinity
+    from .engine import structure as S_
+    fc0, op = _main_door(doc, fcs)
+    if fc0 is None:
+        return []
+    f0 = fc0["f"]
+    s0 = (op[0] + op[1]) / 2
+    cx, cy = f0.P(s0, 0.0, 0.0)[:2]
+    best = None
+    for fc in fcs:
+        f = fc["f"]
+        if f.n[0] * f0.n[0] + f.n[1] * f0.n[1] < 0.85:
+            continue
+        sp = (cx - f.p[0]) * f.u[0] + (cy - f.p[1]) * f.u[1]
+        pp = (cx - f.p[0]) * f.n[0] + (cy - f.p[1]) * f.n[1]
+        if not (0.3 <= sp <= fc["L"] - 0.3) or abs(pp) > 6.0:
+            continue
+        key = (fc["z1"], -abs(pp))
+        if best is None or key > best[0]:
+            best = (key, fc, sp)
+    if best is None:
+        fc, sp = fc0, s0
+    else:
+        _k, fc, sp = best
+    f, face, L = fc["f"], fc["face"], fc["L"]
+    Wc = min(max((op[1] - op[0]) + 2.6, 3.4), 7.0, L - 0.4)
+    hw = Wc / 2
+    s = min(max(sp, hw + 0.1), L - hw - 0.1)
+    zb = fc["z1"]
+    a0 = face - 0.05
+    shade = _shade(trim, 0.92)
+    out = []
+
+    def box(x0, x1, p1, z0, z1, col=trim):
+        return f.box(x0, x1, a0, face + p1, zb + z0, zb + z1, col)
+
+    def shape(poly, p0, p1, col):
+        return f.holed(poly, face + p0, face + p1, col)
+
+    def disc(cs, cz, r, p0, p1, col):
+        c = Point(s + cs, zb + cz).buffer(r, 24)
+        return shape(c, p0, p1, col)
+
+    def medallion(cz, r):
+        o = []
+        ring = Point(s, zb + cz).buffer(r + 0.09, 24).difference(
+            Point(s, zb + cz).buffer(r + 0.01, 24))
+        o += shape(ring, 0.22, 0.30, trim)
+        o += disc(0, cz, r, 0.22, 0.31, accent)
+        o += disc(0, cz, r * 0.55, 0.31, 0.335, _shade(accent, 0.8))
+        for sg in (-1, 1):            # a leaf scroll on each side
+            for k, (dx, dz, rx) in enumerate(((0.62, 0.0, 0.32),
+                                              (0.98, 0.08, 0.20),
+                                              (1.26, -0.04, 0.13))):
+                lf = affinity.rotate(affinity.scale(
+                    Point(s + sg * (r + dx), zb + cz + dz).buffer(1.0, 12),
+                    rx, 0.055), sg * 12 * (k - 1), use_radians=False)
+                o += shape(lf, 0.22, 0.285, accent)
+        return o
+
+    if kind == "stepped":
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.30)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.30, 0.42)
+        out += box(s - hw + 0.05, s + hw - 0.05, 0.24, 0.42, 1.30)
+        out += f.box(s - hw + 0.28, s + hw - 0.28, face + 0.24, face + 0.265,
+                     zb + 0.60, zb + 1.12, shade)
+        out += medallion(0.86, 0.30)
+        out += box(s - hw - 0.14, s + hw + 0.14, 0.46, 1.30, 1.42)
+        out += box(s - hw - 0.06, s + hw + 0.06, 0.38, 1.42, 1.52)
+        for sg in (-1, 1):              # the corner piers and their caps
+            x = s + sg * (hw - 0.16)
+            out += box(x - 0.14, x + 0.14, 0.34, 1.52, 1.74)
+            out += box(x - 0.19, x + 0.19, 0.38, 1.74, 1.82)
+            out += box(x - 0.09, x + 0.09, 0.30, 1.82, 1.94)
+    elif kind == "arch":
+        rise = min(Wc * 0.26, 1.3)
+        zs_ = 0.55
+        out += box(s - hw - 0.12, s + hw + 0.12, 0.34, 0.0, 0.18)
+        ihw = hw - 0.75
+        for sg in (-1, 1):              # the returns the arch springs from
+            x0, x1 = (s - hw - 0.12, s - ihw) if sg < 0 else \
+                (s + ihw, s + hw + 0.12)
+            out += box(x0, x1, 0.34, 0.18, zs_)
+            out += box(x0 - 0.04, x1 + 0.04, 0.38, zs_, zs_ + 0.10)
+        out += f.box(s - ihw, s + ihw, a0, face + 0.10, zb + 0.18, zb + zs_,
+                     shade)
+        prev = S_.arch_pts(s - ihw, s + ihw, zb + zs_, zb + zs_ + rise, 20,
+                           "semi")
+        tym = Polygon(prev + [(s - ihw, zb + zs_)]).buffer(0)
+        out += shape(tym, 0.0, 0.10, shade)
+        out += medallion(zs_ + rise * 0.42, 0.26)
+        for k in range(3):              # three stepped rings, the widest
+            d = 0.13 * (k + 1)         # at the back
+            outer = S_.arch_pts(s - ihw - d, s + ihw + d, zb + zs_,
+                                zb + zs_ + rise + d, 20, "semi")
+            ring = Polygon(outer + list(reversed(prev))).buffer(0)
+            out += shape(ring, 0.0, 0.16 + 0.07 * (2 - k), trim)
+            prev = outer
+        zc = zb + zs_ + rise + 0.39
+        out += f.box(s - 0.20, s + 0.20, a0, face + 0.36, zc - 0.34,
+                     zc + 0.20, trim)
+        out += f.box(s - 0.28, s + 0.28, a0, face + 0.40, zc + 0.20,
+                     zc + 0.30, trim)
+    elif kind == "triangle":
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.25)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40)
+        nd = int((Wc - 0.2) / 0.2)
+        if nd <= 45:
+            for k in range(nd + 1):
+                x = s - hw + 0.1 + k * (Wc - 0.2) / max(nd, 1)
+                out += f.box(x - 0.04, x + 0.04, face + 0.04, face + 0.36,
+                             zb + 0.18, zb + 0.25, shade)
+        h = Wc * 0.20
+        out += f.plate([(s - hw - 0.10, zb + 0.40), (s + hw + 0.10, zb + 0.40),
+                        (s, zb + 0.40 + h)], a0, face + 0.30, trim)
+        k_ = 0.20
+        inner = [(s - hw + 0.28, zb + 0.46), (s + hw - 0.28, zb + 0.46),
+                 (s, zb + 0.40 + h - k_)]
+        out += f.plate(inner, face + 0.30, face + 0.325, shade)
+        out += disc(0, 0.40 + h * 0.36, 0.22, 0.325, 0.36, accent)
+        out += box(s - 0.14, s + 0.14, 0.34, 0.40 + h, 0.40 + h + 0.30)
+        for sg in (-1, 1):
+            out += box(s + sg * (hw + 0.10) - 0.12, s + sg * (hw + 0.10) + 0.12,
+                       0.34, 0.40, 0.66)
+    else:                                # segmental
+        out += box(s - hw, s + hw, 0.30, 0.0, 0.25)
+        out += box(s - hw - 0.10, s + hw + 0.10, 0.42, 0.25, 0.40)
+        rise = Wc * 0.15
+        top = S_.arch_pts(s - hw - 0.10, s + hw + 0.10, zb + 0.40,
+                          zb + 0.40 + rise, 20, "segmental")
+        mass = Polygon(top + [(s - hw - 0.10, zb + 0.40)]).buffer(0)
+        out += shape(mass, 0.0, 0.26, trim)
+        inn = S_.arch_pts(s - hw + 0.18, s + hw - 0.18, zb + 0.50,
+                          zb + 0.40 + rise - 0.16, 20, "segmental")
+        out += shape(Polygon(inn + [(s - hw + 0.18, zb + 0.50)]).buffer(0),
+                     0.26, 0.285, shade)
+        out += medallion(0.50 + rise * 0.45, 0.24)
+        rim_o = S_.arch_pts(s - hw - 0.22, s + hw + 0.22, zb + 0.40,
+                            zb + 0.40 + rise + 0.14, 20, "segmental")
+        out += shape(Polygon(rim_o + list(reversed(top))).buffer(0), 0.0,
+                     0.36, trim)
+        zc = zb + 0.40 + rise + 0.14
+        out += f.box(s - 0.20, s + 0.20, a0, face + 0.36, zc - 0.05, zc + 0.24,
+                     trim)
+    return out
+
+
 # ---- all of it ---------------------------------------------------------------------
 def faces(doc) -> list:
     look = doc.get("look") or {}
@@ -589,7 +752,7 @@ def faces(doc) -> list:
     keys = ("pediment", "deco_fins", "deco_bands", "deco_crown",
             "window_boxes", "half_timber", "gf_clad", "shutters", "siding",
             "eave_brackets", "brise_soleil", "sills_lintels", "jali",
-            "pilasters")
+            "pilasters", "entrance_crown")
     if not any(look.get(k) for k in keys):
         return []
     from .host import log_error
@@ -632,7 +795,10 @@ def faces(doc) -> list:
             ("jali", "Look jali screens",
              lambda: _jali(doc, fcs, _c4(accent))),
             ("pilasters", "Look pilasters",
-             lambda: _pilasters(doc, fcs, trim))):
+             lambda: _pilasters(doc, fcs, trim)),
+            ("entrance_crown", "Look entrance crown",
+             lambda: _entrance_crown(doc, fcs, look.get("entrance_crown"),
+                                     trim, stone, _c4(accent)))):
         if not look.get(key):
             continue
         try:

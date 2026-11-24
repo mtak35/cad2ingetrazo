@@ -336,6 +336,12 @@ class ElevationDesigner(QDialog):
         f2.addRow("… on", self.louver_where)
         self.louver_col = _combo(EP.COLOURS)
         f2.addRow("… colour ", self.louver_col)
+        from . import stylekit as SK_
+        self.crown = _combo(SK_.CROWNS)
+        self.crown.setToolTip("A crown on the roof line over the main "
+                              "entrance: stepped block, arched / triangular "
+                              "/ curved pediment")
+        f2.addRow("Entrance crown (roof)", self.crown)
         grid.addWidget(g2, 1, 0)
         # the check groups
         self.checks = {}
@@ -470,6 +476,7 @@ class ElevationDesigner(QDialog):
         _set(self.louver, k.get("louver", "none"))
         _set(self.louver_where, k.get("louver_where", "front"))
         _set(self.louver_col, k.get("louver_col", "timber"))
+        _set(self.crown, k.get("entrance_crown", "none"))
         for key, ch in self.checks.items():
             ch.setChecked(bool(k.get(key, LS.KIT_DEFAULT.get(key, True))))
         self._relevance()
@@ -530,6 +537,7 @@ class ElevationDesigner(QDialog):
              "louver": self.louver.currentData(),
              "louver_where": self.louver_where.currentData(),
              "louver_col": self.louver_col.currentData(),
+             "entrance_crown": self.crown.currentData(),
              "manual": True}
         for key in FIN_KEYS:
             k[key] = self.fin[key].currentData()

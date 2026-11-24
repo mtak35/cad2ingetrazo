@@ -541,6 +541,8 @@ KIT_DEFAULT = {
     # 3.64.119: pergolas over the terraces, louvers on the windows
     "pergola": "none", "pergola_h": 2.7, "pergola_col": "timber",
     "louver": "none", "louver_where": "front", "louver_col": "timber",
+    # 3.64.128: a crown over the main entrance
+    "entrance_crown": "none",
 }
 OFF = {k: False for k, v in KIT_DEFAULT.items() if isinstance(v, bool)}
 #: the presets the designer offers (the world's major elevation styles)
