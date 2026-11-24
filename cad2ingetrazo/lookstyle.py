@@ -145,6 +145,28 @@ def extend_rects(poly, rects, step=0.1, slack=0.08) -> list:
     return keep
 
 
+def fill_rects(poly, rects, min_side=0.55) -> list:
+    """3.64.125: the narrow strips of the roof boundary the big rectangles
+    leave (a block under 1 m wide) get a roof of their own, so the roof
+    covers the whole available space."""
+    try:
+        from shapely.geometry import box
+        from shapely.ops import unary_union
+        rest = poly.difference(unary_union([box(*r) for r in rects]).buffer(
+            0.02, join_style=2))
+        extra = []
+        for g in getattr(rest, "geoms", [rest]):
+            if g.geom_type != "Polygon" or g.area < 0.5:
+                continue
+            g = g.buffer(0.02, join_style=2)
+            if g.geom_type == "Polygon":
+                extra += rectangles(g, min_side=min_side)
+        return list(rects) + [r for r in extra if min(r[2] - r[0],
+                                                      r[3] - r[1]) >= min_side]
+    except Exception:  # noqa: BLE001
+        return list(rects)
+
+
 def rectangles(poly, min_side=MIN_SIDE) -> list:
     """An outline (shapely, square-cornered) split into few rectangles,
     the biggest first: [(x0, y0, x1, y1)] in the outline's own frame."""
@@ -249,6 +271,40 @@ def _frame_angle(walls) -> float:
     return math.radians(max(acc.items(), key=lambda kv: kv[1])[0])
 
 
+def roof_plan(arch, lid):
+    """3.64.125: the roof the CAD's roof plan draws over level ``lid`` — the
+    slab(s) of the level above when that level is a roof (no walls of its
+    own): its boundary is the cornice / parapet line the roof must cover.
+    A shapely shape or None."""
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        lvs = arch["levels"]
+        ids = [lv["id"] for lv in lvs]
+        if lid not in ids or ids.index(lid) + 1 >= len(ids):
+            return None
+        nxt = ids[ids.index(lid) + 1]
+        if sum(1 for w in arch["walls"] if w["level"] == nxt and "a" in w
+               and not w.get("rail")) >= 3:
+            return None                       # a real floor, not a roof
+        pg = []
+        for e in arch["structure"]:
+            if e.get("type") == "slab" and e["level"] == nxt and \
+                    not e.get("zone") and not e.get("roof") and \
+                    len(e.get("corners") or []) >= 3:
+                g = Polygon([tuple(p[:2]) for p in e["corners"]]).buffer(0)
+                if not g.is_empty:
+                    pg.append(g)
+        if not pg:
+            return None
+        u = unary_union(pg)
+        shells = [Polygon(g.exterior) for g in getattr(u, "geoms", [u])
+                  if g.geom_type == "Polygon" and g.area > 4.0]
+        return unary_union(shells) if shells else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _outline(arch, lid, roof=False):
     """The level's built outline: its outer walls' contour (railings
     left out), holes filled."""
@@ -270,6 +326,11 @@ def _outline(arch, lid, roof=False):
     if not shells:
         return None, ws
     out = unary_union(shells)
+    if roof:                 # 3.64.125: the roof plan's boundary, when drawn
+        rp = roof_plan(arch, lid)
+        if rp is not None and not rp.is_empty and rp.area > 0.5 * out.area \
+                and rp.intersection(out).area > 0.6 * rp.area:
+            out = rp
     try:                     # 3.64.117: a terrace / balcony the plan names
         if not roof:
             raise ValueError
@@ -413,7 +474,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []
     terr = terrace_union(arch, lid)
-    for x0, y0, x1, y1 in rectangles(p0):
+    for x0, y0, x1, y1 in fill_rects(p0, rectangles(p0)):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
             dx, dy = x - c.x, y - c.y
