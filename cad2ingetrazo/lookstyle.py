@@ -30,6 +30,9 @@ STYLES = {"auto": "Auto (from the picture)",
           "industrial": "Industrial (metal cladding, plain)"}
 EAVE = 0.6096                     # 2'-0" eaves
 SLOPE = 22.0
+# 3.64.125: roofs as in 3.64.115 — one hip roof per rectangle of the
+# available space (the one-piece roof of 3.64.123 is off)
+SKEL_ROOF = False
 MIN_SIDE = 1.0                    # a block narrower than this: no roof of its own
 
 
@@ -394,7 +397,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
     c = poly.centroid
     p0 = affinity.rotate(poly, -ang, origin=c, use_radians=True)
     p0 = p0.simplify(0.05)
-    if kind == "hip":
+    if kind == "hip" and SKEL_ROOF:
         try:                   # 3.64.123: one roof over the whole outline
             recs = [r_ for r_ in one_roof(arch, lid, p0, c, ang, slope, eave)
                     if not S.why_not(r_)]
@@ -410,7 +413,7 @@ def hip_roofs(doc, lid, slope=SLOPE, eave=EAVE, kind="hip") -> int:
         p0 = max(p0.geoms, key=lambda g: g.area)
     recs = []
     terr = terrace_union(arch, lid)
-    for x0, y0, x1, y1 in extend_rects(p0, rectangles(p0)):
+    for x0, y0, x1, y1 in rectangles(p0):
         cs = []
         for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
             dx, dy = x - c.x, y - c.y
