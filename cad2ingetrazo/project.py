@@ -3086,12 +3086,14 @@ def trim_wall_stubs(doc, lid, most=0.2) -> int:
         u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
         return a, u, (-u[1], u[0]), L
     for w in ws:
+        if math.dist(w["a"], w["b"]) < 1e-6:
+            continue                         # trimmed to nothing meanwhile
         a_w, u_w, _n, L_w = frame(w)
         for k in ("a", "b"):
             E = w[k]
             inward = u_w if k == "a" else (-u_w[0], -u_w[1])
             for o in ws:
-                if o is w:
+                if o is w or math.dist(o["a"], o["b"]) < 1e-6:
                     continue
                 a_o, u_o, n_o, L_o = frame(o)
                 c_ = inward[0] * n_o[0] + inward[1] * n_o[1]
@@ -12543,6 +12545,48 @@ def _steps_apart(pcs) -> list:
         return pcs
 
 
+def _ground_cuts(doc, lid) -> list:
+    """3.64.137: the lines the CAD draws on its steps layer that are no
+    flight of steps (the edges of a verandah, a kerb: 3 m and longer, not
+    among the step lines) — where one ground level meets another."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    how = doc["imports"].get(lid)
+    if not how or not how.get("file"):
+        return []
+    try:
+        raw_ = cadread.read(how["file"], how.get("unit"))
+        drawing = cadread.crop(raw_, how.get("region"))
+        base = cadread.base_point(drawing, how.get("base", "origin"),
+                                  (how.get("bx", 0.0), how.get("by", 0.0)))
+        pl = cadread.place(drawing, base, (how.get("ix", 0.0),
+                                           how.get("iy", 0.0)),
+                           how.get("rot", 0.0))
+        P, _f = layer_patterns(drawing, how, doc["settings"])
+        lay = pl["layers"]
+        pat = list(P.get("steps") or []) or ["*STEP*"]
+        used = []
+        for cs_ in cad_steps(doc, lid):
+            for ln_ in cs_.get("lines") or []:
+                used.append(ln_.buffer(0.08))
+        usedu = unary_union(used) if used else None
+        out = []
+        for s_ in pl["segs"]:
+            if not _match(lay[s_[4]], pat):
+                continue
+            ln = LineString([(s_[0], s_[1]), (s_[2], s_[3])])
+            if ln.length < 3.0:
+                continue
+            if usedu is not None and usedu.contains(ln):
+                continue
+            out.append(ln)
+        return out
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._ground_cuts")
+        return []
+
+
 def ground_zones(doc, lid, G, WP, R, elev) -> list:
     """3.64.137: the ground round the building at the levels its CAD plan
     notes (the garden «LEV+1'-0"», the verandah «LEV+1'-6"», the footpath
@@ -12593,20 +12637,47 @@ def ground_zones(doc, lid, G, WP, R, elev) -> list:
     if ground_only.is_empty:
         return []
     cells = []
-    if len(pts) >= 2:
-        try:
-            vd = voronoi_diagram(MultiPoint([(x, y) for x, y, _ in pts]),
+    # the CAD's own level edges (steps-layer lines that are no flight)
+    # cut the ground into parts; the notes share out each part
+    regions = [ground_only]
+    try:
+        cuts = _ground_cuts(doc, lid)
+        if cuts:
+            from shapely.affinity import scale as _sc
+            from shapely.ops import polygonize
+            ext = [_sc(c_, xfact=40.0, yfact=40.0, origin="center")
+                   if c_.length < 40 else c_ for c_ in cuts]
+            net = unary_union([ground_only.boundary] + ext)
+            parts = [p_ for p_ in polygonize(net)
+                     if p_.representative_point().within(ground_only)]
+            if parts:
+                regions = parts
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.ground_zones cuts")
+    for reg in regions:
+        inside = [(x, y, z) for x, y, z in pts
+                  if reg.buffer(0.3).contains(Point(x, y))]
+        if not inside:                       # the nearest note's level
+            x, y, z = min(pts, key=lambda t: reg.distance(Point(t[0], t[1])))
+            cells.append((reg, z))
+            continue
+        if len({round(z, 3) for _, _, z in inside}) == 1:
+            cells.append((reg, inside[0][2]))
+            continue
+        try:                                 # notes of several levels: shared
+            vd = voronoi_diagram(MultiPoint([(x, y) for x, y, _ in inside]),
                                  envelope=P.buffer(10.0))
             for cell in vd.geoms:
-                for x, y, z in pts:
+                for x, y, z in inside:
                     if cell.buffer(1e-6).contains(Point(x, y)):
-                        cells.append((cell, z))
+                        cp_ = cell.intersection(reg)
+                        if not cp_.is_empty:
+                            cells.append((cp_, z))
                         break
         except Exception:  # noqa: BLE001
-            cells = []
-    if not cells:
-        z = sorted(p_[2] for p_ in pts)[len(pts) // 2]
-        cells = [(P, z)]
+            cells.append((reg, sorted(p_[2] for p_ in inside)
+                          [len(inside) // 2]))
     out = []
     byz = {}
     for cell, z in cells:

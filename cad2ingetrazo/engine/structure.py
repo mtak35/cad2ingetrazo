@@ -477,6 +477,8 @@ def why_not(e: dict) -> str | None:
 
 
 def _area(pts) -> float:
+    if not pts:
+        return 0.0
     return 0.5 * sum(p[0] * q[1] - q[0] * p[1]
                      for p, q in zip(pts, list(pts[1:]) + [pts[0]]))
 
