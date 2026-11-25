@@ -3612,6 +3612,51 @@ def close_wall_corners(doc, lid, reach=0.45) -> int:
     return n
 
 
+def drop_unmatched_columns(doc, lid, pl, P, reach=0.6) -> int:
+    """3.64.143: a column the plan does not draw. Columns are the plan's
+    column-layer outlines, circles and hatch; one made from a filled box on
+    the wall layer, or a boundary pillar standing a storey high, with no
+    column geometry within `reach` of it, is taken out. The number."""
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    lay = pl["layers"]
+    pats = column_layers_for(P["columns"], level_floor_no(arch, lid))
+    geo = []
+    for s_ in pl["segs"]:
+        if _match(lay[s_[4]], pats):
+            geo.append(LineString([(s_[0], s_[1]), (s_[2], s_[3])]))
+    for ci in pl.get("circles", []):
+        if _match(ci["layer"], pats):
+            geo.append(Point(*ci["c"][:2]).buffer(max(ci["r"], 0.05)))
+    for lp in pl.get("loops", []):
+        try:
+            if _match(lp.get("layer", ""), pats) and len(lp["pts"]) >= 3:
+                geo.append(LineString(lp["pts"]))
+        except Exception:  # noqa: BLE001
+            pass
+    for lp in list(pl.get("fills", [])) + list(pl.get("arcs", [])):
+        try:
+            if _match(lp.get("layer", ""), pats) and lp.get("pts"):
+                geo.append(LineString(lp["pts"]) if len(lp["pts"]) >= 2
+                           else Point(*lp["pts"][0]))
+        except Exception:  # noqa: BLE001
+            pass
+    if not geo:
+        return 0
+    G = unary_union(geo)
+    drop = set()
+    for c in arch["structure"]:
+        if c["type"] != "column" or c["level"] != lid or c.get("user"):
+            continue
+        if G.distance(Point(c["x"], c["y"])) > reach:
+            drop.add(c["id"])
+    if drop:
+        arch["structure"] = [e for e in arch["structure"]
+                             if e.get("id") not in drop]
+    return len(drop)
+
+
 def drop_false_columns(doc, lid) -> int:
     """Columns read where there is none: a duct / shaft's crossed box (the
     column stands in the slab's hole) and a box drawn out in the open, off
@@ -6479,6 +6524,13 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.drop_false_columns")
+    try:                       # a column the plan does not draw
+        if st.get("drop_unmatched_columns", True):
+            rep["unmatched_columns"] = drop_unmatched_columns(
+                doc, lid, pl, P)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.drop_unmatched_columns")
     try:                       # railings carried on to what they meet
         rep["rail_gaps"] = close_rail_gaps(doc, lid)
     except Exception:  # noqa: BLE001
