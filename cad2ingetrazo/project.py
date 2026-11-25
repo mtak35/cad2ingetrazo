@@ -3068,6 +3068,76 @@ def join_angled_walls(doc, lid, reach=0.6) -> int:
     return n
 
 
+def trim_floor_teeth(doc, lid, width=1.2) -> int:
+    """3.64.139: a floor stops at its walls: the parts of its slabs outside
+    the walls / rooms that are narrower than ``width`` (the strips and
+    teeth round piers and column pockets) are cut off; a wide verandah,
+    porch or balcony slab stays. The number of slabs changed."""
+    from shapely.geometry import MultiPolygon, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    if not doc["settings"].get("trim_floor_teeth", True):
+        return 0
+    arch = doc["arch"]
+    walls = [w for w in arch["walls"] if w["level"] == lid
+             and not w.get("rail") and W.why_not(w) is None]
+    if not walls:
+        return 0
+    rooms = [r["poly"] for r in spaces.of_level(arch, lid)
+             if r.get("poly") is not None]
+    env = unary_union(SE.wall_polys(walls) + rooms).buffer(0.06)
+    if env.is_empty:
+        return 0
+    r_ = width / 2.0
+    n = 0
+    keep = []
+    for e in arch["structure"]:
+        if e["type"] != "slab" or e["level"] != lid or e.get("roof") or \
+                len(e.get("corners") or []) < 3:
+            keep.append(e)
+            continue
+        try:
+            p = Polygon([tuple(q[:2]) for q in e["corners"]]).buffer(0)
+            outside = p.difference(env)
+            if outside.is_empty:
+                keep.append(e)
+                continue
+            wide = outside.buffer(-r_).buffer(r_ + 0.02)
+            narrow = outside.difference(wide)
+            narrow = narrow.buffer(0.01) if not narrow.is_empty else narrow
+            q = p.difference(narrow).buffer(0)
+            if q.is_empty or q.area < 0.05 * p.area:
+                if e.get("zone"):
+                    n += 1
+                    continue                 # a zone strip outside: gone
+                keep.append(e)
+                continue
+            if abs(q.area - p.area) < 0.05:
+                keep.append(e)
+                continue
+            g = max(q.geoms, key=lambda g_: g_.area) \
+                if isinstance(q, MultiPolygon) else q
+            if e.get("zone") and (g.geom_type != "Polygon" or g.area < 1.0):
+                n += 1
+                continue             # a zone strip along a wall: gone
+            if g.geom_type != "Polygon" or g.area < 0.5 * p.area:
+                if not e.get("zone"):
+                    keep.append(e)
+                    continue
+            g = g.simplify(0.01)
+            e["corners"] = [[round(x, 4), round(y, 4)]
+                            for x, y in list(g.exterior.coords)[:-1]]
+            n += 1
+            keep.append(e)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.trim_floor_teeth")
+            keep.append(e)
+    arch["structure"] = keep
+    return n
+
+
 def trim_wall_stubs(doc, lid, most=0.2) -> int:
     """Clean wall junctions: a wall that runs through another and sticks
     out past its far face by a little (less than ``most``) — a stub the
@@ -3582,13 +3652,22 @@ def drop_false_columns(doc, lid) -> int:
         if c["type"] != "column" or c["level"] != lid or c.get("user"):
             continue
         P_ = Point(c["x"], c["y"])
-        if any(h.buffer(0.05).contains(P_) for h in holes):
+        try:
+            cpa_ = Polygon(S.column_outline(c, 0.0)).area
+        except Exception:  # noqa: BLE001
+            cpa_ = 0.0
+        # (3.64.140: a duct's / shaft's box — its hole no bigger than a
+        # few times the box; a pier standing in a stair's big opening, as
+        # the plan draws it, stays)
+        if any(h.buffer(0.05).contains(P_) and
+               (cpa_ <= 0.0 or h.area <= 6.0 * max(cpa_, 0.2))
+               for h in holes):
             drop.add(c["id"])              # in a duct / shaft
             continue
         if any(a_.contains(P_) for a_ in above):
             continue                       # it carries the floor above
-        if min(f.distance(P_) for f in floor) > 0.6 and \
-                not any(w.distance(P_) < 0.6 for w in walls) and \
+        if min(f.distance(P_) for f in floor) > 2.5 and \
+                not any(w.distance(P_) < 2.5 for w in walls) and \
                 (pline is None or pline.distance(P_) > 1.0):
             drop.add(c["id"])              # out in the open
     if drop:
@@ -4696,8 +4775,10 @@ def columns_from(pl, pats, lay) -> list:
                 g_ = _Pg(cs_).buffer(0)
                 if g_.geom_type != "Polygon" or not 0.05 <= g_.area <= 4.0:
                     continue
-                if g_.area < 0.8 * g_.minimum_rotated_rectangle.area:
-                    continue
+                if g_.area < 0.8 * g_.minimum_rotated_rectangle.area and not (
+                        len(cs_) >= 6 and math.dist(cs_[0], cs_[-1]) <= 0.3
+                        and g_.area <= 1.5):
+                    continue          # (3.64.140: an L pier drawn open)
                 if not any(sh.buffer(0.01).contains(g_.representative_point())
                            for sh in shapes):
                     shapes.append(g_)
@@ -6408,6 +6489,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.default_upstands")
+    try:                       # a floor stops at its walls
+        rep["floor_trimmed"] = trim_floor_teeth(doc, lid)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.trim_floor_teeth")
     return rep
 
 
