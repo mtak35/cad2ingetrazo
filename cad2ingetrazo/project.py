@@ -12984,6 +12984,28 @@ def platform_parts(doc) -> dict:
         except Exception:  # noqa: BLE001
             continue
     G = unary_union(gs) if gs else R
+    if over_base:      # 3.64.147: the basement's own ground is no garden
+        try:
+            bl_ = [e_ for e_ in arch["levels"] if e_.get("kind") == "basement"]
+            bb_ = []
+            for lv_b in bl_:
+                for e_ in arch["structure"]:
+                    if e_.get("type") == "slab" and e_["level"] == lv_b["id"] \
+                            and e_.get("corners"):
+                        bb_.append(Polygon(e_["corners"]).buffer(0))
+                bw_ = [w_ for w_ in arch["walls"] if w_["level"] == lv_b["id"]
+                       and not w_.get("rail") and "a" in w_]
+                if bw_:
+                    wu_ = unary_union(SE.wall_polys(bw_)).buffer(0.3) \
+                        .buffer(-0.3)
+                    for q_ in getattr(wu_, "geoms", [wu_]):
+                        if q_.geom_type == "Polygon" and q_.area > 4.0:
+                            bb_.append(Polygon(q_.exterior).buffer(0))
+            if bb_:
+                G = unary_union([G] + bb_)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.platform_parts basement footprint")
     WP = unary_union(SE.wall_polys(walls) + [
         SE._poly(e["corners"]) for e in arch["structure"]
         if e["type"] in ("column", "core") and e["level"] == lid
