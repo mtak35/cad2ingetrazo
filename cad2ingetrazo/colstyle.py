@@ -332,6 +332,25 @@ def faces(c, outline, z0, z1, style=None) -> list:
     H = max(z1 - z0, 0.5)
     D = min(w, d)
     out, shade = [], []
+    if c.get("shape") == "poly" and len(outline) > 4:
+        # 3.64.147: an L / T / C section keeps its own outline — its plinth
+        # and cap follow it (not the bounding box of the section)
+        try:
+            from shapely.geometry import Polygon as _PgC
+            pg = _PgC(outline).buffer(0)
+
+            def _ring(g):
+                g = max(g.geoms, key=lambda q: q.area) \
+                    if g.geom_type != "Polygon" else g
+                return list(g.exterior.coords)[:-1]
+            ph = min(0.2, 0.06 * H)
+            ch = min(0.2, 0.06 * H)
+            out += _solid(_ring(pg.buffer(0.06, join_style=2)), z0, z0 + ph)
+            out += _solid(list(outline), z0 + ph, z1 - ch)
+            out += _solid(_ring(pg.buffer(0.05, join_style=2)), z1 - ch, z1)
+            return [(out, WHITE), (shade, SHADE)]
+        except Exception:  # noqa: BLE001
+            pass
     if style in ORDERS:
         if c.get("shape") != "round":    # a pier / pilaster: its own section
             if c.get("shape") == "poly" and len(outline) == 4:
