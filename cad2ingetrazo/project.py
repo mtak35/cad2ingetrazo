@@ -12741,6 +12741,7 @@ def platform_parts(doc) -> dict:
     inner = G.intersection(R).difference(WP)
     outer = G.difference(R).difference(WP)
     zone = entrance_zone(doc, lid)        # the CAD steps' landing: level
+    lzone = zone                          # (3.64.138: the steps' own only)
     # the areas the CAD's level notes set (slab_zones): at their noted
     # level — no outside drop there
     try:
@@ -12895,21 +12896,25 @@ def platform_parts(doc) -> dict:
     # no slab reaches it: the platform carried out to it, at the floor's
     # finished level (the porch floor the main door opens onto)
     try:
-        if zone is not None and not zone.is_empty:
+        if lzone is not None and not lzone.is_empty:
             done_ = unary_union([pg_ for pg_, _t in out["pieces"]] +
                                 [G, WP]) if out["pieces"] else \
                 unary_union([G, WP])
             # (the top step's L / U and the walls close the porch round:
             # its hull, less the slab, walls and rooms)
-            zb_ = zone.buffer(0.3)
+            zb_ = lzone.buffer(0.3)
             # (3.64.32: its bounding rectangle, not its hull — an L of
             # steps round a lobby left the lobby's far half cut off on the
             # diagonal, down at the walkway)
-            land_ = unary_union([zone.intersection(zg_)
+            land_ = unary_union([lzone.intersection(zg_)
                                  .minimum_rotated_rectangle
                                  for zg_ in getattr(zb_, "geoms", [zb_])
                                  ]).difference(
                 unary_union([done_, R]).buffer(0.005))
+            # 3.64.138: a landing only where the steps' own zone is (within
+            # 2.5 m of it) — the rectangle of a long, thin zone had run
+            # over the garden beyond the plot
+            land_ = land_.intersection(lzone.buffer(2.5))
             for qg in getattr(land_, "geoms", [land_]):
                 if qg.geom_type != "Polygon" or qg.area < 0.05:
                     continue
@@ -12979,7 +12984,7 @@ def platform_parts(doc) -> dict:
             if surf - foot_z < 0.05:
                 foot_z = zg
             try:            # 3.64.6: landing on the walkway, not under it
-                if st.get("walkways", True):
+                if st.get("walkways", True) and not gzones:
                     foot_z = max(foot_z, min(walk_top(doc), surf - 0.1))
             except Exception:  # noqa: BLE001
                 pass
@@ -13285,7 +13290,8 @@ def platform_parts(doc) -> dict:
     # 3.64.6: the walkways — the plot's hard ground round the building
     # (not the lawns, not the drive) paved above the landscape level
     try:
-        _walkways(doc, out, lid, zg, fin, G, WP, R)
+        if not gzones:          # 3.64.138: the plan's notes set the ground
+            _walkways(doc, out, lid, zg, fin, G, WP, R)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.platform_parts walkways")
