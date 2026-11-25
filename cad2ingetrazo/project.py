@@ -12543,6 +12543,82 @@ def _steps_apart(pcs) -> list:
         return pcs
 
 
+def ground_zones(doc, lid, G, WP, R, elev) -> list:
+    """3.64.137: the ground round the building at the levels its CAD plan
+    notes (the garden «LEV+1'-0"», the verandah «LEV+1'-6"», the footpath
+    «LEV+0'-9"»…): each note's area is the ground nearest it (shared out
+    between the notes), inside the plot, outside the building. Returns
+    [(polygon, top z)] — the steps then land on the level the plan notes,
+    not on the road."""
+    from shapely.geometry import MultiPoint, Point, Polygon
+    from shapely.ops import unary_union, voronoi_diagram
+    try:
+        notes = note_levels(doc, lid)
+    except Exception:  # noqa: BLE001
+        return []
+    plot = doc["arch"].get("plot")
+    if not notes:
+        return []
+    from shapely.geometry import box
+    if plot:
+        from .engine import plotgeo
+        P = Polygon(plotgeo.clean(plot["corners"])).buffer(0)
+    else:                      # no plot drawn: the notes' and building's box
+        bb_ = unary_union([G, WP, R] + [Point(x, y) for x, y, _ in notes]
+                          ).bounds
+        P = box(bb_[0] - 1.0, bb_[1] - 1.0, bb_[2] + 1.0, bb_[3] + 1.0)
+    if P.is_empty:
+        return []
+    zg = plot_top(doc)
+    bld = unary_union([G, WP, R]).buffer(0.25)
+    pts = []
+    for x, y, v in notes:
+        z = float(v)
+        if not (zg + 0.05 <= z <= elev - 0.35):
+            continue                       # the floor's, a step's, a rise
+        q = Point(x, y)
+        if bld.contains(q) or not P.buffer(1.0).contains(q):
+            continue
+        pts.append((x, y, z))
+    if not pts:
+        return []
+    # one note a place: notes within 1 m of each other at one level count once
+    uniq = []
+    for x, y, z in pts:
+        if not any(abs(z - z2) < 1e-3 and math.hypot(x - x2, y - y2) < 1.0
+                   for x2, y2, z2 in uniq):
+            uniq.append((x, y, z))
+    pts = uniq
+    ground_only = P.difference(bld)
+    if ground_only.is_empty:
+        return []
+    cells = []
+    if len(pts) >= 2:
+        try:
+            vd = voronoi_diagram(MultiPoint([(x, y) for x, y, _ in pts]),
+                                 envelope=P.buffer(10.0))
+            for cell in vd.geoms:
+                for x, y, z in pts:
+                    if cell.buffer(1e-6).contains(Point(x, y)):
+                        cells.append((cell, z))
+                        break
+        except Exception:  # noqa: BLE001
+            cells = []
+    if not cells:
+        z = sorted(p_[2] for p_ in pts)[len(pts) // 2]
+        cells = [(P, z)]
+    out = []
+    byz = {}
+    for cell, z in cells:
+        byz.setdefault(round(z, 3), []).append(cell)
+    for z, cs in byz.items():
+        zone = unary_union(cs).intersection(ground_only)
+        for g in getattr(zone, "geoms", [zone]):
+            if g.geom_type == "Polygon" and g.area >= 0.5:
+                out.append((g, z))
+    return out
+
+
 def platform_parts(doc) -> dict:
     """The foundation platform under the ground floor (slabs as floors, no
     ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
@@ -12793,6 +12869,16 @@ def platform_parts(doc) -> dict:
         if p_.get("v") is not None:
             lplats.append((pg_, elev + float(p_["v"])))
 
+    gzones = []                  # 3.64.137: the ground at its noted levels
+    if st.get("ground_zones", True):
+        try:
+            gzones = ground_zones(doc, lid, G, WP, R, elev)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.ground_zones")
+        for gp_, gz_ in gzones:
+            out["pieces"].append((gp_, gz_))
+
     def surf_at(x, y):
         """The finished floor's top at (x, y): the floor (its zone), the
         outside part lower by the drop unless the CAD sets it, a platform
@@ -12800,6 +12886,9 @@ def platform_parts(doc) -> dict:
         q = Point(x, y)
         if not Gb.contains(q):
             for pg_, top_ in lplats:
+                if pg_.buffer(0.02).contains(q):
+                    return top_
+            for pg_, top_ in gzones:
                 if pg_.buffer(0.02).contains(q):
                     return top_
             return zg
@@ -12840,6 +12929,17 @@ def platform_parts(doc) -> dict:
                 if pz_:
                     foot_z = zg + max(lh_ - fin, 0.02) + fin
                     fu_ = fu_.difference(unary_union(pz_).buffer(0.01))
+                # 3.64.137: the steps land on the ground level the plan
+                # notes there (the verandah +1'-6"): as many risers as the
+                # plan draws between the floor and that level
+                if gzones and fu_ is not None and not pz_:
+                    zs_ = [surf_at(q_.x, q_.y) for q_ in _samples(fu_)]
+                    zs_ = [z_ for z_ in zs_ if zg + 0.01 < z_ < surf - 0.05]
+                    if zs_:
+                        foot_z = max(set(round(z_, 3) for z_ in zs_),
+                                     key=lambda v_: sum(
+                                         1 for z_ in zs_
+                                         if abs(z_ - v_) < 1e-3))
                 if fu_ is not None and foot_z > zg + 0.01:
                     for k2_, (pg2_, t2_) in enumerate(out["pieces"]):
                         if pg2_.intersects(fu_) and t2_ < surf - 0.05 and \
@@ -12882,7 +12982,13 @@ def platform_parts(doc) -> dict:
                                join_style=2))
             zs_up = [surf_at(q.x, q.y) for q in _samples(up)] or [zg]
             zs_dn = [surf_at(q.x, q.y) for q in _samples(dn)] or [zg]
-            return st_, max(zs_up), min(zs_dn), top_poly
+            zb_ = min(zs_dn)
+            if gzones:      # 3.64.137: the level the plan notes at the foot
+                best_ = max(((dn.intersection(pg_.buffer(0.05)).area, z_)
+                             for pg_, z_ in gzones), default=(0, zg))
+                if best_[0] >= 0.1 * dn.area and best_[1] > zb_ + 0.01:
+                    zb_ = best_[1]
+            return st_, max(zs_up), zb_, top_poly
         st_, zt, zb, _tp = ends_z(ps)
         if len(ps) > 1:
             st2, zt2, zb2, _ = ends_z(list(reversed(ps)))
