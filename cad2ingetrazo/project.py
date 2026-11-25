@@ -12719,7 +12719,8 @@ def ground_zones(doc, lid, G, WP, R, elev) -> list:
                    for x2, y2, z2 in uniq):
             uniq.append((x, y, z))
     pts = uniq
-    ground_only = P.difference(bld)
+    # (3.64.142: right up to the walls — no gap between wall and ground)
+    ground_only = P.difference(unary_union([G, WP, R]).buffer(0.02))
     if ground_only.is_empty:
         return []
     cells = []
