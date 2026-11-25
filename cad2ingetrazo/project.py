@@ -3613,43 +3613,39 @@ def close_wall_corners(doc, lid, reach=0.45) -> int:
 
 
 def drop_unmatched_columns(doc, lid, pl, P, reach=0.6) -> int:
-    """3.64.143: a column the plan does not draw. Columns are the plan's
-    column-layer outlines, circles and hatch; one made from a filled box on
-    the wall layer, or a boundary pillar standing a storey high, with no
-    column geometry within `reach` of it, is taken out. The number."""
-    from shapely.geometry import LineString, Point
+    """3.64.143 / 3.64.146: a column the plan does not draw. The columns
+    the plan's column layers make (columns_from: outlines, L / T sections,
+    circles) are the only ones standing: a built column that does not lie
+    on one of them (a filled box on the wall layer in an L pier's notch, a
+    boundary pillar drawn a storey high) is taken out. The number."""
+    from shapely.geometry import Polygon
     from shapely.ops import unary_union
     arch = doc["arch"]
     lay = pl["layers"]
     pats = column_layers_for(P["columns"], level_floor_no(arch, lid))
-    geo = []
-    for s_ in pl["segs"]:
-        if _match(lay[s_[4]], pats):
-            geo.append(LineString([(s_[0], s_[1]), (s_[2], s_[3])]))
-    for ci in pl.get("circles", []):
-        if _match(ci["layer"], pats):
-            geo.append(Point(*ci["c"][:2]).buffer(max(ci["r"], 0.05)))
-    for lp in pl.get("loops", []):
-        try:
-            if _match(lp.get("layer", ""), pats) and len(lp["pts"]) >= 3:
-                geo.append(LineString(lp["pts"]))
-        except Exception:  # noqa: BLE001
-            pass
-    for lp in list(pl.get("fills", [])) + list(pl.get("arcs", [])):
-        try:
-            if _match(lp.get("layer", ""), pats) and lp.get("pts"):
-                geo.append(LineString(lp["pts"]) if len(lp["pts"]) >= 2
-                           else Point(*lp["pts"][0]))
-        except Exception:  # noqa: BLE001
-            pass
-    if not geo:
+    cad = columns_from(pl, pats, lay)
+    if not cad:
         return 0
-    G = unary_union(geo)
+    polys = []
+    for c in cad:
+        try:
+            polys.append(Polygon(S.column_outline(c, 0.0)).buffer(0))
+        except Exception:  # noqa: BLE001
+            continue
+    if not polys:
+        return 0
+    G = unary_union(polys).buffer(0.03)
     drop = set()
     for c in arch["structure"]:
         if c["type"] != "column" or c["level"] != lid or c.get("user"):
             continue
-        if G.distance(Point(c["x"], c["y"])) > reach:
+        try:
+            p = Polygon(S.column_outline(c, 0.0)).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if p.is_empty or p.area < 1e-6:
+            continue
+        if p.intersection(G).area < 0.4 * p.area:
             drop.add(c["id"])
     if drop:
         arch["structure"] = [e for e in arch["structure"]
@@ -4798,6 +4794,32 @@ def columns_from(pl, pats, lay) -> list:
              if _match(lay[s[4]], pats) and
              math.hypot(s[2] - s[0], s[3] - s[1]) > 1e-4]
     if lines:
+        # 3.64.146: an outline drawn open — an L pier whose last side stops
+        # a few cm short of the first (a gap up to 0.3 m between one
+        # line's end and the others): the gap closed before the outlines
+        # are taken, so the L / T section is found as one column
+        try:
+            from shapely.geometry import Point as _PtB
+            from shapely.ops import linemerge as _lmB, nearest_points
+            comps = [g_ for g_ in getattr(_lmB(unary_union(lines)),
+                                          "geoms", [_lmB(unary_union(lines))])
+                     if g_.geom_type == "LineString" and len(g_.coords) >= 2]
+            bridges = []
+            for ci_, g_ in enumerate(comps):
+                if g_.is_closed or g_.length > 12.0:
+                    continue
+                others = [h_ for cj_, h_ in enumerate(comps) if cj_ != ci_]
+                if not others:
+                    continue
+                OU = unary_union(others)
+                for e_ in (g_.coords[0], g_.coords[-1]):
+                    d_ = OU.distance(_PtB(e_))
+                    if 1e-6 < d_ <= 0.3:
+                        q_ = nearest_points(OU, _PtB(e_))[0]
+                        bridges.append(LineString([e_, (q_.x, q_.y)]))
+            lines = lines + bridges
+        except Exception:  # noqa: BLE001
+            pass
         try:
             for f in polygonize(unary_union(lines)):
                 if not any(sh.buffer(0.01).contains(f.representative_point())
@@ -14959,6 +14981,28 @@ def bwall_ring(drawing, patterns):
     return [tuple(c) for c in list(big.simplify(0.001).exterior.coords)[:-1]]
 
 
+def merge_pair_runs(runs, tol) -> list:
+    """3.64.146: [(points, closed)] — open runs lying side by side within
+    ``tol`` (a wall drawn with both faces) as the longer one only."""
+    from shapely.geometry import LineString, Point
+    ln = [LineString(list(r[0]) + ([r[0][0]] if r[1] else []))
+          for r in runs]
+    gone = set()
+    order = sorted(range(len(runs)), key=lambda i: -ln[i].length)
+    for ii, i in enumerate(order):
+        if i in gone or runs[i][1]:
+            continue
+        for j in order[ii + 1:]:
+            if j in gone or runs[j][1]:
+                continue
+            pj = list(ln[j].coords)
+            near = sum(1 for q in pj if ln[i].distance(Point(q)) <= tol)
+            mid = ln[j].interpolate(0.5, normalized=True)
+            if near >= 0.8 * len(pj) and ln[i].distance(mid) <= tol:
+                gone.add(j)
+    return [r for k, r in enumerate(runs) if k not in gone]
+
+
 def bwall_runs(drawing, patterns):
     """3.64.88 — the boundary wall in parts: the lines of the wall's CAD
     layer joined end to end into runs [(points, closed)] (drawing units).
@@ -15005,6 +15049,14 @@ def bwall_runs(drawing, patterns):
                    for q, _r in rings):
                 continue
         keep.append((r[0], r[1]))
+    # 3.64.146: a wall drawn with both faces as two open lines (a few cm
+    # to a third of a metre apart, side by side): ONE wall, not two
+    try:
+        keep = merge_pair_runs(keep, 0.35 / (float(drawing.get("unit") or 1.0)
+                                             or 1.0))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.bwall_runs pairs")
     return keep
 
 
@@ -15252,6 +15304,71 @@ def set_plot(doc, corners, front=None, dist=None, parts=None,
 
 _PORCH_RX = re.compile(r"PORCH|CAR\s*PORT|CARPORT|GARAGE|CAR\s*PARK|"
                        r"PARKING", re.I)
+
+
+def site_cad_fix(doc, force=False) -> dict:
+    """3.64.146: the boundary wall as the plan draws it. A wall drawn with
+    both faces (two lines side by side) is ONE wall, and each gap between
+    the wall's runs (2 – 8 m: the gates the plan leaves open, written
+    «GATE») gets a gate across it — not one gate in the middle of the
+    front side. Done once for a plan; ``force`` again."""
+    from . import site as SITE_
+    out = {"merged": 0, "gates": 0}
+    st = doc["settings"]
+    plot = doc["arch"].get("plot") or {}
+    walls = plot.get("walls") or []
+    if not walls or (st.get("site_cad_v") == 146 and not force):
+        return out
+    runs = [([tuple(q) for q in w.get("pts") or []], bool(w.get("closed")))
+            for w in walls if len(w.get("pts") or []) >= 2]
+    n0 = len(runs)
+    runs = merge_pair_runs(runs, 0.35)
+    out["merged"] = n0 - len(runs)
+    # the gaps between the runs' ends
+    ends = [(i, 0 if k == 0 else -1, r[0][0 if k == 0 else -1])
+            for i, r in enumerate(runs) if not r[1] for k in (0, 1)]
+    used, gaps = set(), []
+    for a in ends:
+        if (a[0], a[1]) in used:
+            continue
+        best = None
+        for b in ends:
+            if b[0] == a[0] or (b[0], b[1]) in used:
+                continue
+            d = math.dist(a[2], b[2])
+            if 2.0 <= d <= 8.0 and (best is None or d < best[0]):
+                best = (d, b)
+        if best:
+            b = best[1]
+            used.add((a[0], a[1]))
+            used.add((b[0], b[1]))
+            gaps.append((a[2], b[2]))
+    base_n = len(runs)
+    for p, q in gaps:
+        runs.append(([p, q], False))
+    plot["walls"] = [{"pts": [list(q) for q in pts], "closed": c}
+                     for pts, c in runs]
+    st["site_cad_v"] = 146
+    if gaps:
+        site = doc["site"]
+        wr = wall_runs(doc)
+        flat, real, offs = SITE_.flat_runs(wr)
+        gl = []
+        for k in range(len(gaps)):
+            # (the bridge runs are the last ones; wall_runs keeps order)
+            r_ = base_n + k
+            if r_ >= len(offs):
+                break
+            L = math.dist(*gaps[k])
+            w = max(L - 0.7, 1.2)
+            gl.append({"side": offs[r_], "pos": round(L / 2, 3),
+                       "w": round(w, 3), "kind": "double"})
+        if gl:
+            site["gates"] = gl
+            site["wall"] = True
+            st["auto_site_done"] = True
+            out["gates"] = len(gl)
+    return out
 
 
 def auto_site(doc, force=False) -> bool:
@@ -16148,6 +16265,26 @@ def _plot_groups(doc):
             fp = _outer_loop(pieces)
             if fp and len(fp) >= 3:
                 fps_.append(_PgF(fp).buffer(0))
+            else:           # no closed loop (walls not all meeting): the
+                try:        # walls' solid, its inner space filled
+                    from . import slabedges as _SEF
+                    wu_ = _uuF(_SEF.wall_polys(
+                        [w for w in walls if not w.get("rail")])
+                    ).buffer(0.3).buffer(-0.3)
+                    for q_ in getattr(wu_, "geoms", [wu_]):
+                        if q_.geom_type == "Polygon" and q_.area > 4.0:
+                            fps_.append(_PgF(q_.exterior).buffer(0))
+                except Exception:  # noqa: BLE001
+                    pass
+        # a basement's own floor slab / slabs (the ground opens over them)
+        for e_ in arch["structure"]:
+            if e_.get("type") == "slab" and e_.get("level") == low and \
+                    low != gid_ and e_.get("corners") and \
+                    not e_.get("zone"):
+                try:
+                    fps_.append(_PgF(e_["corners"]).buffer(0))
+                except Exception:  # noqa: BLE001
+                    pass
         if fps_:
             U_ = _uuF(fps_).buffer(0)
             inside_ = _PgF(pts).buffer(0)
@@ -17837,6 +17974,14 @@ def update_from_cad(doc, as_cad=False) -> list:
         from .host import log_error
         log_error("project.update_from_cad arrival slabs")
     recut_ramps(doc)
+    try:                      # 3.64.146: the wall as drawn, its gates
+        r_ = site_cad_fix(doc)
+        if r_["merged"] or r_["gates"]:
+            out.append(("Site", {"double wall lines joined": r_["merged"],
+                                 "gates from the plan's gaps": r_["gates"]}))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.site_cad_fix")
     try:                      # 3.64.76: the plot's boundary wall and gate
         if auto_site(doc):
             out.append(("Site", {"boundary wall and gate": True}))
