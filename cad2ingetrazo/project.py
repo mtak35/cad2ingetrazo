@@ -5238,6 +5238,33 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         raise
     except Exception:  # noqa: BLE001
         pass
+    # 3.64.135: a sheet that holds several floor plans taken whole is every
+    # plan on top of the others (the 1st floor with the ground, terrace and
+    # roof plans in it: 239 walls and 31 slabs) — the floor is picked
+    try:
+        if not how.get("region"):
+            k_ = float(raw.get("unit") or 0.0254)
+            tl_ = []
+            for t_ in raw.get("texts") or []:
+                tx_ = str(t_.get("text", "")).upper().strip()
+                if re.search(r"\b(FLOOR|ROOF|TERRACE|BASEMENT|GROUND|"
+                             r"PARKING|MEZZANINE|ATTIC)\b.*\bPLAN\b|"
+                             r"\bPLAN\b.*\b(FLOOR|ROOF|TERRACE|BASEMENT|"
+                             r"GROUND)\b", tx_):
+                    p_ = (float(t_["x"]) * k_, float(t_["y"]) * k_)
+                    if all(math.hypot(p_[0] - q_[0], p_[1] - q_[1]) > 15.0
+                           for q_, _ in tl_):
+                        tl_.append((p_, tx_))
+            if len(tl_) >= 2:
+                raise ValueError(
+                    "this drawing holds %d floor plans (%s) — taking it "
+                    "whole puts them on top of each other: use «Select "
+                    "floor on drawing…» and pick the plan of this floor"
+                    % (len(tl_), ", ".join(sorted(x_ for _, x_ in tl_))[:160]))
+    except ValueError:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     drawing = cadread.without_layers(drawing, [
         n for n, r in (how.get("layer_roles") or {}).items() if r == "off"])
     base = cadread.base_point(drawing, how.get("base", "origin"),
