@@ -13158,6 +13158,11 @@ def platform_parts(doc) -> dict:
                 ps, st_, zt, zb = list(reversed(ps)), st2, zt2, zb2
         n = len(ps)
         H = zt - zb
+        if H < 0.05 and gzones and n == 1 and zb > zg + 0.01 and \
+                abs(zt - zb) < 0.05:
+            # 3.64.141: both sides of the line are at one level the plan
+            # notes (a verandah's edge line): no step to make up
+            continue
         if H < 0.05:
             # nothing noted: up from the floor, a riser a line, the top at
             # the end nearer the walls
@@ -13166,6 +13171,21 @@ def platform_parts(doc) -> dict:
                 st_ = step_strips(ps, tread)
             H = n * rmax_
             zt = zb + H
+            # 3.64.141: …or up to the level the plan notes beside the top
+            # step (a pulpit / platform noted +5'-0"): as many risers as
+            # lines, each the same
+            try:
+                near_ = [(math.dist((x_, y_), (ps[0].interpolate(
+                    0.5, normalized=True).x, ps[0].interpolate(
+                    0.5, normalized=True).y)), z_)
+                    for x_, y_, z_ in note_levels(doc, lid)]
+                near_ = [(d_, z_) for d_, z_ in near_
+                         if d_ < 3.5 and zb + 0.05 < z_ + fin <= zb + 1.0]
+                if near_:
+                    zt = min(near_)[1] + fin
+                    H = zt - zb
+            except Exception:  # noqa: BLE001
+                pass
         r_ = H / n
         # the landing between the top step and the floor it climbs to (a
         # porch round the columns): at the top level
