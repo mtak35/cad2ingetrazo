@@ -6783,6 +6783,16 @@ def ground_slab_on(doc) -> bool:
                for lv in (doc.get("arch") or {}).get("levels") or [])
 
 
+def platform_outside_on(doc) -> bool:
+    """3.64.144: a basement under the ground floor switches the foundation
+    platform off (the floor stands on its slab) — but the ground OUTSIDE
+    it (the plan's noted levels, the entrance steps, the walks) is still
+    the plan's: the platform's outside parts are made all the same."""
+    st = doc.get("settings") or {}
+    return (not slab_on_top(doc) and bool(st.get("platform", True))
+            and ground_slab_on(doc) and not st.get("ground_slab", False))
+
+
 def platform_on(doc) -> bool:
     """The foundation platform under the ground floor: slabs as floors, the
     ground floor on the ground (no slab, no basement), the option on."""
@@ -12843,8 +12853,11 @@ def platform_parts(doc) -> dict:
     from .host import len_txt
     out = {"pieces": [], "steps": [], "ramps": [], "finish": [],
            "walks": [], "drives": []}
+    over_base = False
     if not platform_on(doc):
-        return out
+        if not platform_outside_on(doc):
+            return out
+        over_base = True            # 3.64.144: a basement below
     arch = doc["arch"]
     st = doc["settings"]
     gi = next((i for i, lv in enumerate(arch["levels"])
@@ -12879,6 +12892,9 @@ def platform_parts(doc) -> dict:
         return out
     inner = G.intersection(R).difference(WP)
     outer = G.difference(R).difference(WP)
+    if over_base:            # the slab over the basement is the floor there
+        inner = Polygon()
+        outer = Polygon()
     zone = entrance_zone(doc, lid)        # the CAD steps' landing: level
     lzone = zone                          # (3.64.138: the steps' own only)
     # the areas the CAD's level notes set (slab_zones): at their noted
@@ -12918,6 +12934,8 @@ def platform_parts(doc) -> dict:
                     0.08, join_style=2))
             peds = unary_union(pl_) if pl_ else Polygon()
     except Exception:  # noqa: BLE001
+        peds = Polygon()
+    if over_base:
         peds = Polygon()
     ped_done = False
     # 3.64.34 (his ask): the car porch at the landscape's level (its floor
