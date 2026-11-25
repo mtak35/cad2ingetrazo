@@ -5323,6 +5323,69 @@ def north_of(doc: dict) -> float:
                  or 0.0)
 
 
+def _align_shift(doc, lid, pl, P, reach=8.0):
+    """3.64.145: the shift (dx, dy) in metres that lays this floor's plan
+    over the floor below it — a part picked on a sheet is placed at its
+    own corner, so two floors of one building came out apart. The walls'
+    and columns' ends of the new plan voted against the other floor's:
+    the shift most of them agree on. (0, 0) when the plans already agree
+    or no shift is clear."""
+    import numpy as np
+    arch = doc["arch"]
+    order = [lv["id"] for lv in arch["levels"]]
+    if lid not in order:
+        return 0.0, 0.0
+    lv = arch["levels"][order.index(lid)]
+    if lv.get("kind") == "ground":
+        return 0.0, 0.0
+    i = order.index(lid)
+    cands = (order[:i][::-1] + order[i + 1:]) if lv.get("kind") != \
+        "basement" else order[i + 1:]
+    ref = None
+    for o in cands:
+        ws = [w for w in arch["walls"] if w["level"] == o and "a" in w
+              and not w.get("rail")]
+        if len(ws) >= 8:
+            ref = ws
+            break
+    if ref is None:
+        return 0.0, 0.0
+    A = np.array([p for w in ref for p in (w["a"][:2], w["b"][:2])])
+    lay = pl["layers"]
+    pts = []
+    for s_ in pl["segs"]:
+        if _match(lay[s_[4]], P["walls"]) or _match(lay[s_[4]], P["columns"]):
+            pts += [(s_[0], s_[1]), (s_[2], s_[3])]
+    if len(pts) < 8:
+        return 0.0, 0.0
+    B = np.array(pts)
+    rng = np.random.default_rng(1)
+    if len(A) > 700:
+        A = A[rng.choice(len(A), 700, replace=False)]
+    if len(B) > 700:
+        B = B[rng.choice(len(B), 700, replace=False)]
+    d = (A[None, :, :] - B[:, None, :]).reshape(-1, 2)
+    d = d[(np.abs(d[:, 0]) < reach) & (np.abs(d[:, 1]) < reach)]
+    if len(d) < 8:
+        return 0.0, 0.0
+    cell = 0.05
+    ij = np.round(d / cell).astype(int)
+    from collections import Counter
+    cnt = Counter(map(tuple, ij))
+
+    def at(a, b):                  # a cell and its neighbours
+        return sum(cnt.get((a + u, b + v), 0)
+                   for u in (-1, 0, 1) for v in (-1, 0, 1))
+    (bi, bj), _n = max(cnt.items(), key=lambda kv: kv[1])
+    best = at(bi, bj)
+    here = at(0, 0)
+    if best < 8 or here >= 0.7 * best or best < 1.5 * max(here, 1):
+        return 0.0, 0.0
+    sel = d[(np.abs(ij[:, 0] - bi) <= 1) & (np.abs(ij[:, 1] - bj) <= 1)]
+    dx, dy = float(np.median(sel[:, 0])), float(np.median(sel[:, 1]))
+    return round(dx, 3), round(dy, 3)
+
+
 def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     """Read ``path`` onto level ``lid`` in place of what an earlier import
     of it made: walls with their doors and windows, columns, beams, the
@@ -5402,6 +5465,21 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
                        how.get("rot", 0.0))
     lay = pl["layers"]
     P, roles_found = layer_patterns(drawing, how, st)
+    # 3.64.145: the plan laid over the floor below it (the same insertion
+    # point put two parts of a sheet apart)
+    align_ = (0.0, 0.0)
+    if st.get("align_floors", True) and not how.get("no_align"):
+        try:
+            align_ = _align_shift(doc, lid, pl, P)
+            if align_ != (0.0, 0.0):
+                how["ix"] = round(float(how.get("ix", 0.0)) + align_[0], 4)
+                how["iy"] = round(float(how.get("iy", 0.0)) + align_[1], 4)
+                pl = cadread.place(drawing, base, (how["ix"], how["iy"]),
+                                   how.get("rot", 0.0))
+                lay = pl["layers"]
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.align_shift")
     if how.get("roof"):     # 3.64.28: a roof plan's outline (its parapet)
         # is often drawn on the window layer — no windows on a roof
         P = dict(P, walls=list(P["walls"]) + list(P.get("windows") or []),
@@ -5419,7 +5497,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     rep = {"walls": 0, "openings": 0, "columns": 0, "beams": 0, "slab": 0,
            "holes": 0, "texts": 0, "rooms": 0, "skipped": [],
            "far_km": far / 1000.0, "unit_note": drawing["unit_note"],
-           "unit_k": drawing["unit"],
+           "unit_k": drawing["unit"], "aligned": list(align_),
            "layers": {n: 0 for n in lay}, "roles": roles_found}
     for s in pl["segs"]:
         rep["layers"][lay[s[4]]] += 1
@@ -14751,6 +14829,78 @@ def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
     return None
 
 
+def add_top_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
+                       height=3.0) -> str | None:
+    """3.64.145: a «Top Roof» level over the «Roof» level (the stair / lift
+    head-room's roof): a slab over the walls standing on the Roof level
+    (the head-room's), else over the Roof's own slab, and a parapet along
+    its edge. Made again when there is one already. None, or why not."""
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    old = next((lv for lv in arch["levels"] if lv["name"] == "Top Roof"),
+               None)
+    if old is not None:
+        i_ = old["id"]
+        ids_ = {w["id"] for w in arch["walls"] if w["level"] == i_}
+        arch["walls"] = [w for w in arch["walls"] if w["level"] != i_]
+        arch["openings"] = [o for o in arch["openings"]
+                            if o["wall"] not in ids_]
+        arch["structure"] = [e for e in arch["structure"]
+                             if e["level"] != i_]
+        arch["rooms"] = [r for r in arch["rooms"] if r["level"] != i_]
+        doc["texts"] = [t for t in doc.get("texts") or []
+                        if t["level"] != i_]
+        arch["levels"] = [lv for lv in arch["levels"] if lv["id"] != i_]
+        doc["imports"].pop(i_, None)
+        arch["levels"] = M.fix_levels(arch["levels"])
+    roof = next((lv for lv in arch["levels"] if lv["name"] == "Roof"), None)
+    if roof is None:
+        return "Make the Roof level first"
+    outline = None
+    ws = [w for w in arch["walls"] if w["level"] == roof["id"]
+          and not w.get("rail") and "a" in w
+          and not str(w.get("name", "")).startswith("Roof parapet")]
+    if ws:
+        outline = S.inside_walls(ws, _outer_loop)
+    if not outline:
+        sl = [e for e in arch["structure"] if e["type"] == "slab"
+              and e["level"] == roof["id"] and e.get("corners")]
+        if sl:
+            outline = max(sl, key=lambda e: Polygon(e["corners"]).area
+                          )["corners"]
+    if not outline:
+        return "Nothing on the Roof level to roof over"
+    before = {x["id"] for x in arch["levels"]}
+    arch["levels"] = M.add_floor(arch["levels"], height=height)
+    new = next(x for x in arch["levels"] if x["id"] not in before)
+    new["name"] = "Top Roof"
+    arch["levels"] = M.fix_levels(arch["levels"])
+    lid = new["id"]
+    rec = {"type": "slab", "level": lid, "corners": outline, "holes": [],
+           "t": slab_t, "offset": 0.0}
+    if S.why_not(rec) is None:
+        arch["structure"] += M.new_elements(arch["structure"], [rec])
+    if parapet_h > 0:
+        ring = Polygon(outline).buffer(-parapet_t / 2, join_style=2)
+        if ring.geom_type != "Polygon" and not ring.is_empty:
+            ring = max(ring.geoms, key=lambda g_: g_.area)
+        pts = list(ring.exterior.coords)[:-1] if not ring.is_empty else []
+        recs = [{"kind": "line", "a": [round(a[0], 4), round(a[1], 4)],
+                 "b": [round(b[0], 4), round(b[1], 4)], "t": parapet_t,
+                 "align": "centre", "side": 1, "height": parapet_h,
+                 "base": 0.0, "level": lid}
+                for a, b in zip(pts, pts[1:] + pts[:1])
+                if math.dist(a, b) > 0.05]
+        made_ = M.new_walls(arch["walls"], recs)
+        rk = doc["settings"].get("parapet_rail", "solid")
+        for k_, w_ in enumerate(made_, 1):
+            w_["name"] = f"Top roof parapet {k_}"
+            if rk and rk != "solid":
+                w_["rail"] = rk
+        arch["walls"] += made_
+    return None
+
+
 def _hill_low(doc) -> float:
     """The lower road's ground on a slope (3.64.66)."""
     try:
@@ -15980,15 +16130,39 @@ def _plot_groups(doc):
     pts = plotgeo.clean(plot["corners"])
     holes = []
     low = arch["levels"][0]["id"]
-    for lid in (low, next(lv["id"] for lv in arch["levels"]
-                          if lv["kind"] == "ground")):
-        walls = [w for w in arch["walls"] if w["level"] == lid]
-        if walls:
+    # 3.64.145: the ground plate is cut by EVERY footprint at or under the
+    # ground floor (the basement's, the ground floor's), merged — the
+    # plate no longer runs across a basement that reaches past the floor
+    # above (or stands apart from it)
+    try:
+        from shapely.geometry import Polygon as _PgF
+        from shapely.ops import unary_union as _uuF
+        gid_ = next(lv["id"] for lv in arch["levels"]
+                    if lv["kind"] == "ground")
+        fps_ = []
+        for lid in dict.fromkeys((low, gid_)):
+            walls = [w for w in arch["walls"] if w["level"] == lid]
+            if not walls:
+                continue
             pieces = [pc for pcs in W.plan(walls).values() for pc in pcs]
             fp = _outer_loop(pieces)
-            if fp and plotgeo.within(fp, pts, margin=0.0):
-                holes = [list(reversed(S._ccw([tuple(p) for p in fp])))]
-            break
+            if fp and len(fp) >= 3:
+                fps_.append(_PgF(fp).buffer(0))
+        if fps_:
+            U_ = _uuF(fps_).buffer(0)
+            inside_ = _PgF(pts).buffer(0)
+            for q in getattr(U_, "geoms", [U_]):
+                if q.geom_type != "Polygon" or q.area < 0.5:
+                    continue
+                q = q.intersection(inside_)
+                for q2 in getattr(q, "geoms", [q]):
+                    if q2.geom_type == "Polygon" and q2.area > 0.5:
+                        holes.append(list(reversed(S._ccw(
+                            [tuple(p) for p in
+                             list(q2.exterior.coords)[:-1]]))))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._plot_groups holes")
     out = []
     mesh = Mesh()
     # the excavations open the ground: the plate is the plot less the

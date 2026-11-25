@@ -33,7 +33,8 @@ NEW = "__new_above__"          # the level combo's «＋ next level» entry
 NEW_BELOW = "__new_below__"    # …«＋ basement»
 SITE_LV = "__site__"           # …«Site · ground»: plot, boundary, gates
 ROOF_NEW = "__roof__"          # …«＋ Roof level»
-VIRTUAL = (NEW, NEW_BELOW, FOUNDATION, SITE_LV, ROOF_NEW)
+TOP_ROOF_NEW = "__toproof__"   # …«＋ Top roof level» (over the Roof)
+VIRTUAL = (NEW, NEW_BELOW, FOUNDATION, SITE_LV, ROOF_NEW, TOP_ROOF_NEW)
 BLUE = "#2f6fdd"
 
 
@@ -690,7 +691,7 @@ class Panel(QWidget):
         lid = self.level_box.currentData()
         if lid == NEW:                 # not made yet: the top one stands in
             return self._top(doc)["id"], self._top(doc)
-        if lid in (ROOF_NEW,):
+        if lid in (ROOF_NEW, TOP_ROOF_NEW):
             return self._top(doc)["id"], self._top(doc)
         if lid == SITE_LV:
             g = next(lv for lv in doc["arch"]["levels"]
@@ -1772,6 +1773,8 @@ class Panel(QWidget):
             return "Site"
         if self.level_box.currentData() == ROOF_NEW:
             return "Roof level"
+        if self.level_box.currentData() == TOP_ROOF_NEW:
+            return "Top roof level"
         return self.level()[1]["name"]
 
     def _show_portion(self):
@@ -2051,6 +2054,9 @@ class Panel(QWidget):
                 e.setText(detect.as_patterns(found[k]))
 
     def _import(self):
+        if self.level_box.currentData() == TOP_ROOF_NEW:   # no file needed
+            self._top_roof_level()
+            return
         path = self.i_file.text().strip()
         if not path:
             self.flash("Pick a DXF / DWG first")
@@ -3528,7 +3534,8 @@ class Panel(QWidget):
     def _update_level_one(self):
         """3.64.116: the storey height typed, for the selected floor only."""
         if self.level_box.currentData() in (NEW, ROOF_NEW, NEW_BELOW,
-                                            FOUNDATION, SITE_LV):
+                                            FOUNDATION, SITE_LV,
+                                            TOP_ROOF_NEW):
             self.flash("Pick an existing floor at the top first")
             return
         doc = self.doc()
@@ -6632,6 +6639,20 @@ class Panel(QWidget):
         n_ = len(doc.get(key) or [])
         doc[key] = []
         self.commit(doc, f"{n_} {key} removed")
+
+    def _top_roof_level(self):
+        doc = self.doc()
+        why = PJ.add_top_roof_level(doc, self.rl_h.value(),
+                                    self.rl_t.value(),
+                                    self.s_slab_t.value())
+        if why:
+            self.flash(f"No top roof level — {why}")
+            return
+        if self.commit(doc, "Top roof level made over the Roof"):
+            top = next((lv["id"] for lv in self.doc()["arch"]["levels"]
+                        if lv["name"] == "Top Roof"), None)
+            if top:
+                self.level_box.setCurrentIndex(self.level_box.findData(top))
 
     def _roof_level(self):
         doc = self.doc()
@@ -12105,6 +12126,12 @@ class Panel(QWidget):
                 self.level_box.insertItem(
                     0, "＋ Roof level  (terrace, parapet)" if not roof
                     else "↻ Roof level  (make again)", ROOF_NEW)
+                if roof:       # (3.64.145: right after the Roof entry)
+                    self.level_box.insertItem(
+                        1, "＋ Top roof level  (over the Roof)"
+                        if not any(lv["name"] == "Top Roof"
+                                   for lv in doc["arch"]["levels"])
+                        else "↻ Top roof level  (make again)", TOP_ROOF_NEW)
                 self.level_box.addItem("＋ Basement  (new, below)", NEW_BELOW)
                 self.level_box.addItem(
                     "Foundation" + ("  ✓" if FOUNDATION in doc["imports"]
