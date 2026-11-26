@@ -15278,6 +15278,11 @@ def stair_roofs_from_cad(doc) -> dict:
     # the «Roof» storey runs to the stair roof's level
     el = elevations(arch)
     ir = [lv["id"] for lv in arch["levels"]].index(roof["id"])
+    # 3.64.156: the elevations' own mark of it («STAIR ROOF LEV.+44'-0"»)
+    # before the plan's note
+    lev_e = (doc.get("elev_towers") or {}).get("stair_roof")
+    if lev_e and abs(float(lev_e) - lev) < 0.8:
+        lev = float(lev_e)
     h = lev - el[ir]
     if 1.5 <= h <= 6.0:
         roof["height"] = round(h, 4)

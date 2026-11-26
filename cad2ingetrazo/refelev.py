@@ -659,7 +659,7 @@ def _cad_levels(arch, src) -> list:
     return out
 
 
-def _cad_towers(doc, arch, src, s, t, Z, el, pri=0) -> dict:
+def _cad_towers(doc, arch, src, s, t, Z, el, pri=0, D=None) -> dict:
     """The minarets and the dome a CAD elevation draws over its roof
     line, kept and set on the model's (elevread.towers)."""
     from . import elevread as EV
@@ -693,10 +693,12 @@ def _cad_towers(doc, arch, src, s, t, Z, el, pri=0) -> dict:
             continue
         segs.append((s * (sg[0] - ex[0]) * kp + t, zf(sg[1]),
                      s * (sg[2] - ex[0]) * kp + t, zf(sg[3])))
+    doc.setdefault("elev_towers", {})["stair_roof"] = round(float(z_top), 4)
     tw = EV.towers(segs, z_top)
     if not tw or not (tw.get("minarets") or tw.get("domes")):
         return {}
-    EV.store_towers(doc, tw, segs, None, pri)
+    EV.store_towers(doc, tw, segs, None, pri,
+                    EV.dirs_of(arch)[D][1] if D in EV.dirs_of(arch) else None)
     done = EV.spec_all(doc)
     rep = {}
     sp = doc.get("elev_towers") or {}
@@ -820,7 +822,7 @@ def follow(doc, ref, src=None, used=()) -> dict:
         rep["levels"] = lv_set
     try:                      # 3.64.156: its minarets and dome
         t_rep = _cad_towers(doc, arch, src, s, t, Z, el,
-                            1 if effective_side(ref) == "front" else 0)
+                            1 if effective_side(ref) == "front" else 0, D)
         if t_rep:
             rep.update(t_rep)
     except Exception:  # noqa: BLE001

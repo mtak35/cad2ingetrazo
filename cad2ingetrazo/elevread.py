@@ -522,7 +522,46 @@ def finish_stats(arch, st, rep) -> None:
         rep["tall windows"] = rep.get("tall windows", 0) + st["tall"]
 
 
-def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
+def _new_upper(arch, seen, lid, z0, z1, u0, u1, dep, D):
+    """An opening over a tall window where the plan has none: on the wall
+    of that storey standing at its place. (opening, wall, z0, z1) or None."""
+    import uuid
+    for w2, a0, a1, d2 in seen:
+        if w2["level"] != lid or w2.get("rail") or abs(d2 - dep) > 1.5:
+            continue
+        if not (a0 - 0.05 <= u0 and u1 <= a1 + 0.05):
+            continue
+        ax, ay = w2["a"]
+        bx, by = w2["b"]
+        f_, r_ = dirs_of(arch)[D]
+        ua = ax * r_[0] + ay * r_[1]
+        ub = bx * r_[0] + by * r_[1]
+        if abs(ub - ua) < 0.5:
+            continue
+        L = math.hypot(bx - ax, by - ay)
+        uc = (u0 + u1) / 2
+        pos = (uc - ua) / (ub - ua) * L
+        sample = next((q for q in arch["openings"]
+                       if q["wall"] == w2["id"]), None) or next(
+            (q for q in arch["openings"]
+             if q["kind"] == "void" and
+             next((x for x in arch["walls"] if x["id"] == q["wall"]),
+                  {}).get("level") == lid), None)
+        rec = dict(sample) if sample else {
+            "kind": "void", "swing": "left", "style": "", "leaves": 1,
+            "face": 1, "frame": "auto", "hl": 1}
+        rec.update({"id": uuid.uuid4().hex[:8], "wall": w2["id"],
+                    "pos": round(pos, 4), "w": round(u1 - u0, 3),
+                    "sill": 0.0, "h": 1.0, "head": "flat",
+                    "name": "Window (elevation)", "elev_cad": 1})
+        rec.pop("arch", None)
+        arch["openings"].append(rec)
+        return rec, w2, z0, z1
+    return None
+
+
+def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True, arch=None,
+                 seen=None, D=None) -> set:
     """3.64.156: the windows an elevation draws over more than one storey
     (the prayer hall's tall arched windows, ground floor to the roof): each
     one's lower opening from its sill to its ceiling, the openings over it
@@ -532,7 +571,7 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
     order = sorted(bands.items(), key=lambda kv: kv[1][0])
     lvl_pos = {lid: n for n, (lid, _b) in enumerate(order)}
     for o, w, u0, u1, dep, behind_rail in ops:
-        if o["kind"] == "door" or behind_rail or id(o) in done:
+        if behind_rail or id(o) in done:
             continue
         z0, z1 = bands.get(w["level"], (None, None))
         if z0 is None or u1 - u0 < 0.3:
@@ -546,6 +585,11 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
         if not left or not right:
             continue
         bot = min(min(a for a, _b in left), min(a for a, _b in right))
+        if o["kind"] == "door":
+            # a door the plan draws where the elevation draws a window
+            # (its frame stands off the floor): a window
+            if bot < z0 + 0.5:
+                continue
         spring = min(max(b for _a, b in left), max(b for _a, b in right))
         apex = max((zb for (ua, ub, za, zb) in arcs
                     if ua >= u0 - 0.15 and ub <= u1 + 0.15 and
@@ -568,6 +612,8 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
                 if ov > 0.6 * min(u1 - u0, v1 - v0) and abs(dep2 - dep) < 1.5:
                     nxt = (o2, w2, a, b)
                     break
+            if nxt is None and arch is not None and seen:
+                nxt = _new_upper(arch, seen, lid, a, b, u0, u1, dep, D)
             if nxt is None:
                 break
             chain.append(nxt)
@@ -575,6 +621,9 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
             k += 1
         if len(chain) < 2:
             continue
+        if o["kind"] == "door":
+            o["kind"] = "window"
+            o["elev_cad"] = 1
         for j, (o_, w_, a_, b_) in enumerate(chain):
             last = j == len(chain) - 1
             s_new = round(max(bot - a_, 0.0), 3) if j == 0 else 0.0
@@ -611,7 +660,8 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
     metres (u along the view, z absolute). ``st`` gathers the counts."""
     glass_names = {}
     hit_circ = set()
-    tall_done = _tall_frames(ops, vert, arcs, bands, st, know_arcs)
+    tall_done = _tall_frames(ops, vert, arcs, bands, st, know_arcs, arch,
+                             seen, D)
     for o, w, u0, u1, dep, behind_rail in ops:
         if id(o) in tall_done:
             continue
@@ -839,6 +889,10 @@ def towers(segs, z_top, step=0.05) -> dict:
                         run = 0.0
             out["minarets"].append({"u": u_c, "top": peak, "tops": tops,
                                     "w": w_low, "z0": float(zp)})
+        elif 0.8 <= peak - zp < 3.5 and 1.2 <= w_low < 3.2 and \
+                (b - a) * step < 3.4:
+            out.setdefault("kiosks", []).append(
+                {"u": u_c, "w": w_low, "top": peak, "z0": float(zp)})
         elif 1.0 <= peak - zp < 12.0 and w_low >= 3.0:
             w0 = ws[0][1]
             z_a = next((z for z, w in ws if w < 0.97 * w0), None)
@@ -888,12 +942,28 @@ def _shaft_width(segs, u_c, zp, half=3.0):
     return (max(us) - min(us)) if len(us) >= 2 else None
 
 
-def store_towers(doc, tw, segs, el_lvl=None, pri=0) -> dict:
+def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None) -> dict:
     """Keeps what the elevation says of the minarets and the dome in
     ``doc["elev_towers"]`` (in the model's metres over its zero) and sets
     them on the minarets / dome that stand."""
     spec = doc.setdefault("elev_towers", {})
     zp = float(tw.get("roof") or 0.0)
+    if zp and 8.0 < zp < 80.0:
+        spec["parapet_top"] = round(zp, 3)
+    ks = tw.get("kiosks") or []
+    if len(ks) >= 2:
+        k0 = ks[0]
+        hk = max(float(k["top"]) - float(k["z0"]) for k in ks)
+        w_ = float(sorted(k["w"] for k in ks)[len(ks) // 2])
+        d_ = round(max(0.8 * w_, 0.8), 3)
+        fh = 0.4
+        spec["kiosk"] = {"d": d_, "base_w": round(w_ / d_, 3),
+                         "base_h": round(max(hk - d_ / 2 - fh, 0.2), 3),
+                         "finial_h": fh, "n": len(ks), "_pri": pri} \
+            if not spec.get("kiosk") or (pri, len(ks)) >= (
+                spec["kiosk"].get("_pri", 0), spec["kiosk"].get("n", 0)) \
+            else spec["kiosk"]
+        _ = k0
     ms = [m for m in tw.get("minarets") or [] if len(m["tops"]) >= 2]
     if ms:
         m = max(ms, key=lambda r: (len(r["tops"]), r["top"]))
@@ -901,7 +971,10 @@ def store_towers(doc, tw, segs, el_lvl=None, pri=0) -> dict:
         new = {"top": round(float(m["top"]), 3),
                "stops": [round(float(t) - 1.2, 3) for t in m["tops"]],
                "b": round(float(b), 3) if b and 1.0 <= b <= 4.0 else None,
-               "_pri": pri}
+               "_pri": pri, "us": sorted(round(float(q["u"]), 3)
+                                         for q in ms)}
+        if r_vec:
+            new["r"] = [round(float(r_vec[0]), 6), round(float(r_vec[1]), 6)]
         old = spec.get("minaret")
         # (one elevation sees more of it than another: the fuller kept;
         # the front's before the sides')
@@ -960,9 +1033,54 @@ def spec_all(doc) -> dict:
                 m["galleries"] = min(max(len(st) - 1, 1), 3)
             if ms.get("b"):
                 m["b"] = float(ms["b"])
+            us_, r_ = ms.get("us") or [], ms.get("r")
+            if us_ and r_ and ms.get("_pri"):      # where the front puts it
+                u_m = float(m["x"]) * r_[0] + float(m["y"]) * r_[1]
+                tgt = min(us_, key=lambda q: abs(q - u_m))
+                if 0.3 < abs(tgt - u_m) <= 4.5:
+                    m["x"] = round(float(m["x"]) + (tgt - u_m) * r_[0], 4)
+                    m["y"] = round(float(m["y"]) + (tgt - u_m) * r_[1], 4)
             n += 1
         if n:
             rep["minarets"] = n
+    kd = spec.get("kiosk")
+    if kd:
+        cands = [d for d in doc.get("domes") or []
+                 if str(d.get("id", "")).startswith("cad-")]
+        if cands:
+            big = max(float(d["d"]) for d in cands)
+            n = 0
+            for d in cands:
+                if float(d["d"]) >= 0.75 * big and float(d["d"]) >= 4.0:
+                    continue
+                d.update({"d": kd["d"], "base_w": kd["base_w"],
+                          "base_h": kd["base_h"], "finial_h": kd["finial_h"],
+                          "stand": "walls", "steps": 0, "drum": 0.0,
+                          "kind": "hemi", "rise": 0.0})
+                d.pop("base_poly", None)
+                n += 1
+            if n:
+                rep["kiosk_domes"] = n
+    pt = spec.get("parapet_top")
+    if pt:
+        n = 0
+        for w in arch["walls"]:
+            if not str(w.get("name", "")).lower().startswith("roof parapet") \
+                    or w.get("kind", "line") != "line" or w.get("rail"):
+                continue
+            z0 = el.get(w.get("level"))
+            if z0 is None or z0 > pt - 0.8:
+                continue
+            try:
+                h0 = float(w.get("height", 1.0))
+            except (TypeError, ValueError):
+                continue
+            h1 = round(pt - 0.1 - z0 - float(w.get("base", 0.0) or 0.0), 3)
+            if h0 + 0.2 < h1 <= 4.5:
+                w["height"] = h1
+                n += 1
+        if n:
+            rep["parapets_raised"] = n
     dm = spec.get("dome")
     if dm:
         cands = [d for d in doc.get("domes") or []
