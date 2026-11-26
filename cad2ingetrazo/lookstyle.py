@@ -87,6 +87,19 @@ def palette(img) -> dict:
     clad = ~sky & ~green & mid & (lum > 130) & (lum < 205) & (sat < 0.06)
     out_n = {"light": med(light, None), "dark": med(dark, None),
              "warm": med(warm, None), "clad": med(clad, None)}
+    # 3.64.160: how much fine detail the house shows (columns, mouldings,
+    # balusters) and how much of it is white / cream — a classical villa
+    # is both; a plain modern box has few edges
+    try:
+        lum2 = lum.reshape(h, w)
+        gx = np.abs(np.diff(lum2, axis=1))[:-1, :]
+        gy = np.abs(np.diff(lum2, axis=0))[:, :-1]
+        gm = (gx + gy)[int(0.25 * h):int(0.95 * h), int(0.15 * w):int(0.85 * w)]
+        out_n["detail"] = float((gm > 28).mean())
+        out_n["light_share"] = float(light.reshape(h, w)[
+            int(0.25 * h):, int(0.15 * w):int(0.85 * w)].mean())
+    except Exception:  # noqa: BLE001
+        out_n["detail"], out_n["light_share"] = 0.0, 0.0
     try:                       # 3.64.53: raked (inclined) edges in it
         from .modern import has_inclines
         out_n["incline"] = has_inclines(img)
@@ -103,8 +116,19 @@ def palette(img) -> dict:
     return out
 
 
+#: 3.64.160: a house this detailed (edges over the middle of the picture)
+#: and this white is a classical villa, not a plain modern box
+CLASSIC_DETAIL = 0.11
+CLASSIC_LIGHT = 0.22
+
+
 def detect(pal) -> str:
-    return "mediterranean" if pal["tile_share"] > 0.015 else "modern"
+    if pal["tile_share"] > 0.015:
+        return "mediterranean"
+    if pal.get("detail", 0.0) >= CLASSIC_DETAIL and \
+            pal.get("light_share", 0.0) >= CLASSIC_LIGHT:
+        return "classic_villa"
+    return "modern"
 
 
 # ---- the roof outline as rectangles -------------------------------------------------
@@ -567,6 +591,21 @@ PRESETS = {
         "pediment": True, "lanterns": True, "light_style": "lantern",
         "wall": [0.96, 0.95, 0.92], "trim": [1.0, 1.0, 0.98],
         "stone": [0.84, 0.82, 0.78], "gate_color": "black"}),
+    "classic_villa": ("Classic villa (white stone, Corinthian columns, "
+                      "wrought-iron balconies, crowned cornice)", {
+        **OFF, "roof": "asdrawn", "win_head": "flat", "win_frame": "black",
+        "win_style": "transom_top", "gf_grille": False, "door_arch": False,
+        "arcades": False, "rail": "iron_wave", "columns": "corinthian",
+        "plinth": True, "bands": True, "cornice": True, "surrounds": True,
+        "corbels": True, "medallions": True, "pilasters": True,
+        "sills_lintels": True, "pediment": False, "fascia": True,
+        "fascia_d": 0.30, "fascia_h": 0.50, "parapet_style": "stepped",
+        "entrance_crown": "stepped", "carving": "frame",
+        "carving_where": "front", "carving_col": "trim",
+        "light_style": "sconce", "lanterns": False,
+        "wall": [0.94, 0.92, 0.88], "trim": [0.99, 0.98, 0.95],
+        "stone": [0.70, 0.64, 0.57], "clad": [0.72, 0.68, 0.62],
+        "metal": [0.12, 0.11, 0.10], "gate_color": "black"}),
     "royal": ("Royal — palace / grand building (cream stone, gold trim, "
               "balustrades, pediment, Corinthian columns)", {
         **OFF, "roof": "asdrawn", "win_head": "arch", "win_frame": "wood",
@@ -1001,6 +1040,18 @@ def kit_from_picture(pal, style=None) -> dict:
                  metal=col(pal.get("dark") or (0.1, 0.1, 0.1)),
                  clad=col(pal.get("clad") or (0.72, 0.72, 0.70)),
                  incline_panel=bool(pal.get("incline")))
+        return k
+    if style == "classic_villa":
+        # 3.64.160: a classical villa: its white walls and trims, its
+        # grey-beige stone panels, its dark iron
+        k = preset("classic_villa")
+        lt = pal.get("light") or pal["wall"]
+        k.update(wall=col(lt),
+                 trim=col(tuple(min(1.0, c * 1.04) for c in lt)),
+                 stone=col(pal.get("clad") or pal.get("warm") or
+                           (0.70, 0.64, 0.57)),
+                 clad=col(pal.get("clad") or (0.72, 0.68, 0.62)),
+                 metal=col(pal.get("dark") or (0.12, 0.11, 0.10)))
         return k
     if style == "mosque":
         k = preset("mosque")
@@ -1665,32 +1716,32 @@ STYLES = dict(STYLES, **{k: v[0] for k, v in PRESETS.items()})
 _GENERAL = {"plinth", "bands", "cornice", "fascia", "surrounds", "lanterns",
             "gf_grille", "door_arch", "arcades", "sills_lintels"}
 ELEMENT_STYLES = {
-    "arch_panels": {"gulf_palace", "arabian", "royal", "royal_villa",
+    "arch_panels": {"gulf_palace", "arabian", "royal", "royal_villa", "classic_villa",
                     "mosque"},
-    "quoins": {"royal", "royal_villa", "classical", "neoclassical", "italianate", "mediterranean",
+    "quoins": {"royal", "royal_villa", "classic_villa", "classical", "neoclassical", "italianate", "mediterranean",
                "georgian", "tudor"},
-    "corbels": {"royal", "royal_villa", "mediterranean", "classical", "italianate", "victorian",
+    "corbels": {"royal", "royal_villa", "classic_villa", "mediterranean", "classical", "italianate", "victorian",
                 "arabian"},
-    "porch_canopy": {"royal", "royal_villa", "mediterranean", "victorian", "tropical", "farmhouse",
+    "porch_canopy": {"royal", "royal_villa", "classic_villa", "mediterranean", "victorian", "tropical", "farmhouse",
                      "capecod", "tudor"},
-    "entrance_canopy": {"royal", "royal_villa", "mediterranean", "modern", "contemporary",
+    "entrance_canopy": {"royal", "royal_villa", "classic_villa", "mediterranean", "modern", "contemporary",
                         "farmhouse", "victorian", "capecod", "classical",
                         "neoclassical", "midcentury", "arabian"},
-    "medallions": {"royal", "royal_villa", "classical", "neoclassical", "mediterranean", "arabian",
+    "medallions": {"royal", "royal_villa", "classic_villa", "classical", "neoclassical", "mediterranean", "arabian",
                    "italianate", "georgian"},
     "slab_edges": {"modern", "minimalist", "contemporary", "midcentury",
                    "hightech", "bauhaus", "brutalist"},
     "frame_box": {"modern", "contemporary", "midcentury", "hightech"},
     "incline_panel": {"modern", "contemporary", "hightech"},
     "entry_clad": {"modern", "contemporary", "midcentury"},
-    "pediment": {"royal", "royal_villa", "classical", "neoclassical", "georgian", "italianate",
+    "pediment": {"royal", "royal_villa", "classic_villa", "classical", "neoclassical", "georgian", "italianate",
                  "mediterranean"},
     "deco_fins": {"artdeco"}, "deco_bands": {"artdeco"},
     "deco_crown": {"artdeco"},
     "window_boxes": {"brutalist", "contemporary"},
     "half_timber": {"tudor"}, "gf_clad": {"tudor", "midcentury",
                                          "contemporary", "mediterranean"},
-    "shutters": {"royal", "royal_villa", "capecod", "georgian", "farmhouse", "tropical",
+    "shutters": {"royal", "royal_villa", "classic_villa", "capecod", "georgian", "farmhouse", "tropical",
                  "mediterranean", "tudor", "italianate", "victorian"},
     "siding": {"capecod", "farmhouse", "victorian"},
     "eave_brackets": {"italianate", "victorian", "tudor", "tropical"},
@@ -1699,7 +1750,7 @@ ELEMENT_STYLES = {
                      "industrial"},
     "jali": {"arabian", "mosque", "mediterranean", "contemporary",
              "midcentury", "tropical"},
-    "pilasters": {"royal", "royal_villa", "hightech", "classical", "neoclassical", "georgian",
+    "pilasters": {"royal", "royal_villa", "classic_villa", "hightech", "classical", "neoclassical", "georgian",
                   "artdeco", "modern", "contemporary", "mosque",
                   "italianate"},
 }
