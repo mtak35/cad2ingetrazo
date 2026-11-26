@@ -520,6 +520,17 @@ def finish_stats(arch, st, rep) -> None:
         rep.setdefault("round", []).extend(st["round"])
     if st.get("tall"):
         rep["tall windows"] = rep.get("tall windows", 0) + st["tall"]
+    if st.get("arches"):
+        rep["arcade arches"] = rep.get("arcade arches", 0) + st["arches"]
+
+
+def _add_opening(arch, rec) -> None:
+    """3.64.157: a new opening in the block's view and in the model's own
+    list (a block's view holds copies of the lists)."""
+    arch["openings"].append(rec)
+    allo = arch.get("_all_openings")
+    if allo is not None and allo is not arch["openings"]:
+        allo.append(rec)
 
 
 def _new_upper(arch, seen, lid, z0, z1, u0, u1, dep, D):
@@ -555,9 +566,107 @@ def _new_upper(arch, seen, lid, z0, z1, u0, u1, dep, D):
                     "sill": 0.0, "h": 1.0, "head": "flat",
                     "name": "Window (elevation)", "elev_cad": 1})
         rec.pop("arch", None)
-        arch["openings"].append(rec)
+        _add_opening(arch, rec)
         return rec, w2, z0, z1
     return None
+
+
+def _arch_bays(arcs):
+    """3.64.157: the big pointed arches an elevation draws (an arcade's
+    bays): two arcs that meet at the apex, each taller than wide. Each as
+    (u0, u1, spring, apex), the innermost ring of a nest only."""
+    cand = [a for a in arcs if a[1] - a[0] > 0.2 and
+            (a[3] - a[2]) > 1.2 * (a[1] - a[0])]
+    bays = []
+    for i, a in enumerate(cand):
+        for b in cand[i + 1:]:
+            l, r = (a, b) if a[0] < b[0] else (b, a)
+            if abs(l[1] - r[0]) < 0.12 and abs(l[3] - r[3]) < 0.12 and \
+                    abs(l[2] - r[2]) < 0.15 and l[1] - l[0] > 0.2 and \
+                    r[1] - r[0] > 0.2:
+                bays.append((l[0], r[1], min(l[2], r[2]), l[3]))
+    bays = [b for b in bays if 0.45 <= b[1] - b[0] <= 4.2 and
+            b[3] - b[2] > 0.5]
+    out = []
+    for b in sorted(bays, key=lambda q: q[1] - q[0]):
+        c = (b[0] + b[1]) / 2
+        if not any(abs((o[0] + o[1]) / 2 - c) < 0.2 for o in out):
+            out.append(b)
+    return sorted(out)
+
+
+def _niche_arches(arch, seen, bands, arcs, ops, D, st) -> None:
+    """3.64.157: the arcade's arches an elevation draws over the wall
+    where no opening is — a pointed niche (the arch's recess) in the
+    outer wall of the storey they spring from."""
+    import uuid
+    f_, r_ = dirs_of(arch)[D]
+    n_new = 0
+    for (u0, u1, sp, ap) in _arch_bays(arcs):
+        lid = next((l for l, (a, b) in bands.items()
+                    if a - 0.1 <= sp < b - 0.3 and ap <= b + 0.15), None)
+        if lid is None:
+            continue
+        z0, z1 = bands[lid]
+        cand = [(d2, w2, a0, a1) for w2, a0, a1, d2 in seen
+                if w2["level"] == lid and not w2.get("rail")
+                and a0 - 0.05 <= u0 and u1 <= a1 + 0.05]
+        if not cand:
+            continue
+        d2, w2, a0, a1 = min(cand, key=lambda q: q[0])
+        ax, ay = w2["a"]
+        bx, by = w2["b"]
+        ua = ax * r_[0] + ay * r_[1]
+        ub = bx * r_[0] + by * r_[1]
+        L = math.hypot(bx - ax, by - ay)
+        if abs(ub - ua) < 0.5 or L < 0.5:
+            continue
+        sgn = 1.0 if ub > ua else -1.0
+        busy = False
+        for q in arch["openings"]:
+            if q["wall"] != w2["id"]:
+                continue
+            qa = ua + (float(q["pos"]) - float(q["w"]) / 2) * sgn * \
+                (abs(ub - ua) / L)
+            qb = ua + (float(q["pos"]) + float(q["w"]) / 2) * sgn * \
+                (abs(ub - ua) / L)
+            qa, qb = sorted((qa, qb))
+            if min(qb, u1) - max(qa, u0) > 0.2 and \
+                    float(q.get("sill", 0)) + z0 < ap and \
+                    float(q.get("sill", 0)) + float(q["h"]) + z0 > sp:
+                busy = True
+                break
+        if busy:
+            continue
+        uc = (u0 + u1) / 2
+        pos = (uc - ua) / (ub - ua) * L
+        dx, dy = (bx - ax) / L, (by - ay) / L
+        nrm = (-dy, dx)                  # the face a niche's face=+1 opens to
+        face = 1 if (nrm[0] * -f_[0] + nrm[1] * -f_[1]) > 0 else -1
+        _add_opening(arch, {
+            "id": uuid.uuid4().hex[:8], "kind": "void", "wall": w2["id"],
+            "pos": round(pos, 4), "w": round(u1 - u0 - 0.1, 3),
+            "sill": round(max(sp - z0, 0.0), 3),
+            "h": round(ap - sp - 0.05, 3), "head": "arch",
+            "arch": "pointed", "ring": "plain",
+            "niche": {"d": 0.12, "face": face}, "swing": "left",
+            "style": "", "leaves": 1, "face": 1, "frame": "auto", "hl": 1,
+            "name": "Arch (elevation)", "elev_cad": 1})
+        n_new += 1
+    if n_new:
+        st["arches"] = st.get("arches", 0) + n_new
+
+
+def _pointed_arcs(arcs, lo, hi, za_min, spring) -> bool:
+    """3.64.157: the arcs over an opening (u from lo to hi) are the halves
+    of a pointed head — each taller than it is wide (a round head's arc is
+    half as high as it is wide)."""
+    hit = [(ua, ub, za, zb) for (ua, ub, za, zb) in arcs
+           if ua >= lo - 0.05 and ub <= hi + 0.05 and za > za_min - 0.3
+           and ub - ua > 0.05]
+    return bool(hit) and \
+        sum(1 for (ua, ub, za, zb) in hit if (zb - za) > 1.2 * (ub - ua)) \
+        >= max(1, len(hit) // 2)
 
 
 def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True, arch=None,
@@ -595,6 +704,8 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True, arch=None,
                     if ua >= u0 - 0.15 and ub <= u1 + 0.15 and
                     za > bot + 0.5 and abs(za - spring) < 1.2), default=None)
         arched = know_arcs and apex is not None and apex > spring + 0.1
+        pointed = arched and _pointed_arcs(arcs, u0 - 0.15, u1 + 0.15,
+                                           bot + 0.5, spring)
         top = apex if arched else spring
         chain = [(o, w, z0, z1)]
         n = lvl_pos.get(w["level"])
@@ -640,8 +751,13 @@ def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True, arch=None,
                 st["openings"] += 1
             if last and arched and o_.get("head") != "arch":
                 o_["head"] = "arch"
-                o_.setdefault("arch", "semi")
+                o_["arch"] = "pointed" if pointed else \
+                    o_.get("arch") or "semi"
                 o_["elev_cad"] = 1
+            elif last and arched and pointed and o_.get("arch") != "pointed":
+                o_["arch"] = "pointed"           # 3.64.157: as drawn
+                o_["elev_cad"] = 1
+                st["openings"] += 1
             elif not last and (o_.get("head") == "arch" or o_.get("arch")):
                 o_["head"] = "flat"
                 o_.pop("arch", None)
@@ -662,6 +778,12 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
     hit_circ = set()
     tall_done = _tall_frames(ops, vert, arcs, bands, st, know_arcs, arch,
                              seen, D)
+    if know_arcs and arch is not None and seen:
+        try:
+            _niche_arches(arch, seen, bands, arcs, ops, D, st)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("elevread arches")
     for o, w, u0, u1, dep, behind_rail in ops:
         if id(o) in tall_done:
             continue
@@ -721,7 +843,13 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
             ch = True
         elif arched and o.get("head") != "arch":
             o["head"] = "arch"
-            o.setdefault("arch", "semi")
+            o["arch"] = "pointed" if _pointed_arcs(arcs, lo, hi, sill, sill) \
+                else o.get("arch") or "semi"
+            ch = True
+        elif arched and o["kind"] != "door" and \
+                o.get("arch") in (None, "", "semi", "segmental") and \
+                _pointed_arcs(arcs, lo, hi, sill, sill):
+            o["arch"] = "pointed"       # 3.64.157: the head drawn pointed
             ch = True
         if ch:
             o["elev_cad"] = 1
