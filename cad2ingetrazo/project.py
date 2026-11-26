@@ -221,7 +221,7 @@ def empty() -> dict:
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
             "hill": {}, "plan_area": {}, "cad_domes": {}, "tiers": {},
-            "bound_lines": {}, "seats": {}}
+            "bound_lines": {}, "seats": {}, "vaults": {}}
 
 
 def load(raw) -> dict:
@@ -290,6 +290,8 @@ def load(raw) -> dict:
                           .items() if k in ids and isinstance(v, list)}
     doc["seats"] = {k: v for k, v in (raw.get("seats") or {}).items()
                     if k in ids and isinstance(v, list)}
+    doc["vaults"] = {k: v for k, v in (raw.get("vaults") or {}).items()
+                     if k in ids and isinstance(v, list)}
     # 3.64.66: two ground levels (a site on a slope)
     hl_ = raw.get("hill") if isinstance(raw.get("hill"), dict) else {}
     doc["hill"] = {k: v for k, v in hl_.items()
@@ -6426,6 +6428,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.read_domes")
+    try:                         # 3.64.151: a curved roof's ribs
+        rep["vaults"] = vaults_from_cad(doc, lid, pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.vaults_from_cad")
     try:                         # 3.64.151: the stools the plan draws
         rep["seats"] = seats_from_cad(doc, lid, pl)
     except Exception:  # noqa: BLE001
@@ -13105,6 +13112,112 @@ def _seat_groups(doc):
     return out
 
 
+VAULT_LAYER = r"ARCH"
+
+
+def vaults_from_cad(doc, lid, pl) -> int:
+    """3.64.151: a curved roof the plan draws as a run of parallel rib
+    lines (the mimber's vault: 10+ equal lines on the architectural
+    layer, closer together towards the ends — a semicircle's ribs). Kept
+    in ``doc['vaults']`` as its axis, length and span."""
+    from shapely.geometry import LineString, MultiPoint
+    lay = pl["layers"]
+    segs = [((s_[0], s_[1]), (s_[2], s_[3])) for s_ in pl["segs"]
+            if re.search(VAULT_LAYER, str(lay[s_[4]]).upper())
+            and 1.5 <= math.dist((s_[0], s_[1]), (s_[2], s_[3])) <= 12.0]
+    fams = []
+    for a, b in segs:
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 180.0
+        ln = math.dist(a, b)
+        for f_ in fams:
+            d_ = abs(ang - f_["ang"])
+            if min(d_, 180.0 - d_) < 1.5 and abs(ln - f_["len"]) < 0.04 * \
+                    f_["len"]:
+                f_["segs"].append((a, b))
+                break
+        else:
+            fams.append({"ang": ang, "len": ln, "segs": [(a, b)]})
+    out = []
+    for f_ in fams:
+        if len(f_["segs"]) < 10:
+            continue
+        pts = [p for sg in f_["segs"] for p in sg]
+        # (the ribs' ends hull: its centre; the axis along the ribs)
+        c = MultiPoint(pts).convex_hull.centroid
+        ux = math.cos(math.radians(f_["ang"]))
+        uy = math.sin(math.radians(f_["ang"]))
+        vx, vy = -uy, ux
+        span = max((p[0] - c.x) * vx + (p[1] - c.y) * vy for p in pts) - \
+            min((p[0] - c.x) * vx + (p[1] - c.y) * vy for p in pts)
+        off = (max((p[0] - c.x) * vx + (p[1] - c.y) * vy for p in pts) +
+               min((p[0] - c.x) * vx + (p[1] - c.y) * vy for p in pts)) / 2
+        out.append({"c": [round(c.x + vx * off, 4), round(c.y + vy * off, 4)],
+                    "axis": [round(ux, 5), round(uy, 5)],
+                    "len": round(f_["len"], 3), "span": round(span, 3)})
+    doc.setdefault("vaults", {})[lid] = out
+    return len(out)
+
+
+def _vault_groups(doc):
+    """The curved roofs the plan draws (vaults_from_cad): a semicircular
+    barrel vault shell over its rectangle, springing from the floor of the
+    level it is drawn on."""
+    from core.group import Group
+    arch = doc["arch"]
+    st = doc["settings"]
+    if not st.get("vaults", True):
+        return []
+    els = elevations(arch)
+    tk = float(st.get("vault_t", 0.15) or 0.15)
+    out = []
+    for gi, lv in enumerate(arch["levels"]):
+        vs = (doc.get("vaults") or {}).get(lv["id"]) or []
+        faces = []
+        for v in vs:
+            cx, cy = v["c"]
+            ux, uy = v["axis"]
+            vx, vy = -uy, ux
+            L = float(v["len"])
+            R = float(v["span"]) / 2.0
+            if R < 0.5 or L < 0.5:
+                continue
+            z0 = els[gi] + float(st.get("vault_spring", 0.1016) or 0.0)
+            Ri = max(R - tk, 0.05)
+            n = 24
+
+            def P(r, th, e):        # across angle th (0..pi), along e
+                x_ = r * math.cos(th)
+                return (cx + vx * x_ + ux * (e - L / 2),
+                        cy + vy * x_ + uy * (e - L / 2),
+                        z0 + r * math.sin(th))
+            for i in range(n):
+                t1 = math.pi * i / n
+                t2 = math.pi * (i + 1) / n
+                # outer face, inner face (reversed), the two end bands
+                faces.append({"loop": [P(R, t1, 0), P(R, t2, 0),
+                                       P(R, t2, L), P(R, t1, L)]})
+                faces.append({"loop": [P(Ri, t1, L), P(Ri, t2, L),
+                                       P(Ri, t2, 0), P(Ri, t1, 0)]})
+                faces.append({"loop": [P(R, t2, 0), P(R, t1, 0),
+                                       P(Ri, t1, 0), P(Ri, t2, 0)]})
+                faces.append({"loop": [P(R, t1, L), P(R, t2, L),
+                                       P(Ri, t2, L), P(Ri, t1, L)]})
+            for th in (0.0, math.pi):       # the springings
+                faces.append({"loop": [P(R, th, 0), P(R, th, L),
+                                       P(Ri, th, L), P(Ri, th, 0)]})
+        if not faces:
+            continue
+        g = Group(_mesh_of(faces), name=f"Vaulted roof · {lv['name']}")
+        g.component = False
+        g.material = {"color": (0.86, 0.83, 0.76), "opacity": 1.0}
+        g.layer = level_layer(lv["name"])
+        g.ifc = {"class": "IfcRoof", "name": "Vaulted roof"}
+        g.ext = {KEY: {"type": "vault", "id": f"vault-{lv['id']}",
+                       "level": lv["id"]}}
+        out.append(g)
+    return out
+
+
 def platform_parts(doc) -> dict:
     """The foundation platform under the ground floor (slabs as floors, no
     ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
@@ -17060,6 +17173,11 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")
+    try:
+        new_groups += _vault_groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._vault_groups")
     try:
         new_groups += _seat_groups(doc)
     except Exception:  # noqa: BLE001
