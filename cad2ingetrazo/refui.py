@@ -48,7 +48,7 @@ class _Viewer(QDialog):
 
 
 class RefElevDialog(QDialog):
-    COLS = ("File", "Shows", "Page", "Follow", "Show", "Result")
+    COLS = ("File", "Shows", "Page", "Follow", "Show", "Result", "Block")
 
     def __init__(self, panel):
         super().__init__(panel)
@@ -106,7 +106,7 @@ class RefElevDialog(QDialog):
         hh = self.tab.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         hh.setSectionResizeMode(5, QHeaderView.Stretch)
-        for c_, w_ in ((1, 200), (2, 60), (3, 60), (4, 60)):
+        for c_, w_ in ((1, 200), (2, 60), (3, 60), (4, 60), (6, 110)):
             hh.setSectionResizeMode(c_, QHeaderView.Interactive)
             hh.resizeSection(c_, w_)
         mid = QHBoxLayout()
@@ -211,6 +211,15 @@ class RefElevDialog(QDialog):
                                 if fit else ""))
         res.setWordWrap(True)
         self.tab.setCellWidget(i, 5, res)
+        bc = QComboBox()
+        bc.addItem("All blocks", "all")
+        for k_, q_ in RE.blocks_of(self._doc()):
+            bc.addItem(f"Block {k_} ({q_.area:.0f} m²)", k_)
+        bc.setToolTip("Which block of the site this elevation is of: "
+                      "«Follow» and «Show» then use that block's openings "
+                      "and sides only (Block A is the largest)")
+        bc.setCurrentIndex(max(bc.findData(r.get("block", "all")), 0))
+        self.tab.setCellWidget(i, 6, bc)
 
     def _rows(self) -> list:
         old = {r["file"] + "|" + str(r.get("page", 1)): r
@@ -220,11 +229,13 @@ class RefElevDialog(QDialog):
             path = self.tab.cellWidget(i, 0).property("path")
             side = self.tab.cellWidget(i, 1).currentData()
             page = self.tab.cellWidget(i, 2).value()
-            r = {"file": path, "page": page, "side": side,
+            blk = self.tab.cellWidget(i, 6).currentData() or "all"
+            r = {"file": path, "page": page, "side": side, "block": blk,
                  "follow": self.tab.cellWidget(i, 3).isChecked(),
                  "show": self.tab.cellWidget(i, 4).isChecked()}
             o = old.get(path + "|" + str(page))
-            if o and o.get("fit") and o.get("side") == side:
+            if o and o.get("fit") and o.get("side") == side and \
+                    (o.get("block") or "all") == blk:
                 r["fit"] = o["fit"]
             out.append(r)
         return out
@@ -261,7 +272,7 @@ class RefElevDialog(QDialog):
             if not RE.kind_of(f):
                 continue
             self._row({"file": f, "page": 1, "side": "auto", "show": True,
-                       "follow": True})
+                       "follow": True, "block": "all"})
         if files:
             self._store()
 

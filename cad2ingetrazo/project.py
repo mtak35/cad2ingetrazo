@@ -315,6 +315,7 @@ def load(raw) -> dict:
                 "side": str(r_.get("side", "auto"))[:12],
                 "show": bool(r_.get("show", True)),
                 "follow": bool(r_.get("follow", True)),
+                "block": str(r_.get("block", "all") or "all")[:2],
                 **({"fit": r_["fit"]} if isinstance(r_.get("fit"), dict)
                    else {})})
     doc["grid"] = SITE_.load_grid(raw.get("grid"))

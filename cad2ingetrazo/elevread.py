@@ -44,6 +44,12 @@ DIRS = {                 # the side → (looking direction f, the view's right r
 }
 
 
+def dirs_of(arch):
+    """The sides' directions: the compass ones — or those of a rotated
+    block's own axes (3.64.153: ``arch["_dirs"]``)."""
+    return arch.get("_dirs") or DIRS
+
+
 def _level_value(txt):
     """A level mark's value in metres, or None."""
     t = txt.replace("%%p", "±").replace("%%P", "±").strip()
@@ -243,7 +249,7 @@ def _visible(arch, D):
     """The openings seen from side D: [(opening, wall, u0, u1, depth)]
     and the walls seen there (for the parapets and railings): the nearest
     wall of its level covering it is no other one."""
-    f, r = DIRS[D]
+    f, r = dirs_of(arch)[D]
     walls = [w for w in arch["walls"] if w.get("kind", "line") == "line"]
     par = []
     for w in walls:
@@ -341,7 +347,7 @@ def _fit(ops, vert, bands):
 def _oculus(arch, D, u, z, r) -> bool:
     """A round window (u, z, radius r seen from side D) set in the gable
     end of a pitched roof seen there: True when one takes it."""
-    f, rv = DIRS[D]
+    f, rv = dirs_of(arch)[D]
     best = None
     for e in arch["structure"]:
         if e.get("type") != "roof" or e.get("kind") != "gable":
@@ -626,7 +632,7 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
             st["drop"].add(w["id"])
     # a void's railing the elevation does not draw (a roof open over
     # a terrace: no railing round it up there)
-    f_, r_ = DIRS[D]
+    f_, r_ = dirs_of(arch)[D]
     for m in doc.get("man_shafts") or []:
         z0, z1 = bands.get(m.get("level"), (None, None))
         if z0 is not None and m.get("above"):    # «VOID ABOVE»: the

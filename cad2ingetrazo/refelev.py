@@ -424,13 +424,106 @@ def _ground_y(src, s, t, ops, seen, arch, D, el, g):
     return min(ys), 0.0                 # the ground line: N.G.L. (0)
 
 
+# ---- 3.64.153: the blocks of the site (A, B…) --------------------------------
+def blocks_of(doc) -> list:
+    """The blocks of the site — the built pieces of the ground floor
+    (the walls' contour and the slabs, as the dialog's map draws them):
+    [(letter, polygon)], the largest first (Block A)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    arch = doc["arch"]
+    g = next((lv["id"] for lv in arch["levels"] if lv["kind"] == "ground"),
+             None)
+    poly = None
+    try:
+        from . import lookstyle as LS
+        poly, _ws = LS._outline(arch, g)
+    except Exception:  # noqa: BLE001
+        poly = None
+    try:
+        sl = [Polygon(e["corners"]).buffer(0) for e in arch["structure"]
+              if e.get("type") == "slab" and e.get("level") == g
+              and len(e.get("corners") or []) >= 3]
+        if sl:
+            u = unary_union(sl).buffer(0.3, join_style=2).buffer(
+                -0.3, join_style=2)
+            if not u.is_empty and (poly is None or u.area > poly.area):
+                poly = u
+    except Exception:  # noqa: BLE001
+        pass
+    if poly is None:
+        return []
+    ps = sorted([q for q in getattr(poly, "geoms", [poly])
+                 if q.geom_type == "Polygon" and q.area > 4.0],
+                key=lambda q: -q.area)
+    return [(chr(65 + n) if n < 26 else str(n + 1), q)
+            for n, q in enumerate(ps)]
+
+
+def block_of(ref) -> str:
+    return str(ref.get("block", "all") or "all")
+
+
+def _arch_for(doc, ref):
+    """The model's data seen as one block's (the walls, openings and
+    structure standing in it) — the whole model for «all» (the elements
+    are the same dicts: what is set on them is set on the model)."""
+    arch = doc["arch"]
+    b = block_of(ref)
+    if b == "all":
+        return arch
+    from shapely.geometry import Point
+    blk = next((p for k, p in blocks_of(doc) if k == b), None)
+    if blk is None:
+        return arch
+    P = blk.buffer(0.6)
+    ws = [w for w in arch["walls"] if "a" in w and P.contains(Point(
+        (w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2))]
+    ids = {w["id"] for w in ws}
+    out = dict(arch)
+    out["walls"] = ws
+    out["openings"] = [o for o in arch["openings"] if o["wall"] in ids]
+
+    def _in(e):
+        if e.get("x") is not None:
+            return P.contains(Point(e["x"], e["y"]))
+        cs = e.get("corners")
+        if cs:
+            return P.contains(Point(sum(c[0] for c in cs) / len(cs),
+                                    sum(c[1] for c in cs) / len(cs)))
+        return False
+    out["structure"] = [e for e in arch["structure"] if _in(e)]
+    # a block standing turned (the hall at 50°): its own north / south /
+    # east / west are along its own walls
+    try:
+        mr = blk.minimum_rotated_rectangle
+        cs = list(mr.exterior.coords)
+        e0 = max(((cs[i], cs[i + 1]) for i in range(4)),
+                 key=lambda ab: math.dist(ab[0], ab[1]))
+        th = math.degrees(math.atan2(e0[1][1] - e0[0][1],
+                                     e0[1][0] - e0[0][0])) % 90.0
+        if th > 45.0:
+            th -= 90.0
+        if abs(th) > 3.0:
+            c_, s_ = math.cos(math.radians(th)), math.sin(math.radians(th))
+            from . import elevread as EV_
+
+            def rot(v):
+                return (v[0] * c_ - v[1] * s_, v[0] * s_ + v[1] * c_)
+            out["_dirs"] = {k: (rot(fv), rot(rv))
+                            for k, (fv, rv) in EV_.DIRS.items()}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def follow(doc, ref, src=None, used=()) -> dict:
     """One reference followed: its side found (or as given), its scale and
     position, then the openings set from it. The fit is stored in
     ``ref["fit"]`` (for «Show»). A report."""
     from . import elevread as EV
     from . import project as PJ
-    arch = doc["arch"]
+    arch = _arch_for(doc, ref)
     if effective_side(ref) == "perspective":   # 3.64.45: its look
         from . import lookstyle
         return lookstyle.apply(doc, ref, src)
@@ -521,7 +614,8 @@ def follow(doc, ref, src=None, used=()) -> dict:
     if notes:
         rep["note"] = "; ".join(notes)
     EV.finish_stats(arch, st, rep)
-    ref["fit"] = {"side": D, "s": round(s, 6), "t": round(t, 4),
+    ref["fit"] = {"side": D, "block": block_of(ref),
+                  "s": round(s, 6), "t": round(t, 4),
                   "y0": round(y0, 2), "z0": round(z0, 4),
                   "w": src["w"], "h": src["h"], "score": round(sc, 3)}
     return rep
@@ -546,9 +640,11 @@ def follow_all(doc, panel=None) -> list:
     # the sides set by hand first, then «auto»; the perspectives last
     refs.sort(key=lambda r: (effective_side(r) == "perspective",
                              r.get("side") == "auto"))
-    used = set()
+    used_by = {}
     for r in refs:
-        name = os.path.basename(r["file"])
+        name = os.path.basename(r["file"]) + (
+            f" (Block {block_of(r)})" if block_of(r) != "all" else "")
+        used = used_by.setdefault(block_of(r), set())
         try:
             rep = follow(doc, r, used=used)
         except Exception as e:  # noqa: BLE001
@@ -611,9 +707,9 @@ def show(doc, scene, opacity=0.55, gap=0.8) -> list:
         from core.layers import Layer
     except Exception:  # noqa: BLE001
         return []
-    arch = doc["arch"]
     out = []
     for r in doc.get("ref_elev") or []:
+        arch = _arch_for(doc, r)
         fit = r.get("fit")
         if not r.get("show", True) or not fit or \
                 r.get("side") == "perspective":
@@ -623,7 +719,7 @@ def show(doc, scene, opacity=0.55, gap=0.8) -> list:
         except Exception:  # noqa: BLE001
             continue
         D = fit["side"]
-        f, rv = EV.DIRS[D]
+        f, rv = EV.dirs_of(arch)[D]
         s, t = fit["s"], fit["t"]
         k_ = src["w"] / max(fit["w"], 1)        # (the picture re-read)
         s, y0 = s / k_, fit["y0"] * k_
@@ -638,15 +734,19 @@ def show(doc, scene, opacity=0.55, gap=0.8) -> list:
         org = QVector3D(u0 * rv[0] + d * f[0], u0 * rv[1] + d * f[1], z_bot)
         uu = QVector3D(rv[0] * Wm, rv[1] * Wm, 0.0)
         vv = QVector3D(0.0, 0.0, Hm)
-        path = _cached_png(src["img"], "c2i_ref_" + D)
-        name = f"{REF_NAME} — {D} — {os.path.basename(r['file'])}"
+        bk_ = block_of(r)
+        path = _cached_png(src["img"], "c2i_ref_" + D + (
+            "_" + bk_ if bk_ != "all" else ""))
+        name = f"{REF_NAME} — {D} — " + (f"Block {bk_} — " if bk_ != "all"
+                                         else "") + os.path.basename(r['file'])
         im = ImagePlane(path, org, uu, vv, aspect=Hm / max(Wm, 1e-9),
                         name=name, opacity=opacity, layer=REF_LAYER,
                         locked=True)
         if scene.layer(REF_LAYER) is None:
             scene.layers.append(Layer(REF_LAYER))
         scene.image_planes.append(im)
-        out.append((os.path.basename(r["file"]), D))
+        out.append((os.path.basename(r["file"]) + (
+            f" (Block {bk_})" if bk_ != "all" else ""), D))
     if out:
         scene.version += 1
     return out
@@ -860,26 +960,80 @@ def side_map(doc, size=270):
         poly, _ws = LS._outline(arch, g)
     except Exception:  # noqa: BLE001
         poly = None
+    try:        # 3.64.152: the whole built floor — every slab of the ground
+        # level (the walls' contour alone gave one closed piece: the
+        # ablution block, not the hall)
+        from shapely.geometry import Polygon as _Pg
+        from shapely.ops import unary_union as _uu
+        sl_ = [_Pg(e_["corners"]).buffer(0) for e_ in arch["structure"]
+               if e_.get("type") == "slab" and e_.get("level") == g
+               and len(e_.get("corners") or []) >= 3]
+        if sl_:
+            u_ = _uu(sl_).buffer(0.3, join_style=2).buffer(-0.3,
+                                                           join_style=2)
+            if not u_.is_empty and (poly is None or u_.area > poly.area):
+                poly = u_
+    except Exception:  # noqa: BLE001
+        pass
     p = QPainter(img)
     p.setRenderHint(QPainter.Antialiasing, True)
     f = QFont("Arial", 1)
     f.setPixelSize(13)
     f.setBold(True)
     p.setFont(f)
+    # 3.64.153: the site plan — the plot's outline and every block on it
+    # (the built pieces of the ground floor, the largest «Block A», then
+    # B, C …), each outlined and named
+    plot_ = None
+    try:
+        from shapely.geometry import Polygon as _Pg2
+        pc_ = [(q[0], q[1]) for q in
+               ((arch.get("plot") or {}).get("corners") or [])
+               if isinstance(q, (list, tuple)) and len(q) >= 2]
+        if len(pc_) >= 3:
+            plot_ = _Pg2(pc_).buffer(0)
+    except Exception:  # noqa: BLE001
+        plot_ = None
+    blocks_ = []
     if poly is not None:
-        if poly.geom_type != "Polygon":
-            poly = max(poly.geoms, key=lambda q: q.area)
-        x0, y0, x1, y1 = poly.bounds
+        blocks_ = sorted([q_ for q_ in getattr(poly, "geoms", [poly])
+                          if q_.geom_type == "Polygon" and q_.area > 4.0],
+                         key=lambda q_: -q_.area)
+    if blocks_ or plot_ is not None:
+        from shapely.ops import unary_union as _uu2
+        allp_ = _uu2(blocks_ + ([plot_] if plot_ is not None
+                                and not plot_.is_empty else []))
+        x0, y0, x1, y1 = allp_.bounds
         k = (size - 150) / max(x1 - x0, y1 - y0, 1e-6)
         ox = (size - (x1 - x0) * k) / 2
         oy = (size - (y1 - y0) * k) / 2
 
         def T(x, y):
             return QPointF(ox + (x - x0) * k, size - (oy + (y - y0) * k))
-        p.setBrush(QColor(225, 220, 205))
-        p.setPen(QPen(QColor(60, 60, 60), 2))
-        p.drawPolygon(QPolygonF([T(x, y) for x, y in
-                                 list(poly.exterior.coords)[:-1]]))
+        if plot_ is not None and not plot_.is_empty and \
+                plot_.geom_type == "Polygon":
+            p.setBrush(QColor(238, 242, 232))
+            pen_ = QPen(QColor(110, 130, 100), 1.5)
+            pen_.setStyle(Qt.DashLine)
+            p.setPen(pen_)
+            p.drawPolygon(QPolygonF([T(x, y) for x, y in
+                                     list(plot_.exterior.coords)[:-1]]))
+        lf = QFont("Arial", 1)
+        lf.setPixelSize(11)
+        lf.setBold(True)
+        for n_, q_ in enumerate(blocks_):
+            p.setBrush(QColor(225, 220, 205))
+            p.setPen(QPen(QColor(60, 60, 60), 2))
+            p.drawPolygon(QPolygonF([T(x, y) for x, y in
+                                     list(q_.exterior.coords)[:-1]]))
+            c_ = q_.representative_point()
+            p.setFont(lf)
+            p.setPen(QColor(30, 30, 30))
+            nm_ = "Block " + (chr(65 + n_) if n_ < 26 else str(n_ + 1))
+            pt_ = T(c_.x, c_.y)
+            p.drawText(QRectF(pt_.x() - 36, pt_.y() - 8, 72, 16),
+                       Qt.AlignCenter, nm_)
+        p.setFont(f)
     roles = side_roles(doc)
     p.setPen(QColor(190, 30, 30))
     for D, (rect, al) in {
