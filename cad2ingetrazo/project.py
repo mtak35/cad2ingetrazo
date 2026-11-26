@@ -221,7 +221,7 @@ def empty() -> dict:
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
             "hill": {}, "plan_area": {}, "cad_domes": {}, "tiers": {},
-            "bound_lines": {}}
+            "bound_lines": {}, "seats": {}}
 
 
 def load(raw) -> dict:
@@ -288,6 +288,8 @@ def load(raw) -> dict:
                     if k in ids and isinstance(v, dict)}
     doc["bound_lines"] = {k: v for k, v in (raw.get("bound_lines") or {})
                           .items() if k in ids and isinstance(v, list)}
+    doc["seats"] = {k: v for k, v in (raw.get("seats") or {}).items()
+                    if k in ids and isinstance(v, list)}
     # 3.64.66: two ground levels (a site on a slope)
     hl_ = raw.get("hill") if isinstance(raw.get("hill"), dict) else {}
     doc["hill"] = {k: v for k, v in hl_.items()
@@ -6424,6 +6426,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.read_domes")
+    try:                         # 3.64.151: the stools the plan draws
+        rep["seats"] = seats_from_cad(doc, lid, pl)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.seats_from_cad")
     # the floor levels the CAD notes («LEV. +4'-0"»): the levels set so
     if st.get("levels_cad", True):
         try:
@@ -6451,6 +6458,16 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.cap_lower_floor")
+    if st.get("levels_cad", True):
+        try:      # 3.64.151: the floor's annex it has just taken on (the
+            # ablution out over the floor below) cut to its own noted
+            # level too — the notes lay outside the floor before
+            arch["structure"] = [e for e in arch["structure"]
+                                 if not (e.get("zone") and e["level"] == lid)]
+            rep["zones"] = slab_zones(doc, lid, pl, P)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.slab_zones 2")
     try:                     # a basement's windows over the ground only
         rep["basement_windows"] = basement_windows(doc)
     except Exception:  # noqa: BLE001
@@ -10951,8 +10968,36 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
     # level noted: the step risers, the LINE layer's edges (a platform, a
     # sunk floor) — the walls and doors do not part the levels
     div = Polygon()
+    step_cut = Polygon()
     if pl is not None and P is not None:
         from shapely.geometry import LineString as _LS
+        try:         # 3.64.151: a run of the steps' lines (a mimber's
+            # treads): the floor beneath is the lower floor, the steps
+            # standing on it — never the raised floor over them
+            from shapely.geometry import MultiPoint as _MP
+            sp_ = list(P.get("steps") or [])
+            sl_ = [((s_[0], s_[1]), (s_[2], s_[3])) for s_ in pl["segs"]
+                   if sp_ and _match(pl["layers"][s_[4]], sp_)
+                   and 0.3 <= math.dist((s_[0], s_[1]), (s_[2], s_[3])) <= 6.0]
+            grp_ = []
+            for a_, b_ in sl_:
+                ang_ = math.atan2(b_[1] - a_[1], b_[0] - a_[0]) % math.pi
+                la_ = _LS([a_, b_])
+                hit_ = [g_ for g_ in grp_ if any(
+                    min(abs(ang_ - g2_[2]), math.pi - abs(ang_ - g2_[2]))
+                    < 0.14 and la_.distance(g2_[3]) < 0.5 for g2_ in g_)]
+                for g_ in hit_:
+                    grp_.remove(g_)
+                grp_.append(sum(hit_, []) + [(a_, b_, ang_, la_)])
+            hulls_ = [_MP([p_ for a_, b_, _g, _l in g_ for p_ in (a_, b_)])
+                      .convex_hull for g_ in grp_ if len(g_) >= 2]
+            hulls_ = [h_ for h_ in hulls_ if h_.geom_type == "Polygon"
+                      and h_.area < 12.0]
+            if hulls_:
+                step_cut = unary_union(hulls_)
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.slab_zones step runs")
         pats = list(P.get("steps") or []) + list(P.get("lines") or [])
         lay = pl["layers"]
         segs_ = [_LS([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
@@ -11022,6 +11067,42 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
                 # a whole open floor (a parking deck, its drive way) noted
                 # at several levels with no line parting them: one level —
                 # the one noted most — not cut into wedges between notes
+                # 3.64.151: but a few notes standing apart (> 8 m) from
+                # the main run of notes (the ablution annex of a hall's
+                # floor) keep their own: the floor's far part is cut to
+                # them, the main cluster's cells taking its mode
+                try:
+                    hq = [(x, y, v) for x, y, v in here
+                          if q.buffer(0.05).contains(Point(x, y))]
+                    cl_ = []
+                    for n_ in hq:
+                        mine_ = [c_ for c_ in cl_ if any(
+                            math.dist(n_[:2], m_[:2]) < 8.0 for m_ in c_)]
+                        for c_ in mine_:
+                            cl_.remove(c_)
+                        cl_.append(sum(mine_, []) + [n_])
+                    if len(cl_) > 1:
+                        main_ = max(cl_, key=len)
+                        mv_ = mode([v for _x, _y, v in main_])
+                        cells = voronoi_diagram(MultiPoint(
+                            [(x, y) for x, y, _v in hq]),
+                            envelope=q.envelope.buffer(5.0))
+                        mains_ = []
+                        for cell in cells.geoms:
+                            cn_ = [n_ for n_ in hq
+                                   if cell.contains(Point(n_[0], n_[1]))]
+                            if not cn_:
+                                continue
+                            if cn_[0] in main_:
+                                mains_.append(cell.intersection(q))
+                            else:
+                                pieces.append((cell.intersection(q),
+                                               cn_[0][2]))
+                        if mains_:
+                            pieces.append((unary_union(mains_), mv_))
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
                 pieces.append((q, mode(vs)))
                 continue
             if len({round(v, 3) for v in vs}) > 1 and len(vs) > 1:
@@ -11100,6 +11181,12 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
                     continue
                 if g_.area / max(g_.length, 1e-6) >= 0.3:
                     continue             # a real part of the floor: its own
+                # 3.64.151: the strips between the steps' lines are the
+                # steps' own treads (a mimber's) — not a kerb to share
+                # out: left to the floor, the steps standing on them
+                if not div.is_empty and g_.intersection(
+                        div.buffer(0.15)).area > 0.5 * g_.area:
+                    continue
                 bd_ = g_.boundary
                 best_, bl_ = None, 0.0
                 for k_, (pg_, _v) in enumerate(pieces):
@@ -11115,6 +11202,9 @@ def slab_zones(doc, lid, pl=None, P=None) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.slab_zones leftovers")
+    if not step_cut.is_empty:
+        pieces = [(pg_.difference(step_cut) if v_ > base + 0.005 else pg_, v_)
+                  for pg_, v_ in pieces]
     # 3.64.10: the floor's openings out of every piece (a ramp's well
     # crossing a piece's edge too — kept only when wholly inside before,
     # and the piece covered the ramp)
@@ -12943,6 +13033,78 @@ def ground_zones(doc, lid, G, WP, R, elev) -> list:
     return out
 
 
+SEAT_LAYER = r"SIT+ING|SEAT|STOOL"
+
+
+def seats_from_cad(doc, lid, pl) -> int:
+    """3.64.151: the small closed squares the plan draws on its seating
+    layer (the ablution's stools) — read as seats: their outlines, kept
+    in ``doc['seats']`` and built as tiled blocks with a granite top."""
+    from shapely.geometry import LineString
+    from shapely.ops import polygonize, unary_union
+    lay = pl["layers"]
+    ls = [LineString([(s_[0], s_[1]), (s_[2], s_[3])]) for s_ in pl["segs"]
+          if re.search(SEAT_LAYER, str(lay[s_[4]]).upper())
+          and math.dist((s_[0], s_[1]), (s_[2], s_[3])) < 1.0]
+    out = []
+    if ls:
+        for pg in polygonize(unary_union(ls)):
+            mr = pg.minimum_rotated_rectangle
+            if 0.06 <= pg.area <= 0.25 and mr.area > 0 and \
+                    pg.area / mr.area > 0.97:
+                out.append([[round(x, 4), round(y, 4)]
+                            for x, y in list(mr.exterior.coords)[:-1]])
+    doc.setdefault("seats", {})[lid] = out
+    return len(out)
+
+
+SEAT_H = 0.45
+SEAT_BLOCK = (0.84, 0.80, 0.72)
+SEAT_GRANITE = (0.22, 0.22, 0.24)
+
+
+def _seat_groups(doc):
+    """The seats the plan draws (seats_from_cad): each a masonry block
+    clad in tile, its top a granite slab with a rounded edge, standing on
+    the floor there (the ablution's platform)."""
+    from core.group import Group
+    from shapely.geometry import Polygon
+    arch = doc["arch"]
+    st = doc["settings"]
+    if not st.get("seats", True):
+        return []
+    els = elevations(arch)
+    out = []
+    for gi, lv in enumerate(arch["levels"]):
+        sl = (doc.get("seats") or {}).get(lv["id"]) or []
+        if not sl:
+            continue
+        blk, top = [], []
+        h = float(st.get("seat_h", SEAT_H) or SEAT_H)
+        for pts in sl:
+            pg = Polygon(pts).buffer(0)
+            if pg.is_empty:
+                continue
+            c = pg.centroid
+            z0 = els[gi] + floor_offset_at(doc, lv["id"], (c.x, c.y))
+            blk += _prism(pg.buffer(-0.01, join_style=2), z0, z0 + h - 0.04)
+            top += _prism(pg.buffer(0.02, join_style=1, resolution=3),
+                          z0 + h - 0.04, z0 + h)
+        for nm, fc, col in (("Seat blocks (tile)", blk, SEAT_BLOCK),
+                            ("Seat tops (granite)", top, SEAT_GRANITE)):
+            if not fc:
+                continue
+            g = Group(_mesh_of(fc), name=f"{nm} · {lv['name']}")
+            g.component = False
+            g.material = {"color": col, "opacity": 1.0}
+            g.layer = level_layer(lv["name"])
+            g.ifc = {"class": "IfcFurniture", "name": nm}
+            g.ext = {KEY: {"type": "seats", "id": f"seat-{lv['id']}-{nm[:9]}",
+                           "level": lv["id"]}}
+            out.append(g)
+    return out
+
+
 def platform_parts(doc) -> dict:
     """The foundation platform under the ground floor (slabs as floors, no
     ground slab, no basement): ``pieces`` [(shapely poly, top z)] from
@@ -12958,6 +13120,7 @@ def platform_parts(doc) -> dict:
     out = {"pieces": [], "steps": [], "ramps": [], "finish": [],
            "walks": [], "drives": []}
     over_base = False
+    bbu_ = Polygon()
     if not platform_on(doc):
         if not platform_outside_on(doc):
             return out
@@ -13006,6 +13169,7 @@ def platform_parts(doc) -> dict:
                         if q_.geom_type == "Polygon" and q_.area > 4.0:
                             bb_.append(Polygon(q_.exterior).buffer(0))
             if bb_:
+                bbu_ = unary_union(bb_)
                 G = unary_union([G] + bb_)
         except Exception:  # noqa: BLE001
             from .host import log_error
@@ -13021,6 +13185,28 @@ def platform_parts(doc) -> dict:
     if over_base:            # the slab over the basement is the floor there
         inner = Polygon()
         outer = Polygon()
+        # 3.64.151: a lowered / raised part of the ground floor standing
+        # out beyond the basement (the ablution's platform) is carried
+        # down to the ground — a solid fill under its slab, not a slab
+        # hung in the air
+        try:
+            for e_ in arch["structure"]:
+                if e_.get("type") != "slab" or e_["level"] != lid or \
+                        not e_.get("zone") or not e_.get("corners"):
+                    continue
+                off_ = float(e_.get("offset") or 0.0)
+                zp_ = Polygon(e_["corners"]).buffer(0).difference(bbu_)
+                if zp_.is_empty:
+                    continue
+                top_ = elev + off_ - float(e_.get("t") or 0.1016) - 0.001
+                if top_ - zg < 0.05:
+                    continue
+                for q_ in getattr(zp_, "geoms", [zp_]):
+                    if q_.geom_type == "Polygon" and q_.area > 0.5:
+                        out["pieces"].append((q_, top_))
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.platform_parts ablution fill")
     zone = entrance_zone(doc, lid)        # the CAD steps' landing: level
     lzone = zone                          # (3.64.138: the steps' own only)
     # the areas the CAD's level notes set (slab_zones): at their noted
@@ -16874,6 +17060,11 @@ def commit(viewport, doc, opts=None) -> None:
     except Exception:  # noqa: BLE001 — the plot never blocks the building
         from .host import log_error
         log_error("project._plot_groups")
+    try:
+        new_groups += _seat_groups(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._seat_groups")
     try:
         new_groups += _platform_groups(doc)
         try:
