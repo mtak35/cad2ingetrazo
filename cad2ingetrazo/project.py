@@ -6383,7 +6383,7 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         # (3.64.66: a lower ground floor on a slope is no basement: its
         # sides open on the lower road)
         try:
-            rep["retaining"] = basement_walls(doc, lid)["walls"]
+            rep["retaining"] = basement_walls(doc, lid, t=0.0)["walls"]
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.basement_walls")
@@ -6680,8 +6680,8 @@ def outer_walls(arch, lid) -> list:
 
 def basement_walls(doc, lid=None, t=None, on=True) -> dict:
     """A basement's outer walls (every basement's when ``lid`` is None) made
-    RCC retaining walls, like a lift core's: their doors and windows taken
-    out (the wall closed), at least ``t`` thick (the settings' 12" by
+    RCC retaining walls, like a lift core's: their doors taken out (the
+    wall closed; the plan's ventilators stay), at least ``t`` thick (the settings' 12" by
     default). ``on=False`` makes them ordinary walls again.
     {"walls": n, "openings": m}."""
     arch = doc["arch"]
@@ -6705,8 +6705,12 @@ def basement_walls(doc, lid=None, t=None, on=True) -> dict:
                 w["name"] = f"RCC retaining wall {nw + 1}"
             nw += 1
             before = len(arch["openings"])
+            # 3.64.149: the plan's ventilators (windows) stay — they are
+            # drawn in the basement's walls; basement_windows() keeps them
+            # between the natural ground and the ground floor's slab
             arch["openings"] = [o for o in arch["openings"]
-                                if o["wall"] != w["id"]]
+                                if o["wall"] != w["id"]
+                                or o.get("kind") == "window"]
             no += before - len(arch["openings"])
     return {"walls": nw, "openings": no}
 
@@ -16299,14 +16303,33 @@ def _plot_groups(doc):
                 except Exception:  # noqa: BLE001
                     pass
         # a basement's own floor slab / slabs (the ground opens over them)
-        for e_ in arch["structure"]:
-            if e_.get("type") == "slab" and e_.get("level") == low and \
-                    low != gid_ and e_.get("corners") and \
-                    not e_.get("zone"):
-                try:
-                    fps_.append(_PgF(e_["corners"]).buffer(0))
-                except Exception:  # noqa: BLE001
-                    pass
+        # — the level-note (zone) slabs too: they hold the floor's parts
+        # the main slab leaves (3.64.149), kept inside the walls' reach
+        if low != gid_:
+            bwl_ = [w for w in arch["walls"] if w["level"] == low
+                    and not w.get("rail") and "a" in w]
+            try:
+                from . import slabedges as _SEB
+                wsol_ = _uuF(_SEB.wall_polys(bwl_)) if bwl_ else None
+            except Exception:  # noqa: BLE001
+                wsol_ = None
+            reach_ = wsol_.convex_hull.buffer(0.5) if wsol_ is not None \
+                and not wsol_.is_empty else None
+            for e_ in arch["structure"]:
+                if e_.get("type") == "slab" and e_.get("level") == low and \
+                        e_.get("corners"):
+                    try:
+                        sp_ = _PgF(e_["corners"]).buffer(0)
+                        if e_.get("zone"):
+                            if reach_ is None:
+                                continue
+                            sp_ = sp_.intersection(reach_)
+                        if not sp_.is_empty:
+                            fps_.append(sp_)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if wsol_ is not None and not wsol_.is_empty:
+                fps_.append(wsol_.buffer(0.01))    # the walls' own bodies
         if fps_:
             U_ = _uuF(fps_).buffer(0)
             inside_ = _PgF(pts).buffer(0)
