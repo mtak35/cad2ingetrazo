@@ -1570,12 +1570,14 @@ class Panel(QWidget):
                                   "floor (the CAD's level notes, when read, "
                                   "set it instead)")
         f.addRow("Floor height (floor to floor)", self.i_floor_h)
-        f.addRow("Reference elevations", _btn(
-            "Elevations / perspectives to follow…", self._ref_elev,
-            "3.64.44: pictures, PDF pages or DXF / DWG drawings of each side "
-            "of the building (and perspectives): the model's windows and "
-            "doors follow them at every «Update from CAD», and they stand "
-            "beside the model to compare"))
+        # 3.64.159: «Elevations / perspectives to follow…» is asked for in
+        # the «Select floor on drawing…» window, before the plan is imported
+        _ref_note = QLabel("<i>Elevations / perspectives the model follows: "
+                           "set them in «Select floor on drawing…», before "
+                           "the import.</i>")
+        _ref_note.setWordWrap(True)
+        _ref_note.setStyleSheet("color: #8a94a3;")
+        f.addRow(_ref_note)
         f.addRow("Elevation design", _btn(
             "Design the elevations…", self._elev_design,
             "3.64.51: design every side yourself — a style to start from, "
@@ -1846,6 +1848,17 @@ class Panel(QWidget):
                             self._taken(self.doc(), path), self._region, base,
                             roles=getattr(self, "_layer_roles", None) or {},
                             detected=detected,
+                            extras=[(self._ref_label,
+                                     "3.64.159: pictures, PDF pages or DXF "
+                                     "/ DWG drawings of each side of the "
+                                     "building (and perspectives) — set "
+                                     "them BEFORE the import: the model's "
+                                     "levels, heights, domes, minarets, "
+                                     "windows and doors follow them as the "
+                                     "plan is imported, and again at every "
+                                     "«Update from CAD»",
+                                     lambda: self._ref_elev(modal=True))],
+                            pre_action=self._ask_elevations,
                             actions=[
                                 ("import", f"Import to «{tgt}»",
                                  "Use this floor and import it now: walls, "
@@ -1977,16 +1990,60 @@ class Panel(QWidget):
             self._design_dlg = ElevationDesigner(self)
             self._design_dlg.show()
 
-    def _ref_elev(self):
+    def _ref_label(self) -> str:
+        n = len([r for r in self.doc().get("ref_elev") or []
+                 if r.get("follow", True)])
+        return ("Elevations / perspectives to follow…" +
+                (f"  ({n} set)" if n else "  (none yet)"))
+
+    def _ask_elevations(self, key) -> bool:
+        """3.64.159: before a plan is imported, ask for the elevations /
+        perspectives the model's shape is to follow (once, when none are
+        set). False: stay in the window."""
+        if key != "import" or getattr(self, "_ref_asked", False):
+            return True
+        if any(r.get("follow", True) for r in
+               self.doc().get("ref_elev") or []):
+            return True
+        self._ref_asked = True
+        mb = QMessageBox(self)
+        mb.setWindowTitle("Elevations / perspectives")
+        mb.setIcon(QMessageBox.Question)
+        mb.setText("No elevations or perspectives are set for the model to "
+                   "follow.")
+        mb.setInformativeText(
+            "The model's levels, heights, domes, minarets, arches, windows "
+            "and doors follow the drawn elevations as the plan is imported. "
+            "Add them now?")
+        b_add = mb.addButton("Add elevations…", QMessageBox.AcceptRole)
+        b_go = mb.addButton("Import without them", QMessageBox.RejectRole)
+        mb.setDefaultButton(b_add)
+        mb.exec()
+        if mb.clickedButton() is b_add:
+            self._ref_elev(modal=True)
+            return False         # back in the window: «Import» when ready
+        return True
+
+    def _ref_elev(self, modal=False):
         from .refui import RefElevDialog
         dlg = getattr(self, "_ref_dlg", None)
         try:
             if dlg is None or not dlg.isVisible():
                 dlg = RefElevDialog(self)
                 self._ref_dlg = dlg
+        except RuntimeError:            # its window was closed and deleted
+            dlg = RefElevDialog(self)
+            self._ref_dlg = dlg
+        if modal:                       # over the «Select floor» window
+            if dlg.isVisible():
+                dlg.raise_()
+                return
+            dlg.exec()
+            return
+        try:
             dlg.show()
             dlg.raise_()
-        except RuntimeError:            # its window was closed and deleted
+        except RuntimeError:
             self._ref_dlg = RefElevDialog(self)
             self._ref_dlg.show()
 
@@ -2175,6 +2232,12 @@ class Panel(QWidget):
             PJ.recut_ramps(doc)
         except Exception:  # noqa: BLE001
             log_error("panel._import ramps")
+        try:                   # 3.64.159: the shape the elevations ask for
+            fe_ = PJ.follow_elevations(doc)
+            if fe_:
+                rep["elevations"] = fe_
+        except Exception:  # noqa: BLE001
+            log_error("panel._import elevations")
         if not self.commit(doc):
             return
         if rep["columns"] == 0 and rep["walls"] and QMessageBox.question(
@@ -2216,6 +2279,9 @@ class Panel(QWidget):
             txt += (f"\n{rep['ramps']} car ramp(s) from the RAMP lines, the "
                     "climb from their notes; wells cut in the slabs "
                     "(select one to change its climb or flip it)")
+        if rep.get("elevations"):
+            txt += "\nFollowing the elevations: " + "; ".join(
+                rep["elevations"][:6])
         if rep.get("marks"):
             txt += f"\n{rep['marks']} level mark(s) from the CAD's LEV. notes"
         if rep.get("levels_set"):

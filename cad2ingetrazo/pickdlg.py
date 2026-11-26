@@ -600,8 +600,10 @@ class PortionDialog(QDialog):
     ``.base`` (x, y), drawing units; or ``.whole`` True for all of it."""
 
     def __init__(self, parent, drawing, level_name, taken=(), region=None,
-                 base=None, roles=None, detected=None, actions=()):
+                 base=None, roles=None, detected=None, actions=(),
+                 extras=(), pre_action=None):
         super().__init__(parent)
+        self._pre_action = pre_action
         self.layer_roles = dict(roles or {})
         self.action = None          # 3.64.59: what to do after (import…)
         self.setWindowTitle(f"CAD2IngeTrazo — select «{level_name}» on the "
@@ -641,6 +643,21 @@ class PortionDialog(QDialog):
         for b in (self.b_box, self.b_base, b_fit, b_all):
             row.addWidget(b)
         row.addStretch(1)
+        # 3.64.159: the model's shape asked for from the start — the
+        # elevations / perspectives the model is to follow, set here
+        self.extra_btns = []
+        for label_fn, tip, cb in extras or ():
+            eb = QPushButton(label_fn())
+            eb.setToolTip(tip)
+            eb.setStyleSheet("QPushButton { border: 1px solid #2f6fdd; "
+                             "padding: 4px 12px; font-weight: bold; }")
+
+            def _go(_c=False, cb=cb, eb=eb, lf=label_fn):
+                cb()
+                eb.setText(lf())
+            eb.clicked.connect(_go)
+            row.addWidget(eb)
+            self.extra_btns.append(eb)
         self.ok = QPushButton("Use this floor")
         self.ok.setDefault(True)
         self.ok.setStyleSheet("QPushButton { background: #2f6fdd; color: "
@@ -674,6 +691,14 @@ class PortionDialog(QDialog):
         """Use this floor, then the panel does ``key`` (import, furniture)."""
         if not (self.ok.isEnabled() or self.whole):
             return
+        if self._pre_action is not None:
+            try:
+                if self._pre_action(key) is False:
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            for eb in self.extra_btns:     # (the count may have changed)
+                pass
         self.action = key
         self.accept()
 

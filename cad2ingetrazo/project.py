@@ -18596,6 +18596,45 @@ def update_from_cad(doc, as_cad=False) -> list:
     return out
 
 
+def follow_elevations(doc) -> list:
+    """3.64.159: after a plan is imported, the elevations / perspectives
+    asked for at the start followed at once — the storey heights from
+    their level marks, the openings, arches, domes and minarets as drawn
+    (the same steps «Update from CAD» takes). Short notes on what was
+    followed; [] when none are set."""
+    refs = [r for r in doc.get("ref_elev") or [] if r.get("follow", True)]
+    if not refs or not doc["arch"].get("walls"):
+        return []
+    notes = []
+    from . import refelev
+    for n_, r_ in refelev.follow_all(doc):
+        if r_.get("error"):
+            notes.append(f"{n_}: {r_['error'][:90]}")
+        else:
+            k_ = [f"{v} {k}" for k, v in r_.items()
+                  if isinstance(v, int) and v and k in (
+                      "openings", "tall windows", "arcade arches",
+                      "parapets")]
+            notes.append(n_ + (" (" + ", ".join(k_) + ")" if k_ else ""))
+    try:
+        roof_domes_from_cad(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.follow_elevations roof domes")
+    try:
+        from . import elevread as EV_t
+        EV_t.spec_all(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.follow_elevations towers")
+    try:
+        stair_roofs_from_cad(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.follow_elevations stair roofs")
+    return notes
+
+
 def stair_arrival_slabs(doc, depth=1.2) -> int:
     """3.64.77: the landing where a stair arrives on the floor above (the
     top landing): when that floor's slab stops short of the last riser (the
