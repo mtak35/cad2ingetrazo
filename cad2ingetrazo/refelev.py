@@ -699,8 +699,9 @@ def _cad_towers(doc, arch, src, s, t, Z, el, pri=0, D=None) -> dict:
     tw = EV.towers(segs, z_top)
     if not tw or not (tw.get("minarets") or tw.get("domes")):
         return {}
-    EV.store_towers(doc, tw, segs, None, pri,
-                    EV.dirs_of(arch)[D][1] if D in EV.dirs_of(arch) else None)
+    dd_ = EV.dirs_of(arch).get(D)
+    EV.store_towers(doc, tw, segs, None, pri, dd_[1] if dd_ else None,
+                    dd_[0] if dd_ else None, D)
     done = EV.spec_all(doc)
     rep = {}
     sp = doc.get("elev_towers") or {}
@@ -715,6 +716,20 @@ def _cad_towers(doc, arch, src, s, t, Z, el, pri=0, D=None) -> dict:
                        f" base, {d_['steps']} tiers, drum "
                        f"{len_txt(d_['drum'])}")
     return rep
+
+
+def _end_gap(src, fit) -> float:
+    """3.64.162: how far the model's side ends (its walls' ends, the
+    porch included) are from the drawing's (its long vertical lines'
+    ends), summed — for the fit (score, n, D, s, t, ops, seen, ...)."""
+    _sc, _n, _D, s, t, _ops, seen = fit[:7]
+    us = [s * a + t for a, b, c, d in src["segs"]
+          if abs(a - c) < 0.5 and abs(d - b) * s > 1.5]
+    ws = [(u0, u1) for w, u0, u1, _dep in seen if not w.get("rail")]
+    if not us or not ws:
+        return 99.0
+    return abs(min(us) - min(u for u, _ in ws)) + \
+        abs(max(us) - max(u for _, u in ws))
 
 
 def follow(doc, ref, src=None, used=()) -> dict:
@@ -744,6 +759,24 @@ def follow(doc, ref, src=None, used=()) -> dict:
                 "plans imported? is it an elevation?)" + _hint(
                     doc, arch, src, sides, dirs_)}
     fits.sort(key=lambda f: (-f[0], -f[1]))
+    swapped = None
+    if cs_ in dirs_ and len(fits) == 1:
+        # 3.64.162: a side and its opposite fit the same jambs alike (an
+        # arcade is symmetrical): the one whose ends (the porch, the
+        # building's depth) agree with the drawing's wins
+        f0 = dirs_[cs_][0]
+        opp = next((d for d, (fv, _rv) in dirs_.items()
+                    if abs(fv[0] + f0[0]) < 0.05 and
+                    abs(fv[1] + f0[1]) < 0.05), None)
+        if opp and opp != cs_:
+            r2 = fit_side(arch, opp, src, fixed_s=src.get("m_per_px"))
+            if r2:
+                alt = (r2[0], r2[1], opp) + r2[2:]
+                e0 = _end_gap(src, fits[0])
+                e1 = _end_gap(src, alt)
+                if alt[1] >= 0.85 * fits[0][1] and e1 + 1.5 < e0:
+                    swapped = (cs_, opp)
+                    fits = [alt]
     sc, n, D, s, t, ops, seen, ne, got = fits[0]
     ops, seen = EV._visible(arch, D)
     if n < 3 or n < 0.35 * ne:
@@ -817,6 +850,9 @@ def follow(doc, ref, src=None, used=()) -> dict:
                          "taller than its storey: set «Floor height»")
     rep = {"side": D, "jambs": f"{n} of {ne}",
            "scale": f"1 px = {s * 1000:.1f} mm"}
+    if swapped:
+        rep["side_swapped"] = (f"the drawing fits the {swapped[1]} side "
+                               f"(not the {swapped[0]}): its ends say so")
     if notes:
         rep["note"] = "; ".join(notes)
     EV.finish_stats(arch, st, rep)
@@ -931,6 +967,24 @@ def hide(scene) -> int:
     return n
 
 
+def _facade_depth(seen) -> float:
+    """3.64.161: the depth of the side's main wall plane — where most of its
+    wall length stands (a porch or steps standing out in front do not set
+    it, or the picture would lie in front of the facade and not on it)."""
+    ws = {}
+    for w, u0, u1, d in seen:
+        if w.get("rail"):
+            continue
+        k = round(d / 0.4)
+        a = ws.setdefault(k, [0.0, 0.0])
+        a[0] += max(u1 - u0, 0.0)
+        a[1] += d * max(u1 - u0, 0.0)
+    if not ws:
+        return min(d for _w, _a, _b, d in seen)
+    best = max(ws.values(), key=lambda a: a[0])
+    return best[1] / max(best[0], 1e-9)
+
+
 def show(doc, scene, opacity=None, gap=None, overlay=None) -> list:
     """Each followed reference stood at its side of the model, at the scale
     found. [(name, side)]. 3.64.161: by default SUPERIMPOSED — its lines
@@ -940,7 +994,7 @@ def show(doc, scene, opacity=None, gap=None, overlay=None) -> list:
     if overlay is None:
         overlay = bool((doc.get("settings") or {}).get("ref_overlay", True))
     if gap is None:
-        gap = 0.15 if overlay else 0.8
+        gap = 0.05 if overlay else 0.8
     if opacity is None:
         opacity = 0.95 if overlay else 0.55
     from PySide6.QtGui import QVector3D
@@ -970,8 +1024,7 @@ def show(doc, scene, opacity=None, gap=None, overlay=None) -> list:
         ops, seen = EV._visible(arch, D)
         if not seen:
             continue
-        dmin = min(d for _w, _a, _b, d in seen)
-        d = dmin - gap
+        d = _facade_depth(seen) - gap
         u0 = t                        # the picture's left edge (x = 0)
         z_bot = fit["z0"] + s * (0.0 - y0)
         Wm, Hm = s * src["w"], s * src["h"]

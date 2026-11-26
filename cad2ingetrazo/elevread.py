@@ -1243,7 +1243,8 @@ def _shaft_width(segs, u_c, zp, half=3.0):
     return (max(us) - min(us)) if len(us) >= 2 else None
 
 
-def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None) -> dict:
+def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None,
+                 f_vec=None, side=None) -> dict:
     """Keeps what the elevation says of the minarets and the dome in
     ``doc["elev_towers"]`` (in the model's metres over its zero) and sets
     them on the minarets / dome that stand."""
@@ -1266,6 +1267,10 @@ def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None) -> dict:
             else spec["kiosk"]
         _ = k0
     ms = [m for m in tw.get("minarets") or [] if len(m["tops"]) >= 2]
+    if ms and r_vec and f_vec and side:     # 3.64.162: where each elevation
+        spec.setdefault("minaret_views", {})[side] = {   # sees them
+            "us": sorted(round(float(q["u"]), 3) for q in ms),
+            "r": [round(float(r_vec[0]), 6), round(float(r_vec[1]), 6)]}
     if ms:
         m = max(ms, key=lambda r: (len(r["tops"]), r["top"]))
         b = _shaft_width(segs, m["u"], zp)
@@ -1303,6 +1308,47 @@ def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None) -> dict:
                                             old.get("_up", 0.0)):
             spec["dome"] = new
     return spec
+
+
+def _minaret_depth(doc, spec) -> int:
+    """3.64.162: the minarets' place front to back from the side
+    elevations (their u runs along the front's depth): all the minarets
+    set to the depth the sides draw them at (one depth drawn: both; as many
+    depths as minarets: in the order they stand). How many moved."""
+    from . import refelev as RE
+    fv = RE.front_vec(doc)
+    if not fv:
+        return 0
+    fv = (float(fv[0]), float(fv[1]))
+    ds = []
+    for _side, v in (spec.get("minaret_views") or {}).items():
+        r_ = v["r"]
+        c = r_[0] * fv[0] + r_[1] * fv[1]
+        if abs(c) < 0.95:                    # not a side seen along the depth
+            continue
+        ds.append(sorted(c * float(u) for u in v["us"]))
+    if not ds:
+        return 0
+    depths = ds[0]
+    ms = [m for m in doc.get("minarets") or []
+          if str(m.get("id", "")).startswith("auto-")]
+    if not ms:
+        return 0
+    cur = sorted(ms, key=lambda m: m["x"] * fv[0] + m["y"] * fv[1])
+    if len(depths) == 1:
+        tgt = [depths[0]] * len(cur)
+    elif len(depths) == len(cur):
+        tgt = depths
+    else:
+        return 0
+    n = 0
+    for m, dt in zip(cur, tgt):
+        d0 = float(m["x"]) * fv[0] + float(m["y"]) * fv[1]
+        if abs(dt - d0) > 0.3:
+            m["x"] = round(float(m["x"]) + (dt - d0) * fv[0], 4)
+            m["y"] = round(float(m["y"]) + (dt - d0) * fv[1], 4)
+            n += 1
+    return n
 
 
 def spec_all(doc) -> dict:
@@ -1344,6 +1390,9 @@ def spec_all(doc) -> dict:
             n += 1
         if n:
             rep["minarets"] = n
+        mv = _minaret_depth(doc, spec)
+        if mv:
+            rep["minarets_depth"] = mv
     kd = spec.get("kiosk")
     if kd:
         cands = [d for d in doc.get("domes") or []
