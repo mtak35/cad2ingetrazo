@@ -220,7 +220,7 @@ def empty() -> dict:
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
-            "hill": {}, "plan_area": {}, "cad_domes": {}, "cad_domes_roof": {},
+            "hill": {}, "plan_area": {}, "cad_domes": {}, "cad_domes_roof": {}, "ref_front": "",
             "tiers": {},
             "bound_lines": {}, "seats": {}, "vaults": {}}
 
@@ -285,6 +285,8 @@ def load(raw) -> dict:
                         if k in ids and isinstance(v, list)}
     doc["cad_domes"] = {k: v for k, v in (raw.get("cad_domes") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["ref_front"] = raw.get("ref_front") if raw.get("ref_front") in (
+        "north", "south", "east", "west") else ""
     doc["cad_domes_roof"] = {k: v for k, v in
                              (raw.get("cad_domes_roof") or {}).items()
                              if k in ids and isinstance(v, list)}

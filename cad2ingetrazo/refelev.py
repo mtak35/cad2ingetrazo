@@ -25,10 +25,40 @@ from __future__ import annotations
 import math
 import os
 
-SIDES = ("auto", "north", "south", "east", "west", "perspective")
+SIDES = ("front", "right", "back", "left", "north", "south", "east",
+         "west", "auto", "perspective")
+ROLES = ("front", "right", "back", "left")
+#: 3.64.154: the rule that names the pictures — no guessing: the front is
+#: set (or found: where the cars drive in, else the main door), then the
+#: others go round it as you see them standing in front of the building
+ROLE_ORDER = ("front", "right", "back", "left")
 SIDE_LABELS = {"auto": "Auto (the side it matches)", "north": "North side",
                "south": "South side", "east": "East side",
-               "west": "West side", "perspective": "Perspective (its look)"}
+               "west": "West side", "perspective": "Perspective (its look)",
+               "front": "Front elevation", "right": "Right elevation",
+               "back": "Back (rear) elevation", "left": "Left elevation"}
+_NAME_RX = (("front", r"\bFRONT\b|\bFACADE\b|\bFAÇADE\b"),
+            ("back", r"\bREAR\b|\bBACK\b"),
+            ("left", r"\bLEFT\b"), ("right", r"\bRIGHT\b"),
+            ("north", r"\bNORTH\b|\bN\.?\s*ELEV"),
+            ("south", r"\bSOUTH\b|\bS\.?\s*ELEV"),
+            ("east", r"\bEAST\b|\bE\.?\s*ELEV"),
+            ("west", r"\bWEST\b|\bW\.?\s*ELEV"))
+
+
+def guess_side(path, taken=()) -> str:
+    """The side a new reference is given: its name when it says one («FRONT
+    ELEVATION», «north», «rear»), else the next free one of front → right →
+    back → left (the order you walk round the building). Never «auto»."""
+    import re as _re
+    base = os.path.splitext(os.path.basename(str(path)))[0].upper()
+    for key, rx in _NAME_RX:
+        if _re.search(rx, base):
+            return key
+    for r in ROLE_ORDER:
+        if r not in taken:
+            return r
+    return ROLE_ORDER[len(taken) % 4]
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 REF_LAYER = "C2I reference elevations"
 REF_NAME = "C2I reference"
@@ -517,6 +547,32 @@ def _arch_for(doc, ref):
     return out
 
 
+def _hint(doc, arch, src, tried, dirs) -> str:
+    """The side a picture fits when the one it was given does not: « — its
+    lines fit the Left elevation (the east wall)»."""
+    if len(tried) != 1:
+        return ""
+    from . import elevread as EV
+    best = None
+    for D in dirs:
+        if D in tried:
+            continue
+        try:
+            r_ = fit_side(arch, D, src, fixed_s=src.get("m_per_px"))
+        except Exception:  # noqa: BLE001
+            continue
+        if r_ and r_[1] >= 3 and r_[1] >= 0.35 * r_[6]:
+            if best is None or (r_[0], r_[1]) > best[0]:
+                best = ((r_[0], r_[1]), D)
+    if best is None:
+        return ""
+    D = best[1]
+    role = side_roles(doc, arch).get(D)
+    return (f" — its lines fit the {role.lower()} elevation (the {D} wall)"
+            f" better: set it so" if role else
+            f" — its lines fit the {D} wall better: set it so")
+
+
 def follow(doc, ref, src=None, used=()) -> dict:
     """One reference followed: its side found (or as given), its scale and
     position, then the openings set from it. The fit is stored in
@@ -529,8 +585,10 @@ def follow(doc, ref, src=None, used=()) -> dict:
         return lookstyle.apply(doc, ref, src)
     if src is None:
         src = source(ref["file"], int(ref.get("page", 1) or 1))
-    sides = [ref["side"]] if ref.get("side") in EV.DIRS else \
-        [d for d in EV.DIRS if d not in used] or list(EV.DIRS)
+    cs_ = compass_side(doc, ref, arch)
+    dirs_ = EV.dirs_of(arch)
+    sides = [cs_] if cs_ in dirs_ else \
+        [d for d in dirs_ if d not in used] or list(dirs_)
     fits = []
     for D in sides:
         r_ = fit_side(arch, D, src, fixed_s=src.get("m_per_px"))
@@ -539,14 +597,16 @@ def follow(doc, ref, src=None, used=()) -> dict:
     if not fits:
         ref.pop("fit", None)
         return {"error": "its lines match no side of the model (are the "
-                "plans imported? is it an elevation?)"}
+                "plans imported? is it an elevation?)" + _hint(
+                    doc, arch, src, sides, dirs_)}
     fits.sort(key=lambda f: (-f[0], -f[1]))
     sc, n, D, s, t, ops, seen, ne, got = fits[0]
     ops, seen = EV._visible(arch, D)
     if n < 3 or n < 0.35 * ne:
         ref.pop("fit", None)
         return {"error": f"too few jambs line up ({n} of {ne}) — set its "
-                "side, or use a cleaner elevation (no hatch / shadows)"}
+                "side, or use a cleaner elevation (no hatch / shadows)"
+                + _hint(doc, arch, src, sides, dirs_)}
     levels = arch["levels"]
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
     el = PJ.elevations(arch)
@@ -804,36 +864,148 @@ def effective_side(ref) -> str:
 MARK_NAME = "C2I side mark"
 
 
-def side_roles(doc) -> dict:
-    """{side: "Front" / "Back" / "Left" / "Right"} — as seen standing at the
-    front (where the cars drive in; else the main door's side)."""
-    from . import elevread as EV
+_COMPASS_OUT = {"north": (0.0, 1.0), "south": (0.0, -1.0),
+                "east": (1.0, 0.0), "west": (-1.0, 0.0)}
+
+
+def front_vec(doc):
+    """The front's outward direction (unit x, y): the one set in the
+    window («Front faces»), else the design's, else where the cars drive
+    in / the main door's side; None when nothing says."""
+    f = _COMPASS_OUT.get(str(doc.get("ref_front") or ""))
+    if f:
+        return f
     try:
         from . import lookstyle as LS
-        fr, _w, _o = LS.front_side(doc)
+        v = LS.front_side(doc)[0]
+        if v is not None:
+            return v
     except Exception:  # noqa: BLE001
-        fr = None
+        pass
+    return _plot_front(doc)
+
+
+def _plot_front(doc):
+    """Nothing says the front: the side of the built floor nearest the
+    plot's boundary (the road side), as an outward direction; None."""
+    try:
+        from shapely.geometry import Polygon
+        arch = doc["arch"]
+        pc = [(q[0], q[1]) for q in
+              ((arch.get("plot") or {}).get("corners") or [])
+              if isinstance(q, (list, tuple)) and len(q) >= 2]
+        bl = blocks_of(doc)
+        if len(pc) < 3 or not bl:
+            return None
+        built = bl[0][1]
+        c = built.centroid
+        best = None
+        for a, b in zip(pc, pc[1:] + pc[:1]):
+            m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            d = math.dist(m, (c.x, c.y))
+            if best is None or d < best[0]:
+                best = (d, m)
+        dx, dy = best[1][0] - c.x, best[1][1] - c.y
+        n = math.hypot(dx, dy) or 1.0
+        return (dx / n, dy / n)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def side_roles(doc, arch=None) -> dict:
+    """{side: "Front" / "Back" / "Left" / "Right"} — as seen standing at the
+    front, looking at the building (the right hand is its «Right» side).
+    The block's own four sides when ``arch`` is a turned block's."""
+    from . import elevread as EV
+    fr = front_vec(doc)
     out = {}
     if fr is None:
         return out
-    # standing in front, looking at the house (along -fr): the right hand
+    dirs = EV.dirs_of(arch) if arch is not None else EV.DIRS
     rt = (-fr[1], fr[0])
-    for D, (f, _r) in EV.DIRS.items():
-        o = (-f[0], -f[1])                    # the side's outward way
-        d = o[0] * fr[0] + o[1] * fr[1]
-        if d > 0.7:
+    outw = {D: (-f[0], -f[1]) for D, (f, _r) in dirs.items()}
+    front = max(outw, key=lambda D: outw[D][0] * fr[0] + outw[D][1] * fr[1])
+    fo = outw[front]
+    for D, o in outw.items():
+        d = o[0] * fo[0] + o[1] * fo[1]
+        if D == front:
             out[D] = "Front"
         elif d < -0.7:
             out[D] = "Back"
         else:
-            out[D] = "Right" if o[0] * rt[0] + o[1] * rt[1] > 0 else "Left"
+            out[D] = "Right" if o[0] * (-fo[1]) + o[1] * fo[0] > 0 else "Left"
     return out
 
 
-def side_label(doc, D) -> str:
-    r = side_roles(doc).get(D)
+def compass_side(doc, ref, arch=None) -> str:
+    """The side (north / south / east / west — a turned block's own) a
+    reference shows: its «front / right / back / left» put through the
+    front, a compass side as it is, «auto» as it is."""
+    sd = ref.get("side", "auto")
+    if sd not in ROLES:
+        return sd
+    if arch is None:
+        arch = _arch_for(doc, ref)
+    for D, r in side_roles(doc, arch).items():
+        if r.lower() == sd:
+            return D
+    return "auto"
+
+
+WINDS = ("north", "north-east", "east", "south-east", "south",
+         "south-west", "west", "north-west")
+
+
+def wind_of(v) -> str:
+    """The compass point (of eight) an outward direction (x, y) faces."""
+    b = math.degrees(math.atan2(v[0], v[1])) % 360.0
+    return WINDS[int((b + 22.5) // 45) % 8]
+
+
+def block_faces(doc, block="all") -> list:
+    """3.64.155: a block's four sides, named by the one rule: [(D, role,
+    wind)] in the order Front, Right, Back, Left — D the side's key in the
+    block's own axes, role as you see it standing in front of the block,
+    wind the compass point its wall faces (a turned block: its own)."""
+    from . import elevread as EV
+    arch = _arch_for(doc, {"block": block})
+    dirs = EV.dirs_of(arch)
+    roles = side_roles(doc, arch)
+    out = [(D, roles.get(D), wind_of((-f[0], -f[1])))
+           for D, (f, _r) in dirs.items()]
+    order = {r: i for i, r in enumerate(("Front", "Right", "Back", "Left"))}
+    return sorted(out, key=lambda t: order.get(t[1], 9))
+
+
+def side_label(doc, D, block="all") -> str:
     base = SIDE_LABELS.get(D, D)
-    return f"{base} ({r})" if r else base
+    try:
+        faces = block_faces(doc, block)
+    except Exception:  # noqa: BLE001
+        faces = []
+    if D in ROLES:
+        for d_, role, wind in faces:
+            if role and role.lower() == D:
+                return f"{base} — the {wind} wall"
+        return base
+    for d_, role, wind in faces:
+        if d_ == D:
+            return f"{base} ({role}) — faces {wind}" if role else \
+                f"{base} — faces {wind}"
+    return base
+
+
+def elev_name(doc, ref) -> str:
+    """The block-wise name of what a reference shows: «Block A · Front
+    elevation (north-east wall)»."""
+    b = block_of(ref)
+    D = compass_side(doc, ref, _arch_for(doc, ref))
+    for d_, role, wind in block_faces(doc, b):
+        if d_ == D:
+            return (f"Block {b} · " if b != "all" else "") + \
+                (f"{role} elevation" if role else f"{wind} elevation") + \
+                f" ({wind} wall)"
+    return SIDE_LABELS.get(ref.get("side", "auto"), "")
 
 
 def _mark_img(text):
@@ -910,35 +1082,49 @@ def show_marks(doc, scene, gap=2.0) -> int:
     g = next((i for i, lv in enumerate(arch["levels"])
               if lv["kind"] == "ground"), 0)
     z = min(el[g], 0.0) + 0.03
-    roles = side_roles(doc)
+    # 3.64.155: every block named on its own sides (its own axes)
+    blocks = [(k_, q_) for k_, q_ in blocks_of(doc)] or [("all", None)]
+    if len(blocks) == 1:
+        blocks = [("all", blocks[0][1])]
     n = 0
-    for D, (f, r) in EV.DIRS.items():
-        us = [x * r[0] + y * r[1] for x in (min(xs), max(xs))
-              for y in (min(ys), max(ys))]
-        ds = [x * f[0] + y * f[1] for x in (min(xs), max(xs))
-              for y in (min(ys), max(ys))]
-        uc = (min(us) + max(us)) / 2
-        dfront = min(ds) - gap               # out from the house that way
-        text = f"{D.upper()} ELEVATION" + (f" · {roles[D].upper()}"
-                                           if D in roles else "")
-        img = _mark_img(text)
-        Wm = min(9.0, max(4.5, (max(us) - min(us)) * 0.6))
-        Hm = Wm * img.height() / img.width()
-        # bottom-left corner: on the far edge (away from the house),
-        # the picture's «up» towards the house
-        u0 = uc - Wm / 2
-        d0 = dfront - Hm
-        org = QVector3D(u0 * r[0] + d0 * f[0], u0 * r[1] + d0 * f[1], z)
-        uu = QVector3D(r[0] * Wm, r[1] * Wm, 0.0)
-        vv = QVector3D(f[0] * Hm, f[1] * Hm, 0.0)
-        path = _cached_png(img, "c2i_mark_" + D)
-        im = ImagePlane(path, org, uu, vv, aspect=Hm / Wm,
-                        name=f"{MARK_NAME} — {D}", opacity=1.0,
-                        layer=REF_LAYER, locked=True)
-        if scene.layer(REF_LAYER) is None:
-            scene.layers.append(Layer(REF_LAYER))
-        scene.image_planes.append(im)
-        n += 1
+    for bk, poly in blocks:
+        barch = _arch_for(doc, {"block": bk})
+        dirs = EV.dirs_of(barch)
+        roles = side_roles(doc, barch)
+        if poly is not None:
+            pts = list(poly.exterior.coords)
+            bxs = [q[0] for q in pts]
+            bys = [q[1] for q in pts]
+        else:
+            bxs, bys = xs, ys
+        for D, (f, r) in dirs.items():
+            us = [x * r[0] + y * r[1] for x in bxs for y in bys]
+            ds = [x * f[0] + y * f[1] for x in bxs for y in bys]
+            uc = (min(us) + max(us)) / 2
+            dfront = min(ds) - gap           # out from the house that way
+            wind = wind_of((-f[0], -f[1]))
+            role = roles.get(D)
+            text = (f"BLOCK {bk} · " if bk != "all" else "") + \
+                (f"{role.upper()} ELEVATION" if role
+                 else f"{D.upper()} ELEVATION") + f" · {wind.upper()} WALL"
+            img = _mark_img(text)
+            Wm = min(9.0, max(4.5, (max(us) - min(us)) * 0.6))
+            Hm = Wm * img.height() / img.width()
+            # bottom-left corner: on the far edge (away from the house),
+            # the picture's «up» towards the house
+            u0 = uc - Wm / 2
+            d0 = dfront - Hm
+            org = QVector3D(u0 * r[0] + d0 * f[0], u0 * r[1] + d0 * f[1], z)
+            uu = QVector3D(r[0] * Wm, r[1] * Wm, 0.0)
+            vv = QVector3D(f[0] * Hm, f[1] * Hm, 0.0)
+            path = _cached_png(img, f"c2i_mark_{bk}_{D}")
+            im = ImagePlane(path, org, uu, vv, aspect=Hm / Wm,
+                            name=f"{MARK_NAME} — {bk} — {D}", opacity=1.0,
+                            layer=REF_LAYER, locked=True)
+            if scene.layer(REF_LAYER) is None:
+                scene.layers.append(Layer(REF_LAYER))
+            scene.image_planes.append(im)
+            n += 1
     if n:
         scene.version += 1
     return n
@@ -1034,6 +1220,32 @@ def side_map(doc, size=270):
             p.drawText(QRectF(pt_.x() - 36, pt_.y() - 8, 72, 16),
                        Qt.AlignCenter, nm_)
         p.setFont(f)
+        # 3.64.155: each block's four sides, named on the plan (F / R / B
+        # / L — as you stand in front of that block)
+        try:
+            from . import elevread as EV_
+            sf = QFont("Arial", 1)
+            sf.setPixelSize(10)
+            sf.setBold(True)
+            p.setFont(sf)
+            p.setPen(QColor(20, 70, 170))
+            for n_, q_ in enumerate(blocks_):
+                bk_ = chr(65 + n_) if n_ < 26 else str(n_ + 1)
+                ba_ = _arch_for(doc, {"block": bk_})
+                rl_ = side_roles(doc, ba_)
+                c_ = q_.centroid
+                for D_, (f_, _r_) in EV_.dirs_of(ba_).items():
+                    o_ = (-f_[0], -f_[1])
+                    far = max((x - c_.x) * o_[0] + (y - c_.y) * o_[1]
+                              for x, y in q_.exterior.coords)
+                    pt_ = T(c_.x + o_[0] * (far + 1.2),
+                            c_.y + o_[1] * (far + 1.2))
+                    t_ = f"{bk_}·{(rl_.get(D_) or D_)[0].upper()}"
+                    p.drawText(QRectF(pt_.x() - 20, pt_.y() - 7, 40, 14),
+                               Qt.AlignCenter, t_)
+            p.setFont(f)
+        except Exception:  # noqa: BLE001
+            p.setFont(f)
     roles = side_roles(doc)
     p.setPen(QColor(190, 30, 30))
     for D, (rect, al) in {

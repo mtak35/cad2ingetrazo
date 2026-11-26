@@ -70,8 +70,13 @@ class RefElevDialog(QDialog):
             "railings when it shows them — onto the model, sizes kept; "
             "«Open picture» keeps it open beside the model.<br>"
             "Clean elevations work best (lines on white, no shadows). "
-            "Set the side when «Auto» picks the wrong one; set the storey "
-            "heights in «Floor height» — a picture has no level notes.")
+            "Name each picture by its side: pick which side is the FRONT "
+            "(«Front faces»), pick each picture's block, then say for each "
+            "picture Front, Right, Back or Left — as you see that block "
+            "standing in front of it (a turned block uses its own walls, "
+            "named by the compass point they face: «Block A · Front "
+            "elevation (north-east wall)»). Set the storey heights "
+            "in «Floor height» — a picture has no level notes.")
         info.setWordWrap(True)
         info.setStyleSheet("color: #8a94a3;")
         lay.addWidget(info)
@@ -94,6 +99,23 @@ class RefElevDialog(QDialog):
         self.btype.currentIndexChanged.connect(
             lambda _i=0: self._set_btype())
         brow.addWidget(self.btype)
+        brow.addWidget(QLabel("<b>Front faces:</b>"))
+        self.front = QComboBox()
+        for k_, l_ in (("", "Auto (cars / main door / road)"), ("north", "North"),
+                       ("east", "East"), ("south", "South"),
+                       ("west", "West")):
+            self.front.addItem(l_, k_)
+        self.front.setToolTip(
+            "The side that is the FRONT (the main entrance / the road). "
+            "The rest are named from it, as you see them standing in "
+            "front of the building: Right = on your right hand, Back = "
+            "opposite, Left = on your left. Each picture's «Shows» is then "
+            "Front / Right / Back / Left — no guessing.")
+        self.front.setCurrentIndex(max(self.front.findData(
+            str(self._doc().get("ref_front") or "")), 0))
+        self.front.currentIndexChanged.connect(
+            lambda _i=0: self._set_front())
+        brow.addWidget(self.front)
         self.bnote = QLabel()
         self.bnote.setWordWrap(True)
         self.bnote.setStyleSheet("color: #8a94a3;")
@@ -192,10 +214,10 @@ class RefElevDialog(QDialog):
         lab.setProperty("path", r["file"])
         self.tab.setCellWidget(i, 0, lab)
         cb = QComboBox()
+        blk0 = str(r.get("block", "all") or "all")
         for k in RE.SIDES:
-            cb.addItem(RE.side_label(self._doc(), k), k)
-        cb.setCurrentIndex(max(RE.SIDES.index(r.get("side", "auto"))
-                               if r.get("side") in RE.SIDES else 0, 0))
+            cb.addItem(RE.side_label(self._doc(), k, blk0), k)
+        cb.setCurrentIndex(max(cb.findData(r.get("side", "auto")), 0))
         self.tab.setCellWidget(i, 1, cb)
         sp = QSpinBox()
         sp.setRange(1, 999)
@@ -207,8 +229,11 @@ class RefElevDialog(QDialog):
             ch.setChecked(bool(r.get(key, True)))
             self.tab.setCellWidget(i, c, ch)
         fit = r.get("fit") or {}
-        res = QLabel(result or (f"{fit['side']} side, {fit['score']:.2f}"
-                                if fit else ""))
+        try:
+            nm_ = RE.elev_name(self._doc(), r) if fit else ""
+        except Exception:  # noqa: BLE001
+            nm_ = f"{fit['side']} side" if fit else ""
+        res = QLabel(result or (f"{nm_}, {fit['score']:.2f}" if fit else ""))
         res.setWordWrap(True)
         self.tab.setCellWidget(i, 5, res)
         bc = QComboBox()
@@ -220,6 +245,21 @@ class RefElevDialog(QDialog):
                       "and sides only (Block A is the largest)")
         bc.setCurrentIndex(max(bc.findData(r.get("block", "all")), 0))
         self.tab.setCellWidget(i, 6, bc)
+        bc.currentIndexChanged.connect(
+            lambda _i=0, b_=bc: self._names_of_row(b_))
+
+    def _names_of_row(self, bc):
+        """A row's block changed: its sides named as that block's own."""
+        for i in range(self.tab.rowCount()):
+            if self.tab.cellWidget(i, 6) is bc:
+                cb = self.tab.cellWidget(i, 1)
+                cur = cb.currentData()
+                blk = bc.currentData() or "all"
+                for j in range(cb.count()):
+                    cb.setItemText(j, RE.side_label(
+                        self._doc(), cb.itemData(j), blk))
+                cb.setCurrentIndex(max(cb.findData(cur), 0))
+                return
 
     def _rows(self) -> list:
         old = {r["file"] + "|" + str(r.get("page", 1)): r
@@ -246,6 +286,20 @@ class RefElevDialog(QDialog):
         self.panel.commit(doc, msg)
         return doc
 
+    def _set_front(self):
+        doc = self._doc()
+        doc["ref_front"] = self.front.currentData() or ""
+        self._store("Front side set", doc)
+        for i in range(self.tab.rowCount()):        # the labels name the
+            cb = self.tab.cellWidget(i, 1)          # wall each stands for
+            cur = cb.currentData()
+            blk = self.tab.cellWidget(i, 6).currentData() or "all"
+            for j in range(cb.count()):
+                cb.setItemText(j, RE.side_label(doc, cb.itemData(j), blk))
+            cb.setCurrentIndex(max(cb.findData(cur), 0))
+        self._refresh_map()
+        self._marks()
+
     def _refresh_map(self):
         try:
             self.map.setPixmap(QPixmap.fromImage(RE.side_map(self._doc())))
@@ -271,7 +325,10 @@ class RefElevDialog(QDialog):
         for f in files:
             if not RE.kind_of(f):
                 continue
-            self._row({"file": f, "page": 1, "side": "auto", "show": True,
+            taken = {self.tab.cellWidget(i, 1).currentData()
+                     for i in range(self.tab.rowCount())}
+            self._row({"file": f, "page": 1,
+                       "side": RE.guess_side(f, taken), "show": True,
                        "follow": True, "block": "all"})
         if files:
             self._store()
@@ -323,7 +380,12 @@ class RefElevDialog(QDialog):
             elif rep.get("skipped"):
                 m = "Shown only — open it with «Open picture»"
             else:
-                m = (f"{rep['side']} side · {rep['jambs']} openings "
+                try:
+                    nm_ = RE.elev_name(
+                        doc, (doc.get("ref_elev") or [])[rep.get("_i", -1)])
+                except Exception:  # noqa: BLE001
+                    nm_ = f"{rep['side']} side"
+                m = (f"{nm_} · {rep['jambs']} openings "
                      f"line up · {rep.get('openings', 0)} set"
                      + (f" · {rep['note']}" if rep.get("note") else ""))
             msgs[name] = m
