@@ -156,6 +156,9 @@ class RefElevDialog(QDialog):
                 ("Remove", self._remove, "Take the selected reference out"),
                 ("Follow now", self._follow, "Set the openings' sills and "
                  "heads from the elevations (Ctrl+Z undoes it)"),
+                ("Superimpose on model", self._overlay, "Lay each followed "
+                 "elevation's lines ON its wall faces (red, see-through) "
+                 "to check the model against it"),
                 ("Show beside model", self._show, "Stand each followed "
                  "elevation beside its side of the model"),
                 ("Hide", self._hide, "Take the shown elevations away"),
@@ -401,9 +404,17 @@ class RefElevDialog(QDialog):
         except Exception:  # noqa: BLE001
             pass
 
-    def _show(self, quiet=False):
-        doc = self._store("Reference elevations shown") if not quiet \
-            else self._doc()
+    def _overlay(self):
+        self._show(overlay=True)
+
+    def _show(self, quiet=False, overlay=None):
+        doc = self._doc()
+        if overlay is not None:
+            doc.setdefault("settings", {})["ref_overlay"] = bool(overlay)
+        elif not quiet:
+            doc.setdefault("settings", {})["ref_overlay"] = False
+        if not quiet:
+            doc = self._store("Reference elevations shown", doc)
         try:
             shown = RE.show(doc, self.panel.vp.scene)
         except Exception as e:  # noqa: BLE001
@@ -414,7 +425,9 @@ class RefElevDialog(QDialog):
         self.panel.vp.update()
         if not quiet:
             self.panel.flash(
-                "Shown beside the model: " + ", ".join(
+                ("Superimposed on the model: " if doc.get("settings", {}).get(
+                    "ref_overlay", True) else "Shown beside the model: ") +
+                ", ".join(
                     f"{n} ({d})" for n, d in shown) if shown else
                 "Nothing to show yet — «Follow now» first (it finds each "
                 "elevation's side and scale)", 8000)

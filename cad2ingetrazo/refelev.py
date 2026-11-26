@@ -900,6 +900,23 @@ def _cached_png(img, name) -> str:
         return p
 
 
+def _lines_img(src, color=(235, 30, 30), width=2.4):
+    """3.64.161: the drawing's lines alone, on a transparent picture the
+    size of the source (red): what is laid ON the model."""
+    from PySide6.QtCore import QLineF, Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+    W, H = int(src["w"]), int(src["h"])
+    img = QImage(W, H, QImage.Format_ARGB32)
+    img.fill(QColor(0, 0, 0, 0))
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(QPen(QColor(*color, 235), width, Qt.SolidLine))
+    for a, b, c, d in src["segs"]:
+        p.drawLine(QLineF(a, H - b, c, H - d))
+    p.end()
+    return img
+
+
 def hide(scene) -> int:
     planes = getattr(scene, "image_planes", None)
     if planes is None:
@@ -913,9 +930,18 @@ def hide(scene) -> int:
     return n
 
 
-def show(doc, scene, opacity=0.55, gap=0.8) -> list:
-    """Each followed reference stood beside its side of the model (gap m
-    out from it), at the scale found, half see-through. [(name, side)]."""
+def show(doc, scene, opacity=None, gap=None, overlay=None) -> list:
+    """Each followed reference stood at its side of the model, at the scale
+    found. [(name, side)]. 3.64.161: by default SUPERIMPOSED — its lines
+    (red, on a see-through picture) laid 15 cm in front of the wall faces,
+    so they can be checked against the model; ``overlay`` False stands the
+    half see-through picture 0.8 m beside it instead."""
+    if overlay is None:
+        overlay = bool((doc.get("settings") or {}).get("ref_overlay", True))
+    if gap is None:
+        gap = 0.15 if overlay else 0.8
+    if opacity is None:
+        opacity = 0.95 if overlay else 0.55
     from PySide6.QtGui import QVector3D
     from . import elevread as EV
     hide(scene)
@@ -952,8 +978,9 @@ def show(doc, scene, opacity=0.55, gap=0.8) -> list:
         uu = QVector3D(rv[0] * Wm, rv[1] * Wm, 0.0)
         vv = QVector3D(0.0, 0.0, Hm)
         bk_ = block_of(r)
-        path = _cached_png(src["img"], "c2i_ref_" + D + (
-            "_" + bk_ if bk_ != "all" else ""))
+        pic = _lines_img(src) if overlay and src.get("segs") else src["img"]
+        path = _cached_png(pic, "c2i_ref_" + ("ov_" if overlay else "") + D +
+                           ("_" + bk_ if bk_ != "all" else ""))
         name = f"{REF_NAME} — {D} — " + (f"Block {bk_} — " if bk_ != "all"
                                          else "") + os.path.basename(r['file'])
         im = ImagePlane(path, org, uu, vv, aspect=Hm / max(Wm, 1e-9),
