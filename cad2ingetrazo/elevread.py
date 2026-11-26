@@ -595,13 +595,81 @@ def _arch_bays(arcs):
     return sorted(out)
 
 
-def _niche_arches(arch, seen, bands, arcs, ops, D, st) -> None:
+def _add_wall(arch, rec) -> None:
+    """3.64.161: a new wall in the block's view and in the model's own
+    list."""
+    arch["walls"].append(rec)
+    allw = arch.get("_all_walls")
+    if allw is not None and allw is not arch["walls"]:
+        allw.append(rec)
+
+
+def _bay_columns(arch, lid, f_, r_, u0, u1, d_near=None):
+    """3.64.161: the two columns of storey ``lid`` that stand either side
+    of an arcade bay (clear span u0..u1): (depth of their centres, their
+    depth) or None."""
+    left, right = [], []
+    for e in arch["structure"]:
+        if e.get("type") != "column" or e.get("level") != lid or \
+                e.get("x") is None:
+            continue
+        a_ = math.radians(float(e.get("angle", 0.0) or 0.0))
+        w_, d_ = float(e.get("w", 0.5)), float(e.get("d", e.get("w", 0.5)))
+        e1 = (math.cos(a_), math.sin(a_))
+        e2 = (-math.sin(a_), math.cos(a_))
+        hu = (abs(e1[0] * r_[0] + e1[1] * r_[1]) * w_ +
+              abs(e2[0] * r_[0] + e2[1] * r_[1]) * d_) / 2
+        hd = (abs(e1[0] * f_[0] + e1[1] * f_[1]) * w_ +
+              abs(e2[0] * f_[0] + e2[1] * f_[1]) * d_) / 2
+        cu = e["x"] * r_[0] + e["y"] * r_[1]
+        cd = e["x"] * f_[0] + e["y"] * f_[1]
+        if abs(cu + hu - u0) < 0.3:
+            left.append((cd, hd))
+        if abs(cu - hu - u1) < 0.3:
+            right.append((cd, hd))
+    best = None
+    for cl, hl in left:
+        for cr, hr in right:
+            if abs(cl - cr) < 0.8:
+                dc = (cl + cr) / 2
+                key = abs(dc - d_near) if d_near is not None else 0.0
+                if best is None or key < best[0]:
+                    best = (key, dc, 2 * max(hl, hr))
+    return None if best is None else (best[1], best[2])
+
+
+def _bay_foot(vert, u0, u1, sp) -> float:
+    """3.64.161: where an arcade bay's recess starts below its arch: the
+    lowest foot of the vertical lines drawn at both its sides that reach up
+    to the arch's spring (None when the drawing has none)."""
+    feet = []
+    for edge in (u0, u1):
+        zs = [za for (u, za, zb) in vert
+              if abs(u - edge) < 0.08 and zb >= sp - 0.15 and
+              za < sp - 0.3 and zb - za > 0.6]
+        if not zs:
+            return None
+        feet.append(min(zs))
+    return max(feet)
+
+
+def _drop_opening(arch, rec) -> None:
+    for lst in (arch["openings"], arch.get("_all_openings")):
+        if lst is not None and rec in lst:
+            lst.remove(rec)
+
+
+def _niche_arches(arch, seen, bands, arcs, ops, D, st, vert=None) -> None:
     """3.64.157: the arcade's arches an elevation draws over the wall
     where no opening is — a pointed niche (the arch's recess) in the
-    outer wall of the storey they spring from."""
+    outer wall of the storey they spring from.
+    3.64.161: the whole bay — the recess from the foot of its drawn sides
+    (through the storeys below it, as a window over the window there) up to
+    the apex; the small windows the plan has inside it give way."""
     import uuid
     f_, r_ = dirs_of(arch)[D]
     n_new = 0
+    order = sorted(bands.items(), key=lambda kv: kv[1][0])
     for (u0, u1, sp, ap) in _arch_bays(arcs):
         lid = next((l for l, (a, b) in bands.items()
                     if a - 0.1 <= sp < b - 0.3 and ap <= b + 0.15), None)
@@ -621,38 +689,143 @@ def _niche_arches(arch, seen, bands, arcs, ops, D, st) -> None:
         L = math.hypot(bx - ax, by - ay)
         if abs(ub - ua) < 0.5 or L < 0.5:
             continue
+        foot = _bay_foot(vert or [], u0, u1, sp)
+        if vert and foot is None:
+            continue                 # no recess drawn down its sides: no bay
+        start = max(foot, z0) if foot is not None else sp
+        k_ = abs(ub - ua) / L
         sgn = 1.0 if ub > ua else -1.0
+
+        def span(q, w=w2):
+            qa = ua + (float(q["pos"]) - float(q["w"]) / 2) * sgn * k_
+            qb = ua + (float(q["pos"]) + float(q["w"]) / 2) * sgn * k_
+            return sorted((qa, qb))
         busy = False
-        for q in arch["openings"]:
+        small = []
+        for q in list(arch["openings"]):
             if q["wall"] != w2["id"]:
                 continue
-            qa = ua + (float(q["pos"]) - float(q["w"]) / 2) * sgn * \
-                (abs(ub - ua) / L)
-            qb = ua + (float(q["pos"]) + float(q["w"]) / 2) * sgn * \
-                (abs(ub - ua) / L)
-            qa, qb = sorted((qa, qb))
-            if min(qb, u1) - max(qa, u0) > 0.2 and \
-                    float(q.get("sill", 0)) + z0 < ap and \
-                    float(q.get("sill", 0)) + float(q["h"]) + z0 > sp:
+            qa, qb = span(q)
+            qz0 = float(q.get("sill", 0)) + z0
+            qz1 = qz0 + float(q["h"])
+            if min(qb, u1) - max(qa, u0) <= 0.2 or qz0 >= ap or qz1 <= start:
+                continue
+            if q["kind"] != "door" and float(q["h"]) < 2.2 and \
+                    qz0 >= start - 0.05 and qa >= u0 - 0.3 and qb <= u1 + 0.3:
+                small.append(q)           # a small plan window: gives way
+            else:
                 busy = True
                 break
         if busy:
             continue
+        for q in small:
+            _drop_opening(arch, q)
         uc = (u0 + u1) / 2
+        cb = _bay_columns(arch, lid, f_, r_, u0, u1, d2)
+        if cb is not None and not any(
+                x.get("elev_cad") and x.get("name") == "Arcade (elevation)"
+                and abs((x["a"][0] + x["b"][0]) / 2 * r_[0] +
+                        (x["a"][1] + x["b"][1]) / 2 * r_[1] - uc) < 0.3 and
+                x.get("level") == lid for x in arch["walls"]):
+            dc, thick = cb
+            sw = dict(w2)
+            for kx in ("a", "b", "id", "rail", "curve", "arc", "bulge"):
+                sw.pop(kx, None)
+            wid = uuid.uuid4().hex[:8]
+            pa = ((u0 - 0.1) * r_[0] + dc * f_[0],
+                  (u0 - 0.1) * r_[1] + dc * f_[1])
+            pb = ((u1 + 0.1) * r_[0] + dc * f_[0],
+                  (u1 + 0.1) * r_[1] + dc * f_[1])
+            sw.update({"kind": "line", "a": [round(pa[0], 4), round(pa[1], 4)],
+                       "b": [round(pb[0], 4), round(pb[1], 4)],
+                       "t": round(thick, 3), "id": wid, "level": lid,
+                       "name": "Arcade (elevation)", "elev_cad": 1,
+                       "align": "centre", "height": "level", "base": 0.0})
+            _add_wall(arch, sw)
+            _add_opening(arch, {
+                "id": uuid.uuid4().hex[:8], "kind": "void", "wall": wid,
+                "pos": round((u1 - u0 + 0.2) / 2, 4),
+                "w": round(u1 - u0, 3), "sill": 0.0,
+                "h": round(ap - z0, 3), "head": "arch", "arch": "pointed",
+                "ring": "plain", "swing": "left", "style": "", "leaves": 1,
+                "face": 1, "frame": "auto", "hl": 1,
+                "name": "Arch (elevation)", "elev_cad": 1})
+            n_new += 1
+            cb = True
+        else:
+            cb = None
         pos = (uc - ua) / (ub - ua) * L
         dx, dy = (bx - ax) / L, (by - ay) / L
         nrm = (-dy, dx)                  # the face a niche's face=+1 opens to
         face = 1 if (nrm[0] * -f_[0] + nrm[1] * -f_[1]) > 0 else -1
-        _add_opening(arch, {
-            "id": uuid.uuid4().hex[:8], "kind": "void", "wall": w2["id"],
-            "pos": round(pos, 4), "w": round(u1 - u0 - 0.1, 3),
-            "sill": round(max(sp - z0, 0.0), 3),
-            "h": round(ap - sp - 0.05, 3), "head": "arch",
-            "arch": "pointed", "ring": "plain",
-            "niche": {"d": 0.12, "face": face}, "swing": "left",
-            "style": "", "leaves": 1, "face": 1, "frame": "auto", "hl": 1,
-            "name": "Arch (elevation)", "elev_cad": 1})
-        n_new += 1
+        if cb is None:
+            _add_opening(arch, {
+                "id": uuid.uuid4().hex[:8], "kind": "void",
+                "wall": w2["id"],
+                "pos": round(pos, 4), "w": round(u1 - u0 - 0.1, 3),
+                "sill": round(max(start - z0, 0.0), 3),
+                "h": round(ap - start - 0.05, 3), "head": "arch",
+                "arch": "pointed", "ring": "plain",
+                "niche": {"d": 0.12, "face": face}, "swing": "left",
+                "style": "", "leaves": 1, "face": 1, "frame": "auto",
+                "hl": 1, "name": "Arch (elevation)", "elev_cad": 1})
+            n_new += 1
+        # the storeys below it: the recess goes on down to its foot
+        if foot is not None and foot < z0 - 0.05:
+            for lid2, (b0, b1) in order:
+                if b1 > z0 + 0.01 or b1 <= foot + 1.0 or b0 < -0.1:
+                    continue
+                c2 = [(dd, w3, x0, x1) for w3, x0, x1, dd in seen
+                      if w3["level"] == lid2 and not w3.get("rail")
+                      and x0 - 0.05 <= u0 and u1 <= x1 + 0.05
+                      and abs(dd - d2) < 1.0]
+                if not c2:
+                    continue
+                dd, w3, x0, x1 = min(c2, key=lambda q: abs(q[0] - d2))
+                ex0, ey0 = w3["a"]
+                ex1, ey1 = w3["b"]
+                va = ex0 * r_[0] + ey0 * r_[1]
+                vb = ex1 * r_[0] + ey1 * r_[1]
+                L3 = math.hypot(ex1 - ex0, ey1 - ey0)
+                if abs(vb - va) < 0.5 or L3 < 0.5:
+                    continue
+                k3 = abs(vb - va) / L3
+                lo = max(foot, b0)
+                over = False
+                for q in arch["openings"]:
+                    if q["wall"] != w3["id"]:
+                        continue
+                    sg3 = 1.0 if vb > va else -1.0
+                    qa = va + (float(q["pos"]) - float(q["w"]) / 2) * sg3 * k3
+                    qb = va + (float(q["pos"]) + float(q["w"]) / 2) * sg3 * k3
+                    qa, qb = sorted((qa, qb))
+                    qz0 = float(q.get("sill", 0)) + b0
+                    qz1 = qz0 + float(q["h"])
+                    if min(qb, u1) - max(qa, u0) > 0.2 and qz1 > lo + 0.1 \
+                            and qz0 < b1 - 0.1:
+                        over = True
+                        if q["kind"] != "door" and qz1 < b1 - 0.3 and \
+                                qz0 <= lo + 0.3:      # the drawn frame goes on up
+                            q["h"] = round(b1 - 0.12 - qz0, 3)
+                        break
+                if over:
+                    continue
+                sample = next((q for q in arch["openings"]
+                               if q["kind"] == "void" and q["wall"] == w3["id"]),
+                              None)
+                rec = dict(sample) if sample else {
+                    "kind": "void", "swing": "left", "style": "",
+                    "leaves": 1, "face": 1, "frame": "auto", "hl": 1}
+                rec.pop("niche", None)
+                rec.pop("arch", None)
+                rec.update({"id": uuid.uuid4().hex[:8], "wall": w3["id"],
+                            "pos": round((uc - va) / (vb - va) * L3, 4),
+                            "w": round(u1 - u0 - 0.1, 3),
+                            "sill": round(lo - b0, 3),
+                            "h": round(b1 - lo - 0.05, 3), "head": "flat",
+                            "name": "Window (elevation)", "elev_cad": 1})
+                _add_opening(arch, rec)
+                n_new += 1
     if n_new:
         st["arches"] = st.get("arches", 0) + n_new
 
@@ -780,7 +953,7 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
                              seen, D)
     if know_arcs and arch is not None and seen:
         try:
-            _niche_arches(arch, seen, bands, arcs, ops, D, st)
+            _niche_arches(arch, seen, bands, arcs, ops, D, st, vert)
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("elevread arches")

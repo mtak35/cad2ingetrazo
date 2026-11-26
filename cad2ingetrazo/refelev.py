@@ -514,6 +514,7 @@ def _arch_for(doc, ref):
     out["walls"] = ws
     out["openings"] = [o for o in arch["openings"] if o["wall"] in ids]
     out["_all_openings"] = arch["openings"]   # 3.64.157: new ones go here too
+    out["_all_walls"] = arch["walls"]         # 3.64.161: and new walls
 
     def _in(e):
         if e.get("x") is not None:
