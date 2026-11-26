@@ -50,10 +50,22 @@ def dirs_of(arch):
     return arch.get("_dirs") or DIRS
 
 
+#: 3.64.156: a level mark with its name before it: «GR.LEV.+4'-0"»,
+#: «ROOF LEV.+36'-0"», «R.LEV.±0'-0"», «1ST.FL.LEV.+24'-0"»
+LEVEL_NAMED_RX = re.compile(
+    r"^[A-Za-z0-9 .\-/&]*?(?:LEV|LEVEL|FL|FLOOR|ROOF|SLAB|GL|NGL|TOP)"
+    r"[A-Za-z. ]*?([+±\-]\s*\d+(?:\.\d+)?\s*(?:'|’)\s*-?\s*"
+    r"(?:\d+(?:\.\d+)?)?\s*(?:\"|''|”)?)\s*$", re.I)
+
+
 def _level_value(txt):
     """A level mark's value in metres, or None."""
     t = txt.replace("%%p", "±").replace("%%P", "±").strip()
     m = LEVEL_RX.match(t)
+    if not m:
+        n_ = LEVEL_NAMED_RX.match(t)
+        if n_:
+            m = LEVEL_RX.match(n_.group(1))
     if m:
         v = float(m.group(2)) * FT + float(m.group(3) or 0.0) * FT / 12.0
         return -v if m.group(1) == "-" else v
@@ -506,6 +518,89 @@ def finish_stats(arch, st, rep) -> None:
         rep["parapets"] = rep.get("parapets", 0) + n_par
     if st["round"]:
         rep.setdefault("round", []).extend(st["round"])
+    if st.get("tall"):
+        rep["tall windows"] = rep.get("tall windows", 0) + st["tall"]
+
+
+def _tall_frames(ops, vert, arcs, bands, st, know_arcs=True) -> set:
+    """3.64.156: the windows an elevation draws over more than one storey
+    (the prayer hall's tall arched windows, ground floor to the roof): each
+    one's lower opening from its sill to its ceiling, the openings over it
+    (the same place, next storeys) from the floor up, the last one to the
+    frame's top (its arch). Returns the ids of the openings set."""
+    done = set()
+    order = sorted(bands.items(), key=lambda kv: kv[1][0])
+    lvl_pos = {lid: n for n, (lid, _b) in enumerate(order)}
+    for o, w, u0, u1, dep, behind_rail in ops:
+        if o["kind"] == "door" or behind_rail or id(o) in done:
+            continue
+        z0, z1 = bands.get(w["level"], (None, None))
+        if z0 is None or u1 - u0 < 0.3:
+            continue
+        left = [(za, zb) for (u, za, zb) in vert
+                if abs(u - u0) < 0.1 and z0 - 0.6 < za < z1 - 0.3 and
+                zb > z1 + 0.3 and zb - za > 2.5]
+        right = [(za, zb) for (u, za, zb) in vert
+                 if abs(u - u1) < 0.1 and z0 - 0.6 < za < z1 - 0.3 and
+                 zb > z1 + 0.3 and zb - za > 2.5]
+        if not left or not right:
+            continue
+        bot = min(min(a for a, _b in left), min(a for a, _b in right))
+        spring = min(max(b for _a, b in left), max(b for _a, b in right))
+        apex = max((zb for (ua, ub, za, zb) in arcs
+                    if ua >= u0 - 0.15 and ub <= u1 + 0.15 and
+                    za > bot + 0.5 and abs(za - spring) < 1.2), default=None)
+        arched = know_arcs and apex is not None and apex > spring + 0.1
+        top = apex if arched else spring
+        chain = [(o, w, z0, z1)]
+        n = lvl_pos.get(w["level"])
+        if n is None:
+            continue
+        zt = z1
+        k = n + 1
+        while top > zt + 0.25 and k < len(order):
+            lid, (a, b) = order[k]
+            nxt = None
+            for o2, w2, v0, v1, dep2, br2 in ops:
+                if w2["level"] != lid or o2["kind"] == "door" or br2:
+                    continue
+                ov = min(u1, v1) - max(u0, v0)
+                if ov > 0.6 * min(u1 - u0, v1 - v0) and abs(dep2 - dep) < 1.5:
+                    nxt = (o2, w2, a, b)
+                    break
+            if nxt is None:
+                break
+            chain.append(nxt)
+            zt = b
+            k += 1
+        if len(chain) < 2:
+            continue
+        for j, (o_, w_, a_, b_) in enumerate(chain):
+            last = j == len(chain) - 1
+            s_new = round(max(bot - a_, 0.0), 3) if j == 0 else 0.0
+            if s_new < 0.08:
+                s_new = 0.0
+            head = min(top, b_ - 0.05) if last else b_ - 0.05
+            h_new = round(head - a_ - s_new, 3)
+            if h_new < 0.5:
+                continue
+            if abs(h_new - float(o_["h"])) > 0.03 or \
+                    abs(s_new - float(o_.get("sill", 0.0) or 0.0)) > 0.03:
+                o_["sill"], o_["h"] = s_new, h_new
+                o_["elev_cad"] = 1
+                st["openings"] += 1
+            if last and arched and o_.get("head") != "arch":
+                o_["head"] = "arch"
+                o_.setdefault("arch", "semi")
+                o_["elev_cad"] = 1
+            elif not last and (o_.get("head") == "arch" or o_.get("arch")):
+                o_["head"] = "flat"
+                o_.pop("arch", None)
+            done.add(id(o_))
+        st.setdefault("tall", 0)
+        st["tall"] += 1
+    return done
+
 
 def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
                 bands, st, know_arcs=True, careful=False) -> None:
@@ -516,7 +611,10 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
     metres (u along the view, z absolute). ``st`` gathers the counts."""
     glass_names = {}
     hit_circ = set()
+    tall_done = _tall_frames(ops, vert, arcs, bands, st, know_arcs)
     for o, w, u0, u1, dep, behind_rail in ops:
+        if id(o) in tall_done:
+            continue
         z0, z1 = bands.get(w["level"], (None, None))
         if z0 is None:
             continue
@@ -660,3 +758,224 @@ def _apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, circ, marks,
                 cov += max(0.0, min(ub, u1) - max(ua, u0))
         if cov < 0.25 * (u1 - u0):
             m["no_rail"] = True
+
+
+# =====================================================================
+# 3.64.156: the towers an elevation draws — its minarets and its dome
+# =====================================================================
+def _skyline(segs, zmin, step=0.05):
+    """(u0, step, tops): the highest line over each ``step`` of u, from
+    the lines [(u0, z0, u1, z1)] that reach over ``zmin``."""
+    import numpy as np
+    S = [s for s in segs if max(s[1], s[3]) > zmin]
+    if not S:
+        return None
+    ulo = min(min(s[0], s[2]) for s in S)
+    uhi = max(max(s[0], s[2]) for s in S)
+    top = np.full(int((uhi - ulo) / step) + 2, -1e9)
+    for a, b, c, d in S:
+        i0 = int((min(a, c) - ulo) / step)
+        i1 = int((max(a, c) - ulo) / step)
+        top[i0:i1 + 1] = np.maximum(top[i0:i1 + 1], max(b, d))
+    return ulo, step, top
+
+
+def _widths(seg, z0, z1, step):
+    """[(z, width of the part of ``seg`` standing at least that high)]."""
+    import numpy as np
+    out = []
+    for z in np.arange(z0, z1, 0.05):
+        ii = np.nonzero(seg >= z)[0]
+        out.append((float(z), (ii[-1] - ii[0] + 1) * step if len(ii) else 0.0))
+    return out
+
+
+def towers(segs, z_top, step=0.05) -> dict:
+    """What stands over the roof line in an elevation: {"roof": z,
+    "minarets": [{"u", "top", "tops": [balcony tops], "b"}], "domes":
+    [{"u", "d", "w0", "z_a", "tiers": [...], "z_d", "z_s", "z_t", "top"}]}.
+    ``segs``: the building's lines [(u0, z0, u1, z1)] in metres (z over
+    the model's zero), ``z_top``: the model's own roof top."""
+    import numpy as np
+    sk = _skyline(segs, z_top - 0.9, step)
+    if sk is None:
+        return {}
+    ulo, step, top = sk
+    near = top[(top > z_top - 0.7) & (top < z_top + 1.0)]
+    zp = float(np.median(near)) if len(near) > 20 else float(z_top)
+    idx = np.nonzero(top > zp + 0.8)[0]
+    if not len(idx):
+        return {"roof": zp, "minarets": [], "domes": []}
+    groups, st, pv = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i - pv > 6:
+            groups.append((st, pv))
+            st = i
+        pv = i
+    groups.append((st, pv))
+    out = {"roof": zp, "minarets": [], "domes": []}
+    for a, b in groups:
+        seg = top[a:b + 1]
+        peak = float(seg.max())
+        ws = _widths(seg, zp + 0.9, peak, step)
+        if not ws:
+            continue
+        w_low = ws[0][1]
+        pk = np.nonzero(seg >= peak - 0.1)[0]
+        u_c = ulo + (a + float(pk.mean()) + 0.5) * step
+        if peak - zp >= 6.0 and w_low < 5.0:
+            # the balconies: where the width falls by 0.25 m or more
+            tops, run, last = [], 0.0, None
+            for i in range(1, len(ws)):
+                dw = ws[i - 1][1] - ws[i][1]
+                if dw > 0.01:
+                    if last is None or i - last > 10:
+                        run = 0.0
+                    run += dw
+                    last = i
+                    if run >= 0.25 and ws[i][0] < peak - 1.4 and \
+                            (not tops or ws[i][0] - tops[-1] > 1.0):
+                        tops.append(ws[i][0])
+                        run = 0.0
+            out["minarets"].append({"u": u_c, "top": peak, "tops": tops,
+                                    "w": w_low, "z0": float(zp)})
+        elif 1.0 <= peak - zp < 12.0 and w_low >= 3.0:
+            w0 = ws[0][1]
+            z_a = next((z for z, w in ws if w < 0.97 * w0), None)
+            if z_a is None:
+                continue
+            # the drum: the longest run of one width after the tiers
+            runs, cur = [], [ws[0][0], ws[0][1], ws[0][0]]
+            for z, w in ws[1:]:
+                if abs(w - cur[1]) < 0.06:
+                    cur[2] = z
+                else:
+                    runs.append(cur)
+                    cur = [z, w, z]
+            runs.append(cur)
+            ru = [r for r in runs if r[0] >= z_a - 0.01 and r[1] < 0.97 * w0
+                  and r[1] > 1.5]
+            drum = max(ru, key=lambda r: r[2] - r[0]) if ru else None
+            tiers_z = [r for r in ru if drum and r[0] < drum[0]
+                       and r[1] > drum[1] + 0.1]
+            z_s = z_t = None
+            if drum:
+                z_d = drum[0]
+                z_s = drum[2]
+                # the shell: from the drum's top until the width falls to
+                # a rod (under 1 m)
+                z_t = next((z for z, w in ws if z > z_s and w < 1.0), peak)
+            else:
+                z_d = z_a
+            if z_s is None:
+                continue
+            out["domes"].append({
+                "u": u_c, "w0": w0, "z_a": z_a, "z_d": z_d, "z_s": z_s,
+                "z_t": z_t, "top": peak, "tiers": len(tiers_z),
+                "d": drum[1] if drum else w0, "z0": float(zp)})
+    return out
+
+
+def _shaft_width(segs, u_c, zp, half=3.0):
+    """The square shaft's side at the roof line: the outermost verticals
+    near ``u_c`` that rise from the roof line."""
+    us = []
+    for a, b, c, d in segs:
+        if abs(a - c) < 0.01 and abs(a - u_c) < half and \
+                min(b, d) < zp + 1.0 and max(b, d) > zp + 3.0 and \
+                abs(b - d) > 2.0:
+            us.append(a)
+    return (max(us) - min(us)) if len(us) >= 2 else None
+
+
+def store_towers(doc, tw, segs, el_lvl=None, pri=0) -> dict:
+    """Keeps what the elevation says of the minarets and the dome in
+    ``doc["elev_towers"]`` (in the model's metres over its zero) and sets
+    them on the minarets / dome that stand."""
+    spec = doc.setdefault("elev_towers", {})
+    zp = float(tw.get("roof") or 0.0)
+    ms = [m for m in tw.get("minarets") or [] if len(m["tops"]) >= 2]
+    if ms:
+        m = max(ms, key=lambda r: (len(r["tops"]), r["top"]))
+        b = _shaft_width(segs, m["u"], zp)
+        new = {"top": round(float(m["top"]), 3),
+               "stops": [round(float(t) - 1.2, 3) for t in m["tops"]],
+               "b": round(float(b), 3) if b and 1.0 <= b <= 4.0 else None,
+               "_pri": pri}
+        old = spec.get("minaret")
+        # (one elevation sees more of it than another: the fuller kept;
+        # the front's before the sides')
+        if not old or (pri, len(new["stops"]), new["top"]) >= \
+                (old.get("_pri", 0), len(old["stops"]), old["top"]):
+            spec["minaret"] = new
+    dm = [d for d in tw.get("domes") or [] if d["d"] >= 2.0]
+    if dm:
+        d = max(dm, key=lambda r: r["z_s"] - r["z0"])
+        R = float(d["d"]) / 2
+        new = {
+            "d": round(float(d["d"]), 3),
+            "base_h": round(max(float(d["z_a"] - d["z0"]), 0.0), 3),
+            "base_w": round(float(d["w0"] / d["d"]), 3),
+            "steps": int(min(max(d["tiers"], 0), 6)),
+            "step_h": round(float((d["z_d"] - d["z_a"]) / d["tiers"]), 3)
+            if d["tiers"] else 0.45,
+            "drum": round(max(float(d["z_s"] - d["z_d"]), 0.0), 3),
+            "rise": round(min(max(float((d["z_t"] - d["z_s"]) / (2 * R)),
+                                  0.2), 1.2), 3),
+            "finial_h": round(max(float(d["top"] - d["z_t"]), 0.3), 3),
+            "_up": round(float(d["z_s"] - d["z0"]), 3), "_pri": pri}
+        old = spec.get("dome")
+        if not old or (pri, new["_up"]) >= (old.get("_pri", 0),
+                                            old.get("_up", 0.0)):
+            spec["dome"] = new
+    return spec
+
+
+def spec_all(doc) -> dict:
+    """The elevations' minarets and dome set on the model's (the minarets
+    the plans / the look made, the roof plan's biggest dome)."""
+    from . import project as PJ
+    spec = doc.get("elev_towers") or {}
+    rep = {}
+    arch = doc["arch"]
+    el = dict(zip([lv["id"] for lv in arch["levels"]], PJ.elevations(arch)))
+    ms = spec.get("minaret")
+    if ms:
+        n = 0
+        for m in doc.get("minarets") or []:
+            if not str(m.get("id", "")).startswith("auto-"):
+                continue
+            z0 = el.get(m.get("level"))
+            if z0 is None:
+                continue
+            h = float(ms["top"]) - z0
+            if h < 6.0:
+                continue
+            m["h"] = round(h, 3)
+            st = [round(s - z0, 3) for s in ms["stops"]]
+            if st and st[0] >= 1.0 and all(b > a for a, b in
+                                           zip(st, st[1:])):
+                m["stops"] = st
+                m["base_h"] = st[0]
+                m["galleries"] = min(max(len(st) - 1, 1), 3)
+            if ms.get("b"):
+                m["b"] = float(ms["b"])
+            n += 1
+        if n:
+            rep["minarets"] = n
+    dm = spec.get("dome")
+    if dm:
+        cands = [d for d in doc.get("domes") or []
+                 if str(d.get("id", "")).startswith("cad-")]
+        if cands:
+            big = max(float(d["d"]) for d in cands)
+            for d in cands:
+                if float(d["d"]) < 0.75 * big or float(d["d"]) < 4.0:
+                    continue
+                d.update({k: dm[k] for k in ("d", "base_h", "base_w", "steps",
+                                             "step_h", "drum", "rise",
+                                             "finial_h") if k in dm})
+                d["kind"] = "hemi"
+                d.pop("base_poly", None)
+                rep["dome"] = d["id"]
+    return rep

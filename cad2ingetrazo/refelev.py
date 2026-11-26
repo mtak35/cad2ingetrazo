@@ -573,6 +573,146 @@ def _hint(doc, arch, src, tried, dirs) -> str:
             f" — its lines fit the {D} wall better: set it so")
 
 
+def _cad_marks(src) -> list:
+    """The level marks a CAD elevation writes («GR.LEV.+4'-0"»): their
+    values in metres, sorted."""
+    from . import elevread as EV
+    raw = src.get("raw")
+    if not raw:
+        return []
+    out = set()
+    for t_ in raw.get("texts") or []:
+        v = EV._level_value(str(t_.get("text") or ""))
+        if v is not None and -0.01 <= v < 400.0:
+            out.add(round(v, 3))
+    return sorted(out)
+
+
+def _mark_b(raw):
+    """b of z = y·unit − b from the level marks' own heights (a mark's text
+    stands a line's height over its datum), or None when they do not all
+    agree."""
+    from . import elevread as EV
+    k = float(raw.get("unit") or 1.0)
+    bs = []
+    for t_ in raw.get("texts") or []:
+        v = EV._level_value(str(t_.get("text") or ""))
+        if v is None or v < -0.01 or v > 400:
+            continue
+        bs.append((float(t_["y"]) - 1.25 * float(t_.get("h") or 0.0)) * k - v)
+    if len(bs) < 3:
+        return None
+    bs.sort()
+    m = bs[len(bs) // 2]
+    ok = [b for b in bs if abs(b - m) < 0.12]
+    return sum(ok) / len(ok) if len(ok) >= 3 and len(ok) >= 0.6 * len(bs) \
+        else None
+
+
+def _cad_levels(arch, src) -> list:
+    """The storey heights its level marks say (the floors the model
+    has, each matched to the mark within 0.35 m): [(name, old, new)]."""
+    from . import project as PJ
+    vals = _cad_marks(src)
+    if len(vals) < 3:
+        return []
+    levels = arch["levels"]
+    el = PJ.elevations(arch)
+    order = sorted(range(len(levels)), key=lambda i: el[i])
+
+    def mark(z):
+        best = min(vals, key=lambda v: abs(v - z))
+        return best if abs(best - z) <= 0.35 else None
+    g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
+    out = []
+    ups = [i for i in order if el[i] >= el[g] - 0.01]
+    for a, b in zip(ups, ups[1:]):
+        va, vb = mark(el[a]), mark(el[b])
+        if va is None or vb is None or vb <= va:
+            continue
+        h = vb - va
+        old = float(levels[a]["height"])
+        if 2.2 <= h <= 8.0 and abs(h - old) > 0.03:
+            levels[a]["height"] = round(h, 4)
+            out.append((levels[a]["name"], round(old, 3), round(h, 3)))
+            el = PJ.elevations(arch)
+    # the last floor up to the highest mark (the stair roof)
+    if ups:
+        i = ups[-1]
+        if i != g and mark(el[i]) is not None:
+            pass
+    top = None
+    if len(ups) >= 2:
+        # a roof level that stands under the top mark: its height to it
+        j = ups[-2] if levels[ups[-1]]["name"].lower().startswith("top") \
+            else ups[-1]
+        v0 = mark(el[j])
+        hi = max(vals)
+        if v0 is not None and hi > v0 + 1.0 and j != g:
+            h = hi - v0
+            old = float(levels[j]["height"])
+            if 1.5 <= h <= 8.0 and abs(h - old) > 0.03 and \
+                    all(n_ != levels[j]["name"] for n_, _o, _n in out):
+                levels[j]["height"] = round(h, 4)
+                out.append((levels[j]["name"], round(old, 3), round(h, 3)))
+    _ = top
+    return out
+
+
+def _cad_towers(doc, arch, src, s, t, Z, el, pri=0) -> dict:
+    """The minarets and the dome a CAD elevation draws over its roof
+    line, kept and set on the model's (elevread.towers)."""
+    from . import elevread as EV
+    raw = src.get("raw")
+    if not raw or not src.get("m_per_px"):
+        return {}
+    marks = _cad_marks(src)
+    z_top = max(marks) if marks else None
+    if z_top is None:
+        return {}
+    ex = raw["extents"]
+    kp = float(raw["unit"]) / float(src["m_per_px"])
+    k = float(raw["unit"])
+    b = _mark_b(raw)
+    if b is not None:        # the heights from the marks: the drawing's own
+        def zf(y_):
+            return y_ * k - b
+    else:                    # (else from the fit's ground line)
+        def zf(y_):
+            return Z((y_ - ex[1]) * kp)
+    za, zb = zf(0.0), zf(1000.0)
+    if abs(zb - za) < 1e-9:
+        return {}
+    y_min = (z_top - 0.9 - za) * 1000.0 / (zb - za)
+    segs = []
+    for sg in raw["segs"]:
+        lay = sg[4] or ""
+        if max(sg[1], sg[3]) < y_min:
+            continue
+        if EV.NOTE_LAYERS.search(lay) or EV.ENTOURAGE.search(lay):
+            continue
+        segs.append((s * (sg[0] - ex[0]) * kp + t, zf(sg[1]),
+                     s * (sg[2] - ex[0]) * kp + t, zf(sg[3])))
+    tw = EV.towers(segs, z_top)
+    if not tw or not (tw.get("minarets") or tw.get("domes")):
+        return {}
+    EV.store_towers(doc, tw, segs, None, pri)
+    done = EV.spec_all(doc)
+    rep = {}
+    sp = doc.get("elev_towers") or {}
+    from .host import len_txt
+    if sp.get("minaret"):
+        rep["minarets"] = (f"top {len_txt(sp['minaret']['top'])} over the "
+                           f"ground; {len(sp['minaret']['stops'])} balconies"
+                           f" ({done.get('minarets', 0)} set)")
+    if sp.get("dome"):
+        d_ = sp["dome"]
+        rep["dome"] = (f"{len_txt(d_['d'])} wide on a {len_txt(d_['base_h'])}"
+                       f" base, {d_['steps']} tiers, drum "
+                       f"{len_txt(d_['drum'])}")
+    return rep
+
+
 def follow(doc, ref, src=None, used=()) -> dict:
     """One reference followed: its side found (or as given), its scale and
     position, then the openings set from it. The fit is stored in
@@ -609,6 +749,7 @@ def follow(doc, ref, src=None, used=()) -> dict:
                 + _hint(doc, arch, src, sides, dirs_)}
     levels = arch["levels"]
     g = next((i for i, lv in enumerate(levels) if lv["kind"] == "ground"), 0)
+    lv_set = _cad_levels(arch, src)          # 3.64.156: its level marks
     el = PJ.elevations(arch)
     gy = _ground_y(src, s, t, ops, seen, arch, D, el, g)
     if gy is None:
@@ -661,19 +802,30 @@ def follow(doc, ref, src=None, used=()) -> dict:
             lvn = next((lv["name"] for lv in levels
                         if lv["id"] == op[1]["level"]), "")
             tall_[lvn] = max(tall_.get(lvn, 0.0), Z(fr[3]) - z0_)
-    for lvn, h_ in tall_.items():
-        from .host import len_txt
-        notes.append(f"{lvn}: openings drawn up to {len_txt(h_)} — taller "
-                     "than its storey: set «Floor height»")
     st = EV.new_stats()
     EV._apply_view(doc, arch, D, ops, seen, vert, horiz, arcs, [], {},
                    bands, st, know_arcs=bool(src.get("arcs_known")),
                    careful=not src.get("arcs_known"))
+    if not st.get("tall"):       # (3.64.156: the tall ones now carried up)
+        for lvn, h_ in tall_.items():
+            from .host import len_txt
+            notes.append(f"{lvn}: openings drawn up to {len_txt(h_)} — "
+                         "taller than its storey: set «Floor height»")
     rep = {"side": D, "jambs": f"{n} of {ne}",
            "scale": f"1 px = {s * 1000:.1f} mm"}
     if notes:
         rep["note"] = "; ".join(notes)
     EV.finish_stats(arch, st, rep)
+    if lv_set:
+        rep["levels"] = lv_set
+    try:                      # 3.64.156: its minarets and dome
+        t_rep = _cad_towers(doc, arch, src, s, t, Z, el,
+                            1 if effective_side(ref) == "front" else 0)
+        if t_rep:
+            rep.update(t_rep)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("refelev towers")
     ref["fit"] = {"side": D, "block": block_of(ref),
                   "s": round(s, 6), "t": round(t, 4),
                   "y0": round(y0, 2), "z0": round(z0, 4),
@@ -701,6 +853,8 @@ def follow_all(doc, panel=None) -> list:
     refs.sort(key=lambda r: (effective_side(r) == "perspective",
                              r.get("side") == "auto"))
     used_by = {}
+    if refs:
+        doc["elev_towers"] = {}      # 3.64.156: read again from them
     for r in refs:
         name = os.path.basename(r["file"]) + (
             f" (Block {block_of(r)})" if block_of(r) != "all" else "")

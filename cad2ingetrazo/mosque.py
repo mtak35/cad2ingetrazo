@@ -465,6 +465,12 @@ def apply(doc) -> dict:
         log_error("mosque.sync_domes")
     rep["hall_18ft"] = hall_storey(doc)
     rep["minarets"] = minarets(doc)
+    try:                               # 3.64.156: as the elevations draw
+        from . import elevread as EV_t
+        EV_t.spec_all(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("mosque.apply elevation towers")
     try:                               # 3.64.68: the roof plan's tiers
         rep["tiers"] = apply_tiers(doc)
     except Exception:  # noqa: BLE001

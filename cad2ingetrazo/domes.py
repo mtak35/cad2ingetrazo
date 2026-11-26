@@ -220,6 +220,8 @@ def build(dome, z_base, hi=False):
                                  ribs=16 if kind == "ribbed" else 0), col))
     if dome.get("finial", True):             # a finial (kalash, rod, moon)
         fh = min(max(0.18 * 2 * R, 0.6), 3.0)
+        if dome.get("finial_h"):                 # 3.64.156: as the elevation
+            fh = min(max(float(dome["finial_h"]), 0.3), 4.0)
         fr = fh * 0.12
         ztop = z + prof[-1][1]
         if kind in ("hemi", "ribbed", "saucer"):
@@ -292,6 +294,17 @@ def load(raw) -> list:
                         "color": d.get("color") if d.get("color") in COLOR
                         else "white",
                         "mtype": str(d.get("mtype") or "")[:16]})
+            # 3.64.154 / .156: where it stands, its plan's base, the
+            # elevation's finial
+            r_ = out[-1]
+            if d.get("stand") in ("floor", "walls"):
+                r_["stand"] = d["stand"]
+            bp_ = d.get("base_poly")
+            if isinstance(bp_, list) and len(bp_) >= 3:
+                r_["base_poly"] = [[float(p[0]), float(p[1])] for p in bp_]
+            for k_ in ("plinth", "finial_h"):
+                if d.get(k_):
+                    r_[k_] = float(d[k_])
         except (KeyError, TypeError, ValueError):
             continue
     return out

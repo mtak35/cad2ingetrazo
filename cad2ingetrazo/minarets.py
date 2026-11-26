@@ -148,6 +148,15 @@ def build_minaret(m, z0, hi=False):
     bh = min(max(float(m.get("base_h", 0.55 * H)), 1.0), H - 4.0)
     gal = int(m.get("galleries", 3) or 3)
     gal = min(max(gal, 1), 3)
+    # 3.64.156: the balconies where the elevation draws them (their heights
+    # over the minaret's foot: «stops»; the last is the open lantern's)
+    stops = [float(v) for v in (m.get("stops") or [])]
+    if len(stops) >= 2 and all(b > a for a, b in zip(stops, stops[1:])) \
+            and stops[0] >= 1.0 and stops[-1] < H - 0.6:
+        gal = min(len(stops) - 1, 3)
+        bh = stops[0]
+    else:
+        stops = []
     n = 32 if hi else 20
     col = DM.COLOR.get(m.get("color", "white"), STONE)
     parts = []
@@ -164,6 +173,14 @@ def build_minaret(m, z0, hi=False):
     lantern = 0.11 * rest
     cup = 0.09 * rest
     shafts = [max(s * rest - gh, 0.6) for s in seg]
+    if stops:
+        shafts = [max(stops[k + 1] - stops[k] - 0.73, 0.5)
+                  for k in range(gal)]
+        top_ = max(H - stops[gal] - 1.25, 1.0)   # (rail, cap, finial)
+        lantern = max(0.38 * top_, 0.4)
+        cup = max(0.62 * top_, 0.5)
+        if m.get("cupola", "bulbous") == "conical":
+            cup /= 2.2                           # (the cone is 2.2 cups)
     radii = [B * 0.50, B * 0.42, B * 0.36]
     for k in range(gal):
         r_sh = radii[k] if k else B * 0.50
@@ -375,6 +392,7 @@ def load(raw, key) -> list:
                          base_h=float(d.get("base_h") or 0.55 * float(
                              d.get("h", 30.0))),
                          galleries=int(d.get("galleries", 3) or 3),
+                         stops=[float(v) for v in d.get("stops") or []],
                          cupola=d.get("cupola") if d.get("cupola") in
                          dict(CUPOLAS) else "bulbous")
             else:

@@ -220,7 +220,7 @@ def empty() -> dict:
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
-            "hill": {}, "plan_area": {}, "cad_domes": {}, "cad_domes_roof": {}, "ref_front": "",
+            "hill": {}, "plan_area": {}, "cad_domes": {}, "cad_domes_roof": {}, "ref_front": "", "elev_towers": {},
             "tiers": {},
             "bound_lines": {}, "seats": {}, "vaults": {}}
 
@@ -290,6 +290,8 @@ def load(raw) -> dict:
     doc["cad_domes_roof"] = {k: v for k, v in
                              (raw.get("cad_domes_roof") or {}).items()
                              if k in ids and isinstance(v, list)}
+    doc["elev_towers"] = raw.get("elev_towers") if isinstance(
+        raw.get("elev_towers"), dict) else {}
     doc["tiers"] = {k: v for k, v in (raw.get("tiers") or {}).items()
                     if k in ids and isinstance(v, dict)}
     doc["bound_lines"] = {k: v for k, v in (raw.get("bound_lines") or {})
@@ -18548,6 +18550,12 @@ def update_from_cad(doc, as_cad=False) -> list:
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.update_from_cad roof domes")
+    try:                      # 3.64.156: the elevations' minarets and dome
+        from . import elevread as EV_t
+        EV_t.spec_all(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.update_from_cad elevation towers")
     try:                      # 3.64.149: the Top Roof as the roof plan draws it
         if stair_roofs_from_cad(doc):
             out.append(("Top Roof", {"stair roofs": True}))
