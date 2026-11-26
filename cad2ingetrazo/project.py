@@ -14877,6 +14877,120 @@ def add_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
     return None
 
 
+def stair_roofs_from_cad(doc) -> dict:
+    """3.64.149: the «Top Roof» level as the CAD's roof floor plan draws it:
+    its floor at the plan's «STAIR ROOF LEV.» note (the «Roof» storey's
+    height set so), and its slab only over the stair roofs the plan draws
+    (the closed outline round each note) — no made-up slab or parapet.
+    {"level": metres, "slabs": n} (empty when not done)."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import polygonize, unary_union
+
+    from . import cadread as CR
+    from . import parking as PK
+    arch = doc["arch"]
+    top = next((lv for lv in arch["levels"] if lv["name"] == "Top Roof"),
+               None)
+    roof = next((lv for lv in arch["levels"] if lv["name"] == "Roof"), None)
+    if top is None or roof is None:
+        return {}
+    imps = doc.get("imports") or {}
+    h2 = imps.get(roof["id"])
+    if not h2 or not h2.get("file") or not h2.get("region"):
+        return {}
+    path = h2["file"]
+    dd = dict(doc, imports={k_: dict(v_, roof=False)
+                            for k_, v_ in imps.items()})
+    reg = find_roof_part(dd, path, h2)
+    if not reg:
+        return {}
+    d = CR.read(path, h2.get("unit"))
+    k = float(d["unit"] or 1.0)
+
+    def inside(r, x, y):
+        return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+    notes = []
+    for t in d["texts"]:
+        if inside(reg, t["x"], t["y"]) and re.search(
+                r"ROOF", str(t["text"]).upper()):
+            tx_ = str(t["text"]).split("\n")[0]
+            m_ = re.search(r"LEV.*", tx_.upper())
+            v = PK.level_note(m_.group(0) if m_ else tx_)
+            if v and v[1] is not None:
+                notes.append((t["x"], t["y"], float(v[1])))
+    if not notes:
+        return {}
+    lev = max(n[2] for n in notes)
+    # the roof plan against the terrace plan: the grid's labels (the same
+    # drawing repeated) give the shift
+    lab = re.compile(r"^(?:[A-H]\d?|[1-9]\d?[a-z]?)$")
+    def labels(r):
+        return {str(t["text"]).strip(): (t["x"], t["y"])
+                for t in d["texts"] if inside(r, t["x"], t["y"])
+                and lab.match(str(t["text"]).strip())}
+    la, lb = labels(reg), labels(h2["region"])
+    dxs = sorted(la[n][0] - lb[n][0] for n in la if n in lb)
+    dys = sorted(la[n][1] - lb[n][1] for n in la if n in lb)
+    if len(dxs) < 3:
+        return {}
+    sx, sy = dxs[len(dxs) // 2], dys[len(dys) // 2]
+    r_ = math.radians(float(h2.get("rot", 0.0) or 0.0))
+    ix, iy = float(h2.get("ix", 0.0) or 0.0), float(h2.get("iy", 0.0) or 0.0)
+    bx, by = float(h2["bx"]), float(h2["by"])
+
+    def to_model(x, y):
+        vx, vy = (x - sx - bx) * k, (y - sy - by) * k
+        return (math.cos(r_) * vx - math.sin(r_) * vy + ix,
+                math.sin(r_) * vx + math.cos(r_) * vy + iy)
+    lines = []
+    for sg in d["segs"]:
+        if inside(reg, sg[0], sg[1]) and re.search(
+                r"ROOF|WALL", str(d["layers"][sg[4]] if isinstance(
+                    sg[4], int) else sg[4]).upper()):
+            a, b = to_model(sg[0], sg[1]), to_model(sg[2], sg[3])
+            if math.dist(a, b) > 1e-4:
+                lines.append(LineString([a, b]))
+    polys = list(polygonize(unary_union(lines))) if lines else []
+    slabs = []
+    for x, y, v in notes:
+        if abs(v - lev) > 0.01:
+            continue
+        pt = Point(to_model(x, y))
+        near = [g for g in polys if g.contains(pt) and 2.0 < g.area < 80.0]
+        if not near:
+            continue
+        g = min(near, key=lambda q: q.area)
+        g = g.buffer(0.15, join_style=2)
+        if g.geom_type == "Polygon" and not any(
+                g.buffer(-0.05).intersects(q) and
+                g.intersection(q).area > 0.6 * g.area for q in slabs):
+            slabs.append(g)
+    if not slabs:
+        return {}
+    # the «Roof» storey runs to the stair roof's level
+    el = elevations(arch)
+    ir = [lv["id"] for lv in arch["levels"]].index(roof["id"])
+    h = lev - el[ir]
+    if 1.5 <= h <= 6.0:
+        roof["height"] = round(h, 4)
+        arch["levels"] = M.fix_levels(arch["levels"])
+    lid = top["id"]
+    gone = {w["id"] for w in arch["walls"] if w["level"] == lid
+            and not w.get("user")}
+    arch["walls"] = [w for w in arch["walls"] if w["id"] not in gone]
+    arch["openings"] = [o for o in arch["openings"] if o["wall"] not in gone]
+    arch["structure"] = [e for e in arch["structure"] if e["level"] != lid
+                         or e.get("user")]
+    t_ = float(doc["settings"].get("slab_t", 0.15) or 0.15)
+    recs = [{"type": "slab", "level": lid, "holes": [], "t": t_,
+             "offset": 0.0, "stair_roof": True,
+             "corners": [[round(a, 4), round(b, 4)] for a, b in
+                         list(g.exterior.coords)[:-1]]} for g in slabs]
+    recs = [r for r in recs if S.why_not(r) is None]
+    arch["structure"] += M.new_elements(arch["structure"], recs)
+    return {"level": round(lev, 4), "slabs": len(recs)}
+
+
 def add_top_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
                        height=3.0) -> str | None:
     """3.64.145: a «Top Roof» level over the «Roof» level (the stair / lift
@@ -14946,6 +15060,11 @@ def add_top_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
             if rk and rk != "solid":
                 w_["rail"] = rk
         arch["walls"] += made_
+    try:                       # 3.64.149: as the CAD's roof plan draws it
+        stair_roofs_from_cad(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.stair_roofs_from_cad")
     return None
 
 
@@ -18007,6 +18126,12 @@ def update_from_cad(doc, as_cad=False) -> list:
             from .host import log_error
             log_error("project.update_from_cad refs")
             out.append(("References", {"error": str(e)}))
+    try:                      # 3.64.149: the Top Roof as the roof plan draws it
+        if stair_roofs_from_cad(doc):
+            out.append(("Top Roof", {"stair roofs": True}))
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.update_from_cad stair roofs")
     from . import stairs as ST           # the stairs, as the plans draw them
     try:
         ST.auto(doc)
