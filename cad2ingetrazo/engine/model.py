@@ -255,7 +255,7 @@ def new_dig(digs: list[dict], corners, bottom: dict,
 WALL_ALIGNS = ("outside", "centre", "inside")
 #: the shapes of an arched head (engine/structure.py draws them)
 ARCH_STYLES = ("semi", "segmental", "pointed", "ogee", "horseshoe",
-               "multifoil", "tudor", "trefoil", "elliptical")
+               "multifoil", "tudor", "trefoil", "elliptical", "nabawi")
 
 GLASS_KEYS = ("clear", "double", "lowe", "grey", "bronze", "green", "blue_ref", "silver_ref", "frosted")
 

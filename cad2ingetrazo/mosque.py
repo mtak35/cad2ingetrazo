@@ -59,6 +59,11 @@ TYPES = {
                     dome="hemi", dome_c="green", drum=0.10,
                     cupola="modern", gal=0, hmul=0.9, bmul=1.15,
                     arch="horseshoe"),
+    "nabawi": dict(label="Masjid al-Nabawi (green dome, banded pointed "
+                         "arches, Mamluk-style minarets)",
+                   dome="hemi", dome_c="green", drum=0.14,
+                   cupola="conical", gal=3, hmul=1.25, bmul=0.85,
+                   arch="nabawi"),
     "arabian": dict(label="Arabian / Najdi (shallow domes, plain)",
                     dome="saucer", dome_c="white", drum=0.10,
                     cupola="conical", gal=1, hmul=1.0, bmul=0.9,
@@ -75,7 +80,8 @@ def kind_of(doc) -> dict:
 def is_mosque(doc) -> bool:
     n = sum(1 for t in doc.get("texts") or []
             if MOSQUE_RX.search(str(t.get("text", ""))))
-    return n >= 2 or bool(doc.get("cad_domes"))
+    return n >= 2 or bool(doc.get("cad_domes")) or \
+        bool(doc.get("cad_domes_roof"))
 
 
 # ---- the domes the plans draw -----------------------------------------------------
@@ -113,12 +119,17 @@ def sync_domes(doc) -> int:
     old = {d["id"]: d for d in doc.get("domes") or []
            if str(d.get("id", "")).startswith("cad-")}
     made = []
-    for lid, cs in (doc.get("cad_domes") or {}).items():
+    lids = list(dict.fromkeys(list(doc.get("cad_domes") or {}) +
+                              list(doc.get("cad_domes_roof") or {})))
+    for lid in lids:
+        cs = list((doc.get("cad_domes") or {}).get(lid) or []) + \
+            list((doc.get("cad_domes_roof") or {}).get(lid) or [])
         if lid not in ids or not cs:
             continue
         big = max(c[2] for c in cs)
         for c in cs:
-            x, y, d = c
+            x, y, d = c[0], c[1], c[2]
+            ex = c[3] if len(c) > 3 and isinstance(c[3], dict) else {}
             did = f"cad-{lid}-{round(x, 1)}-{round(y, 1)}"
             main = d >= 0.75 * big and d >= 4.0
             mk = kind_of(doc)
@@ -130,6 +141,11 @@ def sync_domes(doc) -> int:
                    "finial": True, "color": mk["dome_c"],
                    "mtype": (doc.get("look") or {}).get("mosque_type")
                    or "modern"}
+            if ex.get("stand"):                    # 3.64.154: roof plan's
+                rec["stand"] = ex["stand"]
+            if ex.get("base_poly"):
+                rec["base_poly"] = ex["base_poly"]
+                rec["base_h"] = 0.0
             o = old.get(did)
             if o and o.get("mtype") == rec["mtype"]:
                 # (its finish / kind set by hand — kept while the kind of
@@ -299,6 +315,8 @@ def arches(doc) -> int:
         if o["kind"] != "door" and float(o["w"]) >= 0.6 and \
                 o.get("grille") in (None, "", "ms"):
             o["grille"] = jali        # 3.64.67: the jali in the arches
+        if kind_of(doc)["arch"] == "nabawi":      # 3.64.154: black / white
+            o["ring"] = "ablaq"                    # voussoirs
         if o.get("head") == "arch" and o.get("arch") == kind_of(doc)["arch"]:
             continue
         o["head"] = "arch"
@@ -373,7 +391,10 @@ def crown(doc) -> int:
                  "pos": round(pier + wd / 2 + j * (wd + pier), 4),
                  "w": round(wd, 3), "h": round(h, 3), "sill": 0.3,
                  "swing": "left", "face": 1, "style": "", "head": "arch",
-                 "arch": "semi", "grille": jali, "ring": "plain"}
+                 "arch": kind_of(doc)["arch"] if kind_of(doc)["arch"]
+                 == "nabawi" else "semi", "grille": jali,
+                 "ring": "ablaq" if kind_of(doc)["arch"] == "nabawi"
+                 else "plain"}
                 for j in range(k)]
         arch["openings"] += M.new_openings(arch["openings"], recs)
         n += k
@@ -406,7 +427,7 @@ def tall_arches(doc) -> int:
             min(float(o.get("sill", 0.9) or 0.9), 0.6)
         h = round(H - sill - 0.75, 3)
         if o.get("head") == "arch":
-            o["ring"] = "plain"          # 3.64.71: the arch's frame
+            o["ring"] = "ablaq" if o.get("arch") == "nabawi" else "plain"
         if h > float(o["h"]) + 0.1:
             o["sill"] = sill
             o["h"] = h

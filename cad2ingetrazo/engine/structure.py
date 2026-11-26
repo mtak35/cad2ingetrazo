@@ -1227,7 +1227,9 @@ ARCHES = [("semi", "Semicircular (Roman)", 0.50),
           ("horseshoe", "Horseshoe (Moorish)", 0.65),
           ("multifoil", "Multifoil (cusped, five lobes)", 0.50),
           ("trefoil", "Trefoil (three lobes)", 0.50),
-          ("tudor", "Tudor / four-centred (Persian, flat point)", 0.32)]
+          ("tudor", "Tudor / four-centred (Persian, flat point)", 0.32),
+          ("nabawi", "Masjid al-Nabawi (stilted pointed, banded stones)",
+           0.88)]
 _RISE = {k: r for k, _l, r in ARCHES}
 
 
@@ -1259,6 +1261,20 @@ def _half(hw, r, sty, k):
         a1 = math.atan2(r, e)                   # from the centre (−e, 0)
         return [(-e + R * math.cos(a1 * i / k), R * math.sin(a1 * i / k))
                 for i in range(k + 1)]
+    if sty == "nabawi":
+        # 3.64.154: the Prophet's Mosque's arcades — a short vertical
+        # stilt, then a pointed two-centred arch (the voussoirs banded)
+        s0 = 0.10 * r
+        rr = r - s0
+        if rr <= hw * 1.01:
+            return [(hw * math.cos(math.pi / 2 * i / k),
+                     r * math.sin(math.pi / 2 * i / k)) for i in range(k + 1)]
+        e = (rr * rr - hw * hw) / (2 * hw)
+        R = hw + e
+        a1 = math.atan2(rr, e)
+        return [(hw, 0.0)] + [(-e + R * math.cos(a1 * i / k),
+                               s0 + R * math.sin(a1 * i / k))
+                              for i in range(k + 1)]
     if sty == "elliptical" or (sty == "pointed" and r <= hw * 1.01):
         return [(hw * math.cos(math.pi / 2 * i / k),
                  r * math.sin(math.pi / 2 * i / k)) for i in range(k + 1)]

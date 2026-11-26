@@ -831,6 +831,16 @@ PRESETS = {
         "wall": [0.9, 0.82, 0.68], "trim": [0.95, 0.9, 0.8],
         "stone": [0.78, 0.68, 0.52], "metal": [0.20, 0.20, 0.22],
         "accent": [0.55, 0.42, 0.3], "gate_color": "brown"}),
+    "mosque_nabawi": ("Mosque — Masjid al-Nabawi (green dome, banded pointed arches, "
+                      "white marble)", {
+        **OFF, "roof": "asdrawn", "annex_roof": False, "win_head": "arch",
+        "win_frame": "aluminium", "door_arch": True, "rail": "asdrawn",
+        "columns": "asdrawn", "slab_edges": True, "fascia": True,
+        "fascia_d": 0.45, "fascia_h": 0.60, "mosque": True,
+        "mosque_type": "nabawi",
+        "wall": [0.95, 0.92, 0.84], "trim": [0.98, 0.97, 0.93],
+        "stone": [0.86, 0.82, 0.72], "metal": [0.86, 0.69, 0.25],
+        "accent": [0.18, 0.52, 0.36], "gate_color": "green"}),
 }
 #: a line on what each style is, under the designer's choice
 STYLE_NOTES = {
@@ -845,6 +855,9 @@ STYLE_NOTES = {
                       "minaret.",
     "mosque_arabian": "Plain walls in sand colours, shallow domes, round "
                       "arches.",
+    "mosque_nabawi": "White marble walls, pointed arches with banded "
+                     "black-and-white stones as in the Prophet's Mosque, a "
+                     "green dome, slim minarets with three galleries.",
     "royal": "A palace front: cream stone, gold trim, Corinthian columns "
              "and a pediment, pilasters, quoins and corbels, a cornice, "
              "stone balustrades on every balcony and terrace.",

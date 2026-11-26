@@ -175,6 +175,16 @@ def build(dome, z_base, hi=False):
     # the roof, its tiers set back), as the elevations draw them
     base_h = max(float(dome.get("base_h", 0.0) or 0.0), 0.0)
     nst = int(dome.get("steps", 0) or 0)
+    bp_ = dome.get("base_poly")
+    if bp_ and len(bp_) >= 3:                 # 3.64.154: the plan's own base
+        from shapely.geometry import Polygon as _Pg
+
+        from . import project as PJ_
+        bh_ = max(float(dome.get("plinth", 0.0) or 0.0), 0.0) or \
+            min(0.45, 0.35 * R + 0.15)
+        parts.append(("base", [dict(f, color=trim) for f in PJ_._prism(
+            _Pg(bp_).buffer(0), z, z + bh_, 1e-5)], trim))
+        z += bh_
     if base_h > 0.01 or nst:
         from shapely.geometry import box as _box
 
@@ -287,6 +297,34 @@ def load(raw) -> list:
     return out
 
 
+def _walls_top(arch, dm, default):
+    """The top of the walls standing round the dome (its level's), else
+    ``default``."""
+    from shapely.geometry import Point
+
+    from . import finishes as FN
+    R = float(dm.get("d", 6.0)) / 2
+    c = Point(float(dm["x"]), float(dm["y"]))
+    top = None
+    for w in arch["walls"]:
+        if w["level"] != dm["level"] or w.get("rail") or "a" not in w:
+            continue
+        a, b = w["a"], w["b"]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-9:
+            continue
+        t = max(0.0, min(1.0, ((c.x - a[0]) * dx + (c.y - a[1]) * dy) / L2))
+        if math.hypot(a[0] + t * dx - c.x, a[1] + t * dy - c.y) > R * 1.9:
+            continue
+        try:
+            z1 = FN.wall_z_range(arch, w)[1]
+        except Exception:  # noqa: BLE001
+            continue
+        top = z1 if top is None else max(top, z1)
+    return default if top is None else top
+
+
 def groups(doc):
     """The domes' groups (one per dome, on its level's layer)."""
     from core.group import Group
@@ -306,8 +344,16 @@ def groups(doc):
         lv = arch["levels"][i]
         z0 = elev[i] + float(lv["height"]) + slab_t + \
             float(dm.get("z_off", 0.0) or 0.0)
+        if dm.get("stand") == "floor":           # 3.64.154: on the floor
+            z0 = elev[i] + float(dm.get("z_off", 0.0) or 0.0)
+        bdm = dm
+        if dm.get("stand") == "walls":           # on the walls round it
+            zt_ = _walls_top(arch, dm, z0)       # (a drum down to the roof)
+            if zt_ > z0 + 0.05:
+                bdm = dict(dm, drum=float(dm.get("drum", 0.0) or 0.0)
+                           + (zt_ - z0))
         faces = []
-        for _nm, fs, _c in build(dm, z0, hi):
+        for _nm, fs, _c in build(bdm, z0, hi):
             faces += fs
         if not faces:
             continue

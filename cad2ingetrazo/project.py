@@ -220,7 +220,8 @@ def empty() -> dict:
             "sunshades": {}, "lowparts": {}, "domes": [], "minarets": [],
             "chhatris": [], "fitout": [], "fitout_hide": [], "ceil_at": [], "wall_outline": {},
             "fixture_lib": {}, "escalators": [], "ref_elev": [], "look": {}, "look_undo": {},
-            "hill": {}, "plan_area": {}, "cad_domes": {}, "tiers": {},
+            "hill": {}, "plan_area": {}, "cad_domes": {}, "cad_domes_roof": {},
+            "tiers": {},
             "bound_lines": {}, "seats": {}, "vaults": {}}
 
 
@@ -284,6 +285,9 @@ def load(raw) -> dict:
                         if k in ids and isinstance(v, list)}
     doc["cad_domes"] = {k: v for k, v in (raw.get("cad_domes") or {}).items()
                         if k in ids and isinstance(v, list)}
+    doc["cad_domes_roof"] = {k: v for k, v in
+                             (raw.get("cad_domes_roof") or {}).items()
+                             if k in ids and isinstance(v, list)}
     doc["tiers"] = {k: v for k, v in (raw.get("tiers") or {}).items()
                     if k in ids and isinstance(v, dict)}
     doc["bound_lines"] = {k: v for k, v in (raw.get("bound_lines") or {})
@@ -15291,6 +15295,107 @@ def stair_roofs_from_cad(doc) -> dict:
     return {"level": round(lev, 4), "slabs": len(recs)}
 
 
+def roof_domes_from_cad(doc) -> dict:
+    """3.64.154: the domes the CAD's roof floor plan draws — circles (often
+    on the wall layer, concentric rings) with a «DOME» note inside — as
+    domes of the «Roof» level: the big one over the central block (it
+    stands on the walls round it), the small ones on the terrace floor,
+    each on the base the plan outlines (the octagon of its «projection»
+    lines). ``doc["cad_domes_roof"]`` = {level id: [[x, y, d, extras]…]}."""
+    import re as _re
+
+    from shapely.geometry import MultiPoint
+
+    from . import cadread as CR
+    arch = doc["arch"]
+    roof = next((lv for lv in arch["levels"] if lv["name"] == "Roof"), None)
+    store = doc.setdefault("cad_domes_roof", {})
+    if roof is None:
+        return {}
+    imps = doc.get("imports") or {}
+    h2 = imps.get(roof["id"])
+    if not h2 or not h2.get("file") or not h2.get("region"):
+        return {}
+    path = h2["file"]
+    dd = dict(doc, imports={k_: dict(v_, roof=False)
+                            for k_, v_ in imps.items()})
+    reg = find_roof_part(dd, path, h2)
+    if not reg:
+        return {}
+    d = CR.read(path, h2.get("unit"))
+    k = float(d["unit"] or 1.0)
+
+    def inside(r, x, y):
+        return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+    lab = _re.compile(r"^(?:[A-H]\d?|[1-9]\d?[a-z]?)$")
+
+    def labels(r):
+        return {str(t["text"]).strip(): (t["x"], t["y"])
+                for t in d["texts"] if inside(r, t["x"], t["y"])
+                and lab.match(str(t["text"]).strip())}
+    la, lb = labels(reg), labels(h2["region"])
+    dxs = sorted(la[n][0] - lb[n][0] for n in la if n in lb)
+    dys = sorted(la[n][1] - lb[n][1] for n in la if n in lb)
+    if len(dxs) < 3:
+        return {}
+    sx, sy = dxs[len(dxs) // 2], dys[len(dys) // 2]
+    r_ = math.radians(float(h2.get("rot", 0.0) or 0.0))
+    ix, iy = float(h2.get("ix", 0.0) or 0.0), float(h2.get("iy", 0.0) or 0.0)
+    bx, by = float(h2["bx"]), float(h2["by"])
+
+    def to_model(x, y):
+        vx, vy = (x - sx - bx) * k, (y - sy - by) * k
+        return (math.cos(r_) * vx - math.sin(r_) * vy + ix,
+                math.sin(r_) * vx + math.cos(r_) * vy + iy)
+    marks = [(t["x"], t["y"]) for t in d["texts"] if inside(reg, t["x"], t["y"])
+             and _re.match(r"^\s*(DOME|GUMBAD|GUMBAZ|QUBBA|CUPOLA)\b",
+                           str(t["text"]).upper())]
+    if not marks:
+        store.pop(roof["id"], None)
+        return {}
+    groups = []                       # (concentric circles: the biggest)
+    for c in sorted((c for c in d["circles"]
+                     if inside(reg, c["c"][0], c["c"][1])),
+                    key=lambda c: -float(c["r"])):
+        if not any(math.hypot(g["c"][0] - c["c"][0],
+                              g["c"][1] - c["c"][1]) < 2.0 for g in groups):
+            groups.append({"c": c["c"], "r": float(c["r"])})
+    proj = [sg for sg in d["segs"] if inside(reg, sg[0], sg[1]) and _re.search(
+        r"PROJ|PROPO", str(d["layers"][sg[4]] if isinstance(sg[4], int)
+                           else sg[4]).upper())]
+    out = []
+    for g in groups:
+        cx, cy, rr = g["c"][0], g["c"][1], g["r"]
+        dia = 2 * rr * k
+        if not 0.8 <= dia <= 20.0:
+            continue
+        if not any(math.hypot(mx - cx, my - cy) <= rr + max(rr * 0.9, 25.0)
+                   for mx, my in marks):
+            continue
+        x, y = to_model(cx, cy)
+        ex = {}
+        pts = [(sg[i], sg[i + 1]) for sg in proj for i in (0, 2)
+               if 1.2 * rr <= math.hypot(sg[i] - cx, sg[i + 1] - cy) <= 3.5 * rr]
+        if len(pts) >= 6:
+            hull = MultiPoint(pts).convex_hull
+            if hull.geom_type == "Polygon" and hull.area * k * k > dia * dia * 0.5:
+                ex["base_poly"] = [[round(a, 4), round(b, 4)] for a, b in
+                                   (to_model(p, q) for p, q in
+                                    list(hull.exterior.coords)[:-1])]
+        out.append([round(x, 4), round(y, 4), round(dia, 3), ex])
+    if not out:
+        store.pop(roof["id"], None)
+        return {}
+    big = max(c[2] for c in out)
+    for c in out:
+        c[3]["stand"] = "walls" if (c[2] >= 0.75 * big and c[2] >= 4.0) \
+            else "floor"
+    store[roof["id"]] = out
+    from . import mosque as MQ_
+    MQ_.sync_domes(doc)
+    return {"domes": len(out)}
+
+
 def add_top_roof_level(doc, parapet_h=1.0, parapet_t=0.15, slab_t=0.15,
                        height=3.0) -> str | None:
     """3.64.145: a «Top Roof» level over the «Roof» level (the stair / lift
@@ -18436,6 +18541,11 @@ def update_from_cad(doc, as_cad=False) -> list:
             from .host import log_error
             log_error("project.update_from_cad refs")
             out.append(("References", {"error": str(e)}))
+    try:                      # 3.64.154: the domes the roof plan draws
+        roof_domes_from_cad(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.update_from_cad roof domes")
     try:                      # 3.64.149: the Top Roof as the roof plan draws it
         if stair_roofs_from_cad(doc):
             out.append(("Top Roof", {"stair roofs": True}))
