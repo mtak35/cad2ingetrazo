@@ -3390,7 +3390,8 @@ def build(doc: dict, elevations) -> list[dict]:
         # roofs: on the top of the level's walls
         wall_t = max((float(w["t"]) for w in mine), default=0.20)
         for r in (e for e in els if e["type"] == "roof"):
-            out.append(_el(r, lid, roof_faces(r, under, wall_t)))
+            out.append(_el(r, lid, roof_faces(
+                r, under + float(r.get("z_off", 0.0) or 0.0), wall_t)))
     try:
         _soft_joints(out)
     except Exception:  # noqa: BLE001

@@ -258,6 +258,13 @@ def apply(doc, color=None) -> dict:
     p0 = affinity.rotate(poly, -ang, origin=c, use_radians=True).simplify(0.05)
     if p0.geom_type != "Polygon":
         p0 = max(p0.geoms, key=lambda g: g.area)
+    # 3.64.164: a mosque's roof is where the elevations hatch it (the
+    # porch's tiles): its parapet rows, domes and minarets are no pitched
+    # roofs over the top blocks
+    from . import elevread as EV_
+    only_hatch = bool((doc.get("look") or {}).get("mosque")) and EV_.HATCH \
+        and not any(z1 >= z_wall - 0.5 for hv in EV_.HATCH.values()
+                    for _a, _b, _z0, z1 in hv["roofs"])
     old = [e for e in arch["structure"] if LS.is_look_roof(e)]
     arch["structure"] = [e for e in arch["structure"]
                          if not LS.is_look_roof(e)]
@@ -269,7 +276,7 @@ def apply(doc, color=None) -> dict:
             dx, dy = x - c.x, y - c.y
             cs.append([round(c.x + dx * math.cos(ang) - dy * math.sin(ang), 4),
                        round(c.y + dx * math.sin(ang) + dy * math.cos(ang), 4)])
-        fit = _fit_block(cs, profs, z_wall)
+        fit = None if only_hatch else _fit_block(cs, profs, z_wall)
         if fit is None:
             flat += 1
             continue
@@ -314,6 +321,12 @@ def apply(doc, color=None) -> dict:
         pass
     if pitched:
         doc["settings"]["roof_parapet"] = bool(flat)
+    try:                               # 3.64.164: the porch's hatched roof
+        n_h = EV_.hatch_roofs(doc)
+        n += n_h
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("roofref hatch roofs")
     rep = {"roofs": n, "sources": sorted(profs), "flat": flat}
     if parapets:
         rep["parapets_off"] = parapets

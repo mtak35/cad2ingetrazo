@@ -223,6 +223,63 @@ ENTOURAGE = re.compile(r"TREE|PLANT|LAND|FURN|PEOPLE|PERSON|HUMAN|\bCAR|"
 #: model's metres (all the view's lines, diagonals too) — for the roof
 PROFILES: dict = {}
 
+#: 3.64.164: the roof hatch the elevations draw — {side: {"roofs": [(u0, u1,
+#: z0, z1)], "jambs": [(u0, u1)]}} in the model's metres (u as the profiles',
+#: z over the model's datum): tile courses (long level HATCH lines, a
+#: block of them) and the narrow tall hatched posts of a portal
+HATCH: dict = {}
+_HATCH_LAYER = re.compile(r"^\s*HATCH\s*$", re.I)
+
+
+def _hatch_clusters(raw, v) -> dict:
+    """The view's HATCH-layer lines grouped: {"roofs": [(u0, u1, z0, z1)],
+    "jambs": [(u0, u1)]} over the view's datum, u in the drawing's own
+    metres."""
+    k = float(raw.get("unit") or 1.0)
+    b = v["b"]
+    x0, x1, y0, y1 = v["x0"], v["x1"], v["y0"], v["y1"]
+    items = [(s_[0] * k, s_[2] * k, s_[1] * k - b, s_[3] * k - b)
+             for s_ in raw["segs"] if _HATCH_LAYER.match(s_[4] or "")
+             and x0 <= s_[0] <= x1 and x0 <= s_[2] <= x1
+             and y0 <= s_[1] <= y1 and y0 <= s_[3] <= y1]
+    return hatch_boxes(items)
+
+
+def hatch_boxes(items) -> dict:
+    """3.64.164: HATCH lines (u0, u1, z0, z1 in metres) grouped (boxes
+    within 0.5 m join): tile courses (a block of long level lines) are
+    roofs, narrow tall ones at the ground the portal's posts."""
+    boxes = []
+    for ua, ub, za, zb in items:
+        boxes.append([min(ua, ub), max(ua, ub), min(za, zb), max(za, zb), 1,
+                      abs(zb - za) < 0.04 and abs(ub - ua) >= 1.0])
+    g = 0.5
+    ch = True
+    while ch and len(boxes) > 1:
+        ch = False
+        for i in range(len(boxes)):
+            a = boxes[i]
+            for j in range(i + 1, len(boxes)):
+                c = boxes[j]
+                if a[0] <= c[1] + g and a[1] >= c[0] - g and \
+                        a[2] <= c[3] + g and a[3] >= c[2] - g:
+                    boxes[i] = [min(a[0], c[0]), max(a[1], c[1]),
+                                min(a[2], c[2]), max(a[3], c[3]),
+                                a[4] + c[4], a[5] or c[5]]
+                    boxes.pop(j)
+                    ch = True
+                    break
+            if ch:
+                break
+    out = {"roofs": [], "jambs": []}
+    for u0, u1, z0, z1, n, lvl in boxes:
+        if n >= 6 and lvl and u1 - u0 >= 1.5 and z1 - z0 >= 0.6 and \
+                z0 >= 2.0:
+            out["roofs"].append((u0, u1, z0, z1))
+        elif n >= 4 and u1 - u0 <= 0.6 and z1 - z0 >= 2.0 and z0 <= 2.0:
+            out["jambs"].append((u0, u1))
+    return out
+
 
 def _view_all(raw, v):
     """Every line of the view that belongs to the building, in metres
@@ -419,6 +476,7 @@ def apply(doc, raw=None, file=None) -> dict:
         raw = cadread.read(file, how.get("unit"))
     views = find_views(raw)
     PROFILES.clear()
+    HATCH.clear()
     if not views:
         return rep
     arch = doc["arch"]
@@ -481,6 +539,17 @@ def apply(doc, raw=None, file=None) -> dict:
         circ = [(u + s, z + zg, rr) for (u, z, rr) in circ0]
         marks = {nm: [(u + s, z + zg) for (u, z) in pts]
                  for nm, pts in marks0.items()}
+        try:
+            hc_ = _hatch_clusters(raw, v)
+            HATCH[D] = {"roofs": [(a_ + s, b_ + s, c_ + zg, d_ + zg)
+                                  for a_, b_, c_, d_ in hc_["roofs"]],
+                        "jambs": [(a_ + s, b_ + s) for a_, b_ in
+                                  hc_["jambs"]],
+                        "r": [float(dirs_of(arch)[D][1][0]),
+                              float(dirs_of(arch)[D][1][1])]}
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("elevread hatch")
         try:
             PROFILES[D] = [(a_ + s, b_ + zg, c_ + s, d_ + zg)
                            for a_, b_, c_, d_ in _view_all(raw, v)]
@@ -722,6 +791,9 @@ def _niche_arches(arch, seen, bands, arcs, ops, D, st, vert=None) -> None:
             _drop_opening(arch, q)
         uc = (u0 + u1) / 2
         cb = _bay_columns(arch, lid, f_, r_, u0, u1, d2)
+        if cb is not None and cb[0] > d2 + 0.05:
+            cb = None       # 3.64.164: columns behind the wall's face: the
+        #                    # arch is a recess in the wall, not a screen
         if cb is not None and not any(
                 x.get("elev_cad") and x.get("name") == "Arcade (elevation)"
                 and abs((x["a"][0] + x["b"][0]) / 2 * r_[0] +
@@ -759,16 +831,20 @@ def _niche_arches(arch, seen, bands, arcs, ops, D, st, vert=None) -> None:
         nrm = (-dy, dx)                  # the face a niche's face=+1 opens to
         face = 1 if (nrm[0] * -f_[0] + nrm[1] * -f_[1]) > 0 else -1
         if cb is None:
-            _add_opening(arch, {
+            rec_ = {
                 "id": uuid.uuid4().hex[:8], "kind": "void",
                 "wall": w2["id"],
                 "pos": round(pos, 4), "w": round(u1 - u0 - 0.1, 3),
                 "sill": round(max(start - z0, 0.0), 3),
                 "h": round(ap - start - 0.05, 3), "head": "arch",
-                "arch": "pointed", "ring": "plain",
-                "niche": {"d": 0.12, "face": face}, "swing": "left",
+                "arch": "pointed", "ring": "plain", "swing": "left",
                 "style": "", "leaves": 1, "face": 1, "frame": "auto",
-                "hl": 1, "name": "Arch (elevation)", "elev_cad": 1})
+                "hl": 1, "name": "Arch (elevation)", "elev_cad": 1}
+            t_w = float(w2.get("t", 0.2))
+            if t_w >= 0.3:         # 3.64.164: a deep wall: a recess in its
+                rec_["niche"] = {"d": round(min(0.3, t_w - 0.1), 3),
+                                 "face": face}      # face; a thin one: open
+            _add_opening(arch, rec_)
             n_new += 1
         # the storeys below it: the recess goes on down to its foot
         if foot is not None and foot < z0 - 0.05:
@@ -1310,6 +1386,92 @@ def store_towers(doc, tw, segs, el_lvl=None, pri=0, r_vec=None,
     return spec
 
 
+def hatch_roofs(doc) -> int:
+    """3.64.164: the pitched roof the elevations hatch (tile courses over the
+    entrance porch, seen from both sides; its width from the portal's
+    hatched posts in the front / back view) — a hip roof on that porch,
+    between its eave and its top as drawn. How many; the look's other
+    roofs are not touched here."""
+    from shapely.geometry import Polygon
+    from . import lookstyle as LS
+    from . import project as PJ
+    from .engine import model as M
+    from .engine import structure as S
+    if not HATCH:
+        return 0
+    arch = doc["arch"]
+    levels = arch["levels"]
+    el = PJ.elevations(arch)
+    slab_t = float(doc["settings"].get("slab_t", 0.1016) or 0.1016)
+    arch["structure"] = [e for e in arch["structure"] if not e.get("hatch")]
+    recs, seen = [], []
+    for D, hv in HATCH.items():
+        if not hv.get("r"):
+            continue
+        rD = hv["r"]
+        for u0, u1, z0, z1 in hv["roofs"]:
+            for E, he in HATCH.items():
+                if E == D or not he.get("r") or not he["jambs"]:
+                    continue
+                rE = he["r"]
+                if abs(rD[0] * rE[0] + rD[1] * rE[1]) > 0.3:
+                    continue
+                b0 = min(a for a, _ in he["jambs"])
+                b1 = max(b for _, b in he["jambs"])
+                cs = [[a * rD[0] + b * rE[0], a * rD[1] + b * rE[1]]
+                      for a, b in ((u0, b0), (u1, b0), (u1, b1), (u0, b1))]
+                cx = sum(c[0] for c in cs) / 4
+                cy = sum(c[1] for c in cs) / 4
+                if any(math.hypot(cx - x_, cy - y_) < 1.5 for x_, y_ in seen):
+                    break
+                if any(math.hypot(cx - float(vv["c"][0]),
+                                  cy - float(vv["c"][1])) < 2.0
+                       for vl_ in (doc.get("vaults") or {}).values()
+                       for vv in vl_):      # the plan's own vault is there
+                    seen.append((cx, cy))
+                    break
+                i = min(range(len(levels)), key=lambda q: abs(
+                    el[q] + float(levels[q]["height"]) + slab_t - z0))
+                base = el[i] + float(levels[i]["height"]) + slab_t
+                if abs(base - z0) > 2.5:
+                    break
+                short = min(u1 - u0, b1 - b0)
+                if short < 1.0:
+                    break
+                sl = math.degrees(math.atan2(max(z1 - z0, 0.3),
+                                             short / 2.0))
+                rec = {"type": "roof", "level": levels[i]["id"],
+                       "kind": "hip",
+                       "corners": [[round(c[0], 4), round(c[1], 4)]
+                                   for c in cs],
+                       "slope": round(min(max(sl, 10.0), 60.0), 1),
+                       "overhang": 0.0, "t": 0.15, "ridge": "long",
+                       "parapet": 0.0, "pt": 0.15, "tiles": True,
+                       "look": True, "hatch": True,
+                       "z_off": round(z0 - base, 4)}
+                if S.why_not(rec):
+                    break
+                recs.append(rec)
+                seen.append((cx, cy))
+                break
+    if recs:
+        arch["structure"] += M.new_elements(arch["structure"], recs)
+    return len(recs)
+
+
+def _axis_deg(doc) -> float:
+    """3.64.164: the building's axis in the model, degrees (0-90): the
+    stepped dome bases / tiers are squares turned to it."""
+    try:
+        from . import refelev as RE_
+        fv = RE_.front_vec(doc)
+        if fv:
+            return round(math.degrees(math.atan2(fv[1], fv[0])) % 90.0, 3)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
+
+
 def _minaret_depth(doc, spec) -> int:
     """3.64.162: the minarets' place front to back from the side
     elevations (their u runs along the front's depth): all the minarets
@@ -1406,11 +1568,34 @@ def spec_all(doc) -> dict:
                 d.update({"d": kd["d"], "base_w": kd["base_w"],
                           "base_h": kd["base_h"], "finial_h": kd["finial_h"],
                           "stand": "walls", "steps": 0, "drum": 0.0,
-                          "kind": "hemi", "rise": 0.0})
+                          "kind": "hemi", "rise": 0.0,
+                          "rot": _axis_deg(doc)})
                 d.pop("base_poly", None)
                 n += 1
             if n:
                 rep["kiosk_domes"] = n
+    try:                       # 3.64.164: no tiled roofs the elevations don't
+        from . import lookstyle as LS_            # hatch (a ring of hips
+        top_ = max(el.values()) if el else 0.0     # over the parapets)
+        if (doc.get("look") or {}).get("mosque") and HATCH and not any(
+                z1 >= top_ - 1.0 for hv in HATCH.values()
+                for _a, _b, _z0, z1 in hv["roofs"]):
+            n0_ = len(arch["structure"])
+            arch["structure"] = [e for e in arch["structure"]
+                                 if not (LS_.is_look_roof(e)
+                                         and not e.get("hatch"))]
+            if n0_ != len(arch["structure"]):
+                rep["roofs_removed"] = n0_ - len(arch["structure"])
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("elevread drop look roofs")
+    try:
+        n_h = hatch_roofs(doc)
+        if n_h:
+            rep["hatch_roofs"] = n_h
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("elevread hatch roofs")
     pt = spec.get("parapet_top")
     if pt:
         n = 0
@@ -1444,6 +1629,7 @@ def spec_all(doc) -> dict:
                                              "step_h", "drum", "rise",
                                              "finial_h") if k in dm})
                 d["kind"] = "hemi"
-                d.pop("base_poly", None)
+                d["rot"] = _axis_deg(doc)       # 3.64.164: base square
+                d.pop("base_poly", None)        # turned to the building
                 rep["dome"] = d["id"]
     return rep

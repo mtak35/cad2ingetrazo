@@ -696,6 +696,21 @@ def _cad_towers(doc, arch, src, s, t, Z, el, pri=0, D=None) -> dict:
         segs.append((s * (sg[0] - ex[0]) * kp + t, zf(sg[1]),
                      s * (sg[2] - ex[0]) * kp + t, zf(sg[3])))
     doc.setdefault("elev_towers", {})["stair_roof"] = round(float(z_top), 4)
+    try:                     # 3.64.164: the roof hatch (the porch's tiles)
+        zg_ = 0.0              # (zf is on the model's own datum)
+        hs_ = [(s * (sg[0] - ex[0]) * kp + t, s * (sg[2] - ex[0]) * kp + t,
+                zf(sg[1]) + zg_, zf(sg[3]) + zg_)
+               for sg in raw["segs"] if EV._HATCH_LAYER.match(sg[4] or "")
+               and 0.0 <= min(zf(sg[1]), zf(sg[3])) and
+               max(zf(sg[1]), zf(sg[3])) <= z_top + 0.5]
+        dh_ = EV.dirs_of(arch).get(D) if D else None
+        hc_ = EV.hatch_boxes(hs_) if dh_ else None
+        if hc_ is not None:
+            hc_["r"] = [float(dh_[1][0]), float(dh_[1][1])]
+            EV.HATCH[D] = hc_
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("refelev hatch")
     tw = EV.towers(segs, z_top)
     if not tw or not (tw.get("minarets") or tw.get("domes")):
         return {}
@@ -792,6 +807,22 @@ def follow(doc, ref, src=None, used=()) -> dict:
     if gy is None:
         return {"error": "its ground line was not found"}
     y0, z0 = gy
+    Zm = None
+    try:                     # 3.64.164: a CAD drawing's arches' heights from
+        raw_ = src.get("raw")                 # its own level marks (the
+        if raw_ and src.get("m_per_px"):      # ground-line fit can stand ~1 m
+            b_ = _mark_b(raw_)                # off them)
+            if b_ is not None:
+                ex_ = raw_["extents"]
+                mpp = float(src["m_per_px"])
+                zm0 = float(ex_[1]) * float(raw_["unit"]) - b_
+                if abs(s - mpp) <= 0.03 * mpp and abs(
+                        (zm0 + mpp * 500.0) - (z0 + s * (500.0 - y0))) > 0.5:
+                    def Zm(y, zm0=zm0, mpp=mpp):
+                        return zm0 + mpp * y
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("refelev heights from marks")
 
     def Z(y):
         return z0 + s * (y - y0)
@@ -803,7 +834,8 @@ def follow(doc, ref, src=None, used=()) -> dict:
         elif abs(b - d) < 0.5:
             ua, ub = sorted((s * a + t, s * c + t))
             horiz.append((ua, ub, Z(b)))
-    arcs = [(s * a + t, s * c + t, Z(b), Z(d))
+    Za = Zm or Z
+    arcs = [(s * a + t, s * c + t, Za(b), Za(d))
             for a, b, c, d in src.get("arcs") or []
             if (c - a) * s > 0.15]
     # the floors the picture draws (its doors' feet) against the model's
