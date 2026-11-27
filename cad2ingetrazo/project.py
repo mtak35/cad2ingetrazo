@@ -13006,9 +13006,17 @@ def _own_steps(lines, bld) -> list:
             far = max(ps, key=lambda a: sum(a.distance(b) for b in ps))
             ps.sort(key=lambda a: far.distance(a))
             # the end nearer the building first (rank 0: the top step)
-            if bld is not None and not bld.is_empty and \
-                    ps[0].distance(bld) > ps[-1].distance(bld) + 0.05:
-                ps.reverse()
+            # (3.64.170: by the lines' mean distance to the building, not
+            # the nearest point — an L / U of steps whose legs both run
+            # into the walls is 0 m from the building at every riser, the
+            # order then fell to the outermost line first and the steps
+            # went down toward the building, buried in the landing)
+            if bld is not None and not bld.is_empty:
+                def _md(ln_):
+                    return sum(ln_.interpolate(i_ / 24.0, normalized=True)
+                               .distance(bld) for i_ in range(25)) / 25.0
+                if _md(ps[0]) > _md(ps[-1]) + 0.05:
+                    ps.reverse()
             gaps = [ps[k].distance(ps[k + 1]) for k in range(len(ps) - 1)]
             tread = sorted(gaps)[len(gaps) // 2] if gaps else STEP_TREAD
         else:
@@ -14365,8 +14373,28 @@ def _platform_groups(doc):
             if any(pg is q_ for q_ in l_):
                 return k_
         return None
+    # 3.64.170: the steps stand where the platform's slab would run on —
+    # the fill is cut out under every step that is lower than it (the
+    # lower treads of an L / U of steps were buried in the floor-level
+    # block and "not shown")
+    from shapely.ops import unary_union as _uu0
+    step_low_ = []
+    for _sn, spcs_ in parts["steps"]:
+        for sp_ in spcs_:
+            step_low_.append((sp_[0], float(sp_[1])))
     for pg, top in parts["pieces"]:
         c_ = cat_(pg)
+        pg0_ = pg
+        if step_low_:
+            try:
+                cut_ = [q_.buffer(0.003, join_style=2) for q_, zq_ in
+                        step_low_ if zq_ < top - 0.02 and q_.intersects(pg)]
+                if cut_:
+                    pg = pg.difference(_uu0(cut_))
+                    if pg.is_empty:
+                        continue
+            except Exception:  # noqa: BLE001
+                pg = pg0_
         mat_ = ofin_.get(c_) if c_ else ""
         at_ = ML_.attrs_of(mat_) if mat_ else None
         if at_ is not None and top - zg > lft_ + 0.01:

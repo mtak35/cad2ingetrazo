@@ -2811,7 +2811,23 @@ def _above_bottoms(doc, info, lid):
         # floor above on one side of it only (a slab edge to cover)
         own = unary_union([g_ for g_, _b, _z in out]) if out else \
             _wall_footprint(doc, lid)
-        out.append(("_ctx", z0u, (ups, own)))
+        # 3.64.170: the floor over it dropped by the CAD's level notes (an
+        # ablution's roof at +13'-6" under a 24'-wide floor at +24'):
+        # those slabs' tops and soffits — the walls under them stop there
+        lows_ = []
+        for s_ in sl:
+            off_ = float(s_.get("offset", 0.0) or 0.0)
+            if not s_.get("zone") or off_ > -0.6:
+                continue
+            try:
+                lg_ = Polygon([tuple(p[:2]) for p in s_["corners"]],
+                              [[tuple(p[:2]) for p in h]
+                               for h in s_.get("holes") or []
+                               if len(h) >= 3]).buffer(0)
+            except Exception:  # noqa: BLE001
+                continue
+            lows_.append((lg_, z0u + off_, z0u + off_ - float(s_["t"])))
+        out.append(("_ctx", z0u, (ups, own), lows_))
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -2829,6 +2845,20 @@ def _wall_top(w, under, above):
             return under
         ctx = next((a for a in above if a[0] == "_ctx"), None)
         above = [a for a in above if a[0] != "_ctx"]
+        low_ = None
+        if ctx is not None and len(ctx) > 3 and ctx[3]:
+            # 3.64.170: under a floor part the CAD notes lower than the
+            # storey (the ablution's roof): the wall stops at that slab —
+            # at its top when it is an outside wall, else its soffit
+            best_ = 0.0
+            for lg_, ltop_, lbot_ in ctx[3]:
+                ov_ = lg_.buffer(0.15).intersection(ln).length
+                if ov_ > best_ + 1e-6 or (abs(ov_ - best_) <= 1e-6 and
+                                          low_ is not None and
+                                          ltop_ < low_[0]):
+                    best_, low_ = ov_, (ltop_, lbot_)
+            if best_ < min(0.3, 0.5 * ln.length) or best_ < 0.5 * ln.length:
+                low_ = None
         # 3.64.20: an outside wall with a wall standing on it above runs on
         # up to that wall (one face, no joint at the slab's edge); with
         # none over it, it stops under the slab
@@ -2855,6 +2885,9 @@ def _wall_top(w, under, above):
                        for sg in (1, -1)):
                     hit += 1
             out_ = hit * L / n_ >= min(0.4, 0.5 * L)
+            if low_ is not None:
+                return low_[0] if (out_ or w.get("t", 0.2) >= 0.2) \
+                    else low_[1]
             if not own.is_empty and out_ and \
                     under - 0.05 <= z0u <= under + 1.0:
                 # 3.64.31 (his ask): an outside wall always runs up to the
@@ -3140,6 +3173,20 @@ def build(doc: dict, elevations) -> list[dict]:
         for c in (e for e in els if e["type"] == "column"):
             top = (under if c.get("height", "level") == "level"
                    else z0 + float(c["height"])) - SHRINK
+            if c.get("height", "level") == "level":
+                # 3.64.170: a column under a floor part the CAD notes lower
+                # than the storey (the ablution's roof) stops at its soffit
+                try:
+                    ctx_ = next((a for a in above_ or ()
+                                 if a[0] == "_ctx"), None)
+                    if ctx_ is not None and len(ctx_) > 3 and ctx_[3]:
+                        cc_ = _Pg(column_outline(c, 0.0)).centroid
+                        lo_ = [lb_ for lg_, _lt, lb_ in ctx_[3]
+                               if lg_.buffer(0.7).contains(cc_)]
+                        if lo_:
+                            top = min(top, max(lo_) - SHRINK)
+                except Exception:  # noqa: BLE001
+                    pass
             if thru and abs(float(c.get("base", 0.0) or 0.0)) < 1e-6:
                 try:
                     pt_ = _Pt(*column_outline(c, 0.0)[0])
