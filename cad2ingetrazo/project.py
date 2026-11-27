@@ -19608,7 +19608,11 @@ def _sig(doc, kind, rid):
         return {"kind": kind, "level": lid, "a": list(r["a"][:2]),
                 "b": list(r["b"][:2])}
     pts = r.get("corners") or r.get("pts") or []
-    if pts:
+    if "x" in r and "y" in r and r.get("shape") in ("poly", "rect", "round"):
+        # 3.64.168: a column's / pier's ``pts`` are offsets from its x, y —
+        # the place is x, y (the offsets' mean put every L column at ~0,0)
+        cx, cy = float(r["x"]), float(r["y"])
+    elif pts:
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
     elif "x" in r and "y" in r:
@@ -19652,6 +19656,9 @@ def apply_removed(doc, lid=None) -> int:
 
     def cen(r):
         pts = r.get("corners") or r.get("pts") or []
+        if "x" in r and "y" in r and r.get("shape") in ("poly", "rect",
+                                                        "round"):
+            return float(r["x"]), float(r["y"])
         if pts:
             return (sum(p[0] for p in pts) / len(pts),
                     sum(p[1] for p in pts) / len(pts))
