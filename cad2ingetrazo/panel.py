@@ -2061,11 +2061,14 @@ class Panel(QWidget):
                     "are made again (Ctrl+Z undoes it).")
         b_cad = box.addButton("As the CAD plan", QMessageBox.AcceptRole)
         b_keep = None
+        n_never = len(doc.get("never") or [])
         if n_hand:
             box.setInformativeText(
                 f"{n_hand} element(s) were deleted or changed by hand in the "
                 "model. «As the CAD plan» makes them again as drawn; «Keep my "
-                "edits» leaves them as you left them.")
+                "edits» leaves them as you left them."
+                + (f" {n_never} element(s) set to stay out stay out "
+                   "either way." if n_never else ""))
             b_keep = box.addButton("Keep my edits", QMessageBox.AcceptRole)
         box.addButton(QMessageBox.Cancel)
         box.exec()

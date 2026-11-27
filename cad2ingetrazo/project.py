@@ -279,6 +279,9 @@ def load(raw) -> dict:
         doc[k_] = [str(x) for x in raw.get(k_) or [] if isinstance(x, str)]
     doc["removed"] = [r for r in raw.get("removed") or []
                       if isinstance(r, dict) and r.get("kind")]
+    # 3.64.169: elements set to stay out — kept out also by «As the CAD plan»
+    doc["never"] = [r for r in raw.get("never") or []
+                    if isinstance(r, dict) and r.get("kind")]
     doc["rail_cad"] = {k: v for k, v in (raw.get("rail_cad") or {}).items()
                        if k in ids and isinstance(v, list)}
     doc["plan_area"] = {k: v for k, v in (raw.get("plan_area") or {}).items()
@@ -19643,11 +19646,25 @@ def remove_deleted(doc, gone) -> int:
     return n
 
 
+def leave_out(doc, gone) -> int:
+    """3.64.169: ``remove_deleted`` and the elements' places written to
+    ``doc["never"]`` too: they stay out of every later import — also of
+    an Update from CAD «As the CAD plan» (which makes the other hand
+    edits again). [(kind, id)] → how many."""
+    n = 0
+    for kind, rid in gone:
+        sig = _sig(doc, kind, rid)
+        if sig is not None and sig not in doc.setdefault("never", []):
+            doc["never"].append(sig)
+        n += remove_deleted(doc, [(kind, rid)])
+    return n
+
+
 def apply_removed(doc, lid=None) -> int:
     """The elements of a new import standing where one was deleted before:
     left out."""
     import math as _m
-    rem = [r for r in doc.get("removed") or []
+    rem = [r for r in (doc.get("removed") or []) + (doc.get("never") or [])
            if lid is None or r.get("level") == lid]
     if not rem:
         return 0
