@@ -9936,6 +9936,15 @@ def _groups(arch, doc=None):
             SM.split_loops(its_, sp_)
             for k_, v_ in cp_.items():
                 seam[k_] = set(seam.get(k_, ())) | v_
+            # 3.64.166: a wall on a wall of another thickness (a ledge up
+            # to 12 cm): no line at the floor, the faces carry on
+            bands_ = [(e_ - 0.14, e_ + 0.01) for e_ in elevations(arch)
+                      if e_ > 0.5]
+            cp2_, sp2_ = SM.coplanar_hidden(its_, plane_tol=0.12,
+                                            zbands=bands_)
+            SM.split_loops(its_, sp2_)
+            for k_, v_ in cp2_.items():
+                seam[k_] = set(seam.get(k_, ())) | v_
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.seams.coplanar")
@@ -11669,6 +11678,121 @@ def snap_slabs(doc) -> int:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.snap_slabs")
+    return n
+
+
+def unflush_walls(doc) -> None:
+    """Puts the walls ``flush_walls`` moved back where the plan has them."""
+    for w in doc["arch"].get("walls") or []:
+        o = w.pop("_fl", None)
+        if o:
+            w["a"], w["b"] = list(o[0]), list(o[1])
+
+
+def flush_walls(doc) -> int:
+    """3.64.166 (his rule: no joint between floors on any elevation): a
+    wall standing on a wall of another thickness (0.15 on 0.10, the roof's
+    0.10 on a 0.46) leaves a ledge, and its line, on the outside face at
+    each floor.  The upper wall is moved sideways, for the build only
+    (``unflush_walls`` gives it back), so its OUTSIDE face lies in the
+    outside face of the wall below — the faces then join, and the seam
+    pass hides the joint."""
+    import math
+
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    unflush_walls(doc)
+    el = elevations(arch)
+    order = [arch["levels"][i]["id"] for i in
+             sorted(range(len(arch["levels"])), key=lambda i: el[i])]
+    ok = [w for w in arch["walls"] if not w.get("rail")
+          and w.get("kind", "line") == "line" and W.why_not(w) is None]
+    by = {lid: [w for w in ok if w.get("level") == lid] for lid in order}
+    fill = {}
+
+    def F(lid):
+        if lid not in fill:
+            ps = SE.wall_polys(by.get(lid) or [])
+            u = unary_union(ps).buffer(0.001) if ps else None
+            fill[lid] = unary_union([
+                Polygon(g.exterior) for g in getattr(u, "geoms", [u])
+                if g.geom_type == "Polygon"]) if u is not None \
+                and not u.is_empty else None
+        return fill[lid]
+
+    def seg(w):
+        c = W.centre(w)
+        (x0, y0), (x1, y1) = c.p0, c.p1
+        L = math.hypot(x1 - x0, y1 - y0)
+        if L < 1e-6:
+            return None
+        u = ((x1 - x0) / L, (y1 - y0) / L)
+        return (x0, y0, x1, y1, L, u, (-u[1], u[0]))
+    n = 0
+    for k in range(1, len(order)):
+        if el[arch["levels"].index(next(l for l in arch["levels"] if l["id"] == order[k - 1]))] < 0.5:
+            continue                       # below ground: not a facade
+        lo, up = by.get(order[k - 1]) or [], by.get(order[k]) or []
+        if not lo or not up:
+            continue
+        for w in up:
+            try:
+                su = seg(w)
+                if su is None:
+                    continue
+                x0, y0, x1, y1, L, u, nv = su
+                tu = float(w["t"])
+                best = None
+                for v in lo:
+                    sl = seg(v)
+                    if sl is None:
+                        continue
+                    if abs(u[0] * sl[5][1] - u[1] * sl[5][0]) > 0.009:
+                        continue                     # not parallel
+                    tl = float(v["t"])
+                    d = (sl[0] - x0) * nv[0] + (sl[1] - y0) * nv[1]
+                    if abs(d) > 0.3 or abs(tl - tu) < 0.004 and abs(d) < 0.004:
+                        continue
+                    a = (sl[0] - x0) * u[0] + (sl[1] - y0) * u[1]
+                    b = (sl[2] - x0) * u[0] + (sl[3] - y0) * u[1]
+                    ov = min(L, max(a, b)) - max(0.0, min(a, b))
+                    if ov < min(0.4, 0.5 * L):
+                        continue
+                    if best is None or ov > best[0]:
+                        best = (ov, d, tl, a, b)
+                if best is None:
+                    continue
+                ov, d, tl, a, b = best
+                mid = (min(L, max(best[3], best[4])) + max(0.0, min(
+                    best[3], best[4]))) / 2
+                px, py = x0 + u[0] * mid, y0 + u[1] * mid
+                r = max(tu / 2, abs(d) + tl / 2) + 0.07
+                side = []
+                for sg in (1, -1):
+                    q = Point(px + nv[0] * sg * r, py + nv[1] * sg * r)
+                    out = True
+                    for lid in (order[k - 1], order[k]):
+                        f = F(lid)
+                        if f is not None and f.contains(q):
+                            out = False
+                    if out:
+                        side.append(sg)
+                if len(side) != 1:
+                    continue                       # not a facade wall
+                sg = side[0]
+                dl = (d + sg * tl / 2) - sg * tu / 2
+                if abs(dl) < 0.003 or abs(dl) > 0.06:
+                    continue
+                w["_fl"] = (list(w["a"]), list(w["b"]))
+                w["a"] = [w["a"][0] + nv[0] * dl, w["a"][1] + nv[1] * dl]
+                w["b"] = [w["b"][0] + nv[0] * dl, w["b"][1] + nv[1] * dl]
+                n += 1
+            except Exception:  # noqa: BLE001
+                from .host import log_error
+                log_error("project.flush_walls")
     return n
 
 
@@ -17365,12 +17489,20 @@ def commit(viewport, doc, opts=None) -> None:
             o_.pop("grille_side", None)
         if o_.get("curtain") == "curtain_auto":
             o_.pop("curtain", None)
+    try:                       # 3.64.166: stacked walls, outside flush
+        flush_walls(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.flush_walls")
     try:                       # 3.64.165: slabs flush in the wall faces
         snap_slabs(doc)
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.snap_slabs")
-    new_groups = _groups(arch, doc)
+    try:
+        new_groups = _groups(arch, doc)
+    finally:
+        unflush_walls(doc)
     try:
         new_groups += _stair_groups(doc)
     except Exception:  # noqa: BLE001

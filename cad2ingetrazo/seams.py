@@ -176,7 +176,7 @@ def hidden_edges(walls, slabs=(), solids=None) -> dict:
 
 
 def coplanar_hidden(items, probe: float = 0.0025,
-                    plane_tol: float = 0.003):
+                    plane_tol: float = 0.003, zbands=None):
     """3.64.165: the joints between faces that lie in ONE plane — the
     line where a wall's face carries on into the next wall, the slab's
     plastered edge or the wall over it: nothing shows between floors on
@@ -187,7 +187,13 @@ def coplanar_hidden(items, probe: float = 0.0025,
     upper wall's windows), the edge is split there and just the covered
     stretches hidden.  -> ({key: {edge, …}}, {id(loop): {edge index:
     [t, …]}}): the edges to hide (like ``hidden_edges``) and the
-    points to add on the loops (``split_loops``)."""
+    points to add on the loops (``split_loops``).
+
+    3.64.166: with ``zbands`` [(z0, z1), …] and a ``plane_tol`` of a few
+    cm it is the LEDGE pass — only the level (horizontal) edges that lie
+    in a band (the floor lines) and a face that stands up to ``plane_tol``
+    in front of / behind the one carrying on past the edge: a wall on a
+    wall of another thickness shows no line at the floor."""
     import math
     from collections import defaultdict
     from shapely.geometry import LineString, Polygon
@@ -269,6 +275,9 @@ def coplanar_hidden(items, probe: float = 0.0025,
                     flat = abs(a[2] - b[2]) < 1e-4
                     if not (vert or flat) or (vert and flat):
                         continue
+                    if zbands is not None and (vert or not any(
+                            z0 <= a[2] <= z1 for z0, z1 in zbands)):
+                        continue
                     ua, ub = a[0] * ux + a[1] * uy, b[0] * ux + b[1] * uy
                     if flat and abs(ua - ub) < 0.02:
                         continue
@@ -293,6 +302,9 @@ def coplanar_hidden(items, probe: float = 0.0025,
                     for j in tree.query(ln):
                         r2, P2 = polys[j]
                         if r2 is r:
+                            continue
+                        if zbands is not None and abs(r2[3] - r[3]) \
+                                > plane_tol:
                             continue
                         g = P2.intersection(ln)
                         if not g.is_empty:
