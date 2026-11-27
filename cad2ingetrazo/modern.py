@@ -657,7 +657,11 @@ def faces(doc) -> list:
     warm = _c4(look.get("stone"), (0.62, 0.52, 0.40))
     out = []
     try:
-        if look.get("fascia") or look.get("slab_edges"):
+        # 3.64.165: a mosque built to its elevations has NO slab edge /
+        # fascia standing out of the wall at the floor lines (the drawn
+        # elevations show none: one plain face from floor to floor)
+        if (look.get("fascia") or look.get("slab_edges")) \
+                and not look.get("mosque"):
             fs = _fascias(doc, dark, light, bool(look.get("slab_edges")))
             if not look.get("fascia"):
                 fs = [f for f in fs if f["color"] != dark]

@@ -9930,6 +9930,15 @@ def _groups(arch, doc=None):
             seam.update(SM.hidden_edges(ws_, solids=sol_))
         if slabs_:
             seam.update(SM.hidden_edges([], slabs_, solids=sol_))
+        try:        # 3.64.165: no joint between faces of one plane (floors)
+            its_ = [x for v in by_lv.values() for x in v] + slabs_
+            cp_, sp_ = SM.coplanar_hidden(its_)
+            SM.split_loops(its_, sp_)
+            for k_, v_ in cp_.items():
+                seam[k_] = set(seam.get(k_, ())) | v_
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.seams.coplanar")
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.seams")
@@ -11573,6 +11582,94 @@ def _finish_t_at(doc, rec, thick, pt):
             if p.contains(P_):
                 return t
     return float(doc["settings"].get("finish_t", 0.0508))
+
+
+def snap_slabs(doc) -> int:
+    """3.64.165 (his rule: no slab edge on the outside walls, floors
+    overlapping, no joint between them on any elevation): a floor slab's
+    outline that stands a few cm PROUD of the walls' faces (the plan's
+    slab line a little out of the wall) leaves a band at each floor line —
+    its top and bottom lines, the floor finish's over it.  The slivers
+    along the edge (out past the walls by less than 14 cm) are taken off,
+    so the slab ends flush in the wall face (1.5 mm in, no flicker).  The
+    drawn outline is kept (``_snap``) and redone from it each build."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from . import slabedges as SE
+    arch = doc["arch"]
+    ids = [lv["id"] for lv in arch["levels"]]
+    cache = {}
+
+    def body(lid):
+        if lid not in cache:
+            ws = [w for w in arch["walls"] if w.get("level") == lid
+                  and not w.get("rail") and W.why_not(w) is None]
+            ps = SE.wall_polys(ws) if ws else []
+            cache[lid] = unary_union(ps).buffer(0.001) if ps else None
+        return cache[lid]
+    n = 0
+    for s in arch.get("structure") or []:
+        if s.get("type") != "slab" or s.get("user") \
+                or s.get("grade") or len(s.get("corners") or []) < 3:
+            continue
+        sn = s.get("_snap")
+        raw = sn["raw"] if sn and [list(c) for c in s["corners"]] \
+            == sn["out"] else [list(c) for c in s["corners"]]
+        if sn:                   # redone from the outline as drawn
+            s["corners"] = [list(c) for c in raw]
+            s.pop("_snap", None)
+        try:
+            P = Polygon([tuple(q[:2]) for q in raw]).buffer(0)
+            if P.geom_type != "Polygon" or P.is_empty:
+                continue
+            k = ids.index(s["level"]) if s["level"] in ids else -1
+            us = [body(i) for i in (k - 1, k, k + 1)
+                  if 0 <= i < len(ids) for i in [ids[i]]]
+            us = [u for u in us if u is not None]
+            if not us:
+                continue
+            U = unary_union(us)
+            R = P.difference(U)
+            cut = []
+            if not R.is_empty:
+                op = R.buffer(-0.07, join_style=2).buffer(0.07,
+                                                          join_style=2)
+                thin = R.difference(op)
+                cut = [g for g in getattr(thin, "geoms", [thin])
+                       if g.geom_type == "Polygon" and g.area > 1e-5
+                       and g.distance(U) < 0.003
+                       and P.exterior.intersection(
+                           g.buffer(0.002)).length > 0.2]
+            Q0 = P.difference(unary_union(cut)) if cut else P
+            # the slab ends 2 cm SHORT of the outside wall faces (inside
+            # the wall, under its plaster): its edge never sits in the
+            # face's plane (no flicker line at the floor) — except where
+            # the slab runs on out past the walls (a balcony)
+            F = unary_union([Polygon(g.exterior) for g in
+                             getattr(U, "geoms", [U])
+                             if g.geom_type == "Polygon"])
+            skin = F.difference(F.buffer(-0.02, join_style=2))
+            keep = Q0.difference(F).buffer(0.05, join_style=2)
+            Q = Q0.difference(skin.difference(keep))
+            Q = Q.buffer(-0.0005, join_style=2).buffer(0.0005,
+                                                       join_style=2)
+            if Q.geom_type != "Polygon" or Q.is_empty \
+                    or Q.area < 0.9 * P.area:
+                s.pop("_snap", None)
+                continue
+            if P.symmetric_difference(Q).area < 1e-4:
+                s.pop("_snap", None)
+                continue
+            out = [[round(x, 4), round(y, 4)]
+                   for x, y in list(Q.exterior.coords)[:-1]]
+            s["_snap"] = {"raw": [list(c) for c in raw], "out": out}
+            s["corners"] = [list(c) for c in out]
+            n += 1
+        except Exception:  # noqa: BLE001
+            from .host import log_error
+            log_error("project.snap_slabs")
+    return n
 
 
 def _finish_groups(doc):
@@ -17268,6 +17365,11 @@ def commit(viewport, doc, opts=None) -> None:
             o_.pop("grille_side", None)
         if o_.get("curtain") == "curtain_auto":
             o_.pop("curtain", None)
+    try:                       # 3.64.165: slabs flush in the wall faces
+        snap_slabs(doc)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project.snap_slabs")
     new_groups = _groups(arch, doc)
     try:
         new_groups += _stair_groups(doc)

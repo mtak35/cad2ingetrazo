@@ -175,6 +175,261 @@ def hidden_edges(walls, slabs=(), solids=None) -> dict:
     return out
 
 
+def coplanar_hidden(items, probe: float = 0.0025,
+                    plane_tol: float = 0.003):
+    """3.64.165: the joints between faces that lie in ONE plane — the
+    line where a wall's face carries on into the next wall, the slab's
+    plastered edge or the wall over it: nothing shows between floors on
+    an elevation.  ``items``: [(key, faces)] of the walls, slabs and the
+    like (world faces).  An edge of a vertical face is a joint where, an
+    instant outside it in that plane, ANOTHER face (the same way round)
+    covers the plane along the edge — where it covers only a part (the
+    upper wall's windows), the edge is split there and just the covered
+    stretches hidden.  -> ({key: {edge, …}}, {id(loop): {edge index:
+    [t, …]}}): the edges to hide (like ``hidden_edges``) and the
+    points to add on the loops (``split_loops``)."""
+    import math
+    from collections import defaultdict
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+    from shapely.strtree import STRtree
+
+    def newell(lp):
+        nx = ny = nz = 0.0
+        for i in range(len(lp)):
+            a, b = lp[i], lp[(i + 1) % len(lp)]
+            nx += (a[1] - b[1]) * (a[2] + b[2])
+            ny += (a[2] - b[2]) * (a[0] + b[0])
+            nz += (a[0] - b[0]) * (a[1] + b[1])
+        return nx, ny, nz
+
+    ANG = math.radians(0.1)
+    planes = defaultdict(list)
+    for key, faces in items:
+        for f in faces:
+            lp = f["loop"] if isinstance(f, dict) else f
+            if len(lp) < 3:
+                continue
+            nx, ny, nz = newell(lp)
+            nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+            if nl < 1e-9 or abs(nz) / nl > 0.02:
+                continue
+            h = math.hypot(nx, ny)
+            ang = math.atan2(ny, nx)
+            d = (nx * lp[0][0] + ny * lp[0][1]) / h
+            holes = list((f.get("holes") or []) if isinstance(f, dict)
+                         else [])
+            r = (key, [lp] + holes, ang, d)
+            planes[(round(ang / ANG), round(d / plane_tol))].append(r)
+
+    out = defaultdict(set)
+    splits = defaultdict(dict)
+
+    def ek(a, b):
+        return tuple(sorted((tuple(round(v, 3) + 0.0 for v in a),
+                             tuple(round(v, 3) + 0.0 for v in b))))
+    for (ka, kd), prim in planes.items():
+        cand = []
+        for da in (-1, 0, 1):
+            for dd in (-1, 0, 1):
+                cand += planes.get((ka + da, kd + dd), [])
+        if len(cand) < 2:
+            continue
+        ang0 = prim[0][2]
+        ux, uy = -math.sin(ang0), math.cos(ang0)
+
+        def poly(r):
+            loops = r[1]
+            try:
+                P = Polygon([(q[0] * ux + q[1] * uy, q[2]) for q in loops[0]],
+                            [[(q[0] * ux + q[1] * uy, q[2]) for q in h]
+                             for h in loops[1:]])
+                if not P.is_valid:
+                    P = P.buffer(0)
+                return P
+            except Exception:  # noqa: BLE001
+                return None
+        polys = []
+        for r in cand:
+            P = poly(r)
+            if P is not None and not P.is_empty and P.area > 1e-8:
+                polys.append((r, P))
+        if len(polys) < 2:
+            continue
+        tree = STRtree([p for _r, p in polys])
+        pset = {id(r) for r in prim}
+        for r, P in polys:
+            if id(r) not in pset:
+                continue
+            for loop in r[1]:
+                n = len(loop)
+                for i in range(n):
+                    a, b = loop[i], loop[(i + 1) % n]
+                    vert = abs(a[0] - b[0]) < 1e-4 and abs(a[1] - b[1]) < 1e-4
+                    flat = abs(a[2] - b[2]) < 1e-4
+                    if not (vert or flat) or (vert and flat):
+                        continue
+                    ua, ub = a[0] * ux + a[1] * uy, b[0] * ux + b[1] * uy
+                    if flat and abs(ua - ub) < 0.02:
+                        continue
+                    A = (ua, a[2])
+                    B = (ub, b[2])
+                    L = math.hypot(B[0] - A[0], B[1] - A[1])
+                    if L < 0.02:
+                        continue
+                    w = (0.0, 1.0) if flat else (1.0, 0.0)
+                    # which side is OUT of this face (the middle's probes)
+                    mx, my = (A[0] + B[0]) / 2, (A[1] + B[1]) / 2
+                    from shapely.geometry import Point
+                    i1 = P.contains(Point(mx + w[0] * probe, my + w[1] * probe))
+                    i2 = P.contains(Point(mx - w[0] * probe, my - w[1] * probe))
+                    if i1 == i2:
+                        continue
+                    sg = -1.0 if i1 else 1.0
+                    S0 = (A[0] + sg * w[0] * probe, A[1] + sg * w[1] * probe)
+                    S1 = (B[0] + sg * w[0] * probe, B[1] + sg * w[1] * probe)
+                    ln = LineString([S0, S1])
+                    cov = []
+                    for j in tree.query(ln):
+                        r2, P2 = polys[j]
+                        if r2 is r:
+                            continue
+                        g = P2.intersection(ln)
+                        if not g.is_empty:
+                            cov.append(g)
+                    if not cov:
+                        continue
+                    U = unary_union(cov)
+                    segs = []
+                    for g in getattr(U, "geoms", [U]):
+                        if g.geom_type == "LineString" and g.length > 0.02:
+                            cs = list(g.coords)
+                            ts = sorted(
+                                ((c[0] - S0[0]) * (S1[0] - S0[0])
+                                 + (c[1] - S0[1]) * (S1[1] - S0[1]))
+                                / (L * L) for c in (cs[0], cs[-1]))
+                            segs.append((max(0.0, ts[0]), min(1.0, ts[1])))
+                    if not segs:
+                        continue
+                    segs.sort()
+                    merged = [list(segs[0])]
+                    for s0, s1 in segs[1:]:
+                        if s0 <= merged[-1][1] + 0.002:
+                            merged[-1][1] = max(merged[-1][1], s1)
+                        else:
+                            merged.append([s0, s1])
+                    tm = 0.002 / L if L > 0 else 0.0
+                    pts = []
+
+                    def at(t):
+                        return tuple(a[k] + (b[k] - a[k]) * t
+                                     for k in range(3))
+                    for s0, s1 in merged:
+                        s0 = 0.0 if s0 < tm + 0.005 / L else s0
+                        s1 = 1.0 if s1 > 1.0 - tm - 0.005 / L else s1
+                        if s1 - s0 < 0.02 / L:
+                            continue
+                        pts.append((s0, s1))
+                    if not pts:
+                        continue
+                    key = r[0]
+                    for s0, s1 in pts:
+                        out[key].add(ek(at(s0), at(s1)))
+                        for t in (s0, s1):
+                            if 0.0 < t < 1.0:
+                                splits[id(loop)].setdefault(i, []).append(t)
+    return dict(out), dict(splits)
+
+
+def split_loops(items, splits) -> int:
+    """Add the break points ``coplanar_hidden`` found to the face loops
+    (in place) — on EVERY loop of the elements that has one of them on an
+    edge (the wall's bottom / top face shares the joint's edge with its
+    side face) — so the edge is two (or more) mesh edges there and the
+    covered stretch alone is hidden.  -> how many loops were changed."""
+    if not splits:
+        return 0
+    from shapely.geometry import Point, box
+    from shapely.strtree import STRtree
+    idmap = {}
+    for _k, faces in items:
+        for f in faces:
+            lp = f["loop"] if isinstance(f, dict) else f
+            idmap[id(lp)] = lp
+            for h in ((f.get("holes") or []) if isinstance(f, dict) else []):
+                idmap[id(h)] = h
+    pts = {}
+    for lid, sp in splits.items():
+        lp = idmap.get(lid)
+        if lp is None:
+            continue
+        n = len(lp)
+        for i, ts in sp.items():
+            a, b = lp[i], lp[(i + 1) % n]
+            for t in ts:
+                q = tuple(a[k] + (b[k] - a[k]) * t for k in range(3))
+                pts[tuple(round(v, 4) for v in q)] = q
+    if not pts:
+        return 0
+    P3 = list(pts.values())
+    tree = STRtree([Point(q[0], q[1]) for q in P3])
+    E = 1e-4
+
+    def fix(lp):
+        out, ch = [], False
+        n = len(lp)
+        for i in range(n):
+            c, d = lp[i], lp[(i + 1) % n]
+            out.append(tuple(c))
+            dx, dy, dz = d[0] - c[0], d[1] - c[1], d[2] - c[2]
+            L2 = dx * dx + dy * dy + dz * dz
+            if L2 < 1e-6:
+                continue
+            L = L2 ** 0.5
+            hits = []
+            for j in tree.query(box(min(c[0], d[0]) - E, min(c[1], d[1]) - E,
+                                    max(c[0], d[0]) + E,
+                                    max(c[1], d[1]) + E)):
+                q = P3[j]
+                vx, vy, vz = q[0] - c[0], q[1] - c[1], q[2] - c[2]
+                t = (vx * dx + vy * dy + vz * dz) / L2
+                if t * L <= 1e-3 or (1.0 - t) * L <= 1e-3:
+                    continue
+                if abs(vx - t * dx) < E and abs(vy - t * dy) < E \
+                        and abs(vz - t * dz) < E:
+                    hits.append((t, q))
+            if hits:
+                ch = True
+                last = None
+                for t, q in sorted(hits):
+                    if last is not None and t - last < 1e-6:
+                        continue
+                    out.append(tuple(q))
+                    last = t
+        return out if ch else lp
+    n = 0
+    for _key, faces in items:
+        for idx, f in enumerate(faces):
+            if isinstance(f, dict):
+                lp = f["loop"]
+                hs = f.get("holes") or []
+                nl = fix(lp)
+                nh = [fix(h) for h in hs]
+                if nl is not lp or any(x is not y for x, y in zip(nh, hs)):
+                    g = dict(f)
+                    g["loop"] = nl
+                    if hs:
+                        g["holes"] = nh
+                    faces[idx] = g
+                    n += 1
+            else:
+                nl = fix(f)
+                if nl is not f:
+                    faces[idx] = nl
+                    n += 1
+    return n
+
+
 def to_local(seg_set, fr) -> frozenset:
     """World edges -> the element frame ``fr`` (as components.local_faces),
     rounded to the mm."""
