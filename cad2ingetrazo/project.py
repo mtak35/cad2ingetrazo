@@ -1528,7 +1528,7 @@ def _square_cornered(g, tol=12.0) -> bool:
     return True
 
 
-def rcc_from_fills(arch, lid, pl) -> dict:
+def rcc_from_fills(arch, lid, pl, columns: bool = True) -> dict:
     """The CAD's hatches and solid fills in the walls (RCC work, as plans
     show it): a wall mostly covered by one is a structural RCC wall; a
     filled area no wall stands on — square-ish, up to 1.5 m a side — is an
@@ -1658,7 +1658,7 @@ def rcc_from_fills(arch, lid, pl) -> dict:
                               "t": round(lo, 4), "align": "centre",
                               "side": 1, "height": "level", "base": 0.0,
                               "level": lid})
-    if new_cols:
+    if new_cols and columns:        # 3.64.167: none on a roof plan
         made = M.new_elements(arch["structure"], new_cols)
         for m_ in made:
             m_["rcc"] = True
@@ -5810,6 +5810,12 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         seen.add(key)
         crecs.append(dict(c, type="column", level=lid, anchor="centre",
                           base=0.0, height="level", fit=False))
+    if how.get("roof") and not how.get("roof_columns"):
+        # 3.64.167: a ROOF plan's column layer is the columns of the floor
+        # below (the plan shows them through) — they are not posts a storey
+        # high standing on the roof.  (how["roof_columns"] = True: drawn.)
+        rep["roof_columns_skipped"] = len(crecs)
+        crecs = []
     # lift cores: the RCC walls round the shafts, as one solid (like the
     # columns); the shafts cut the floor slab
     lift_segs = [s for s in pl["segs"] if _match(lay[s[4]], P["lift"])]
@@ -6164,7 +6170,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
             log_error("project.close_gaps")
     if st.get("rcc_fills", True):    # hatched / filled walls: RCC work
         try:
-            rep["rcc"] = rcc_from_fills(arch, lid, pl)
+            rep["rcc"] = rcc_from_fills(
+                arch, lid, pl,
+                columns=not (how.get("roof") and
+                             not how.get("roof_columns")))
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project.rcc_from_fills")
