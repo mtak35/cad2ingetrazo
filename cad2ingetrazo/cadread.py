@@ -71,6 +71,15 @@ def _unit(doc, forced):
                 if hs_ and abs(float(scale) - hs_) > 1e-9 and lo_ and hi_:
                     span_ = max(abs(float(hi_[0]) - float(lo_[0])),
                                 abs(float(hi_[1]) - float(lo_[1])))
+                    # 3.64.175: $EXTMIN/$EXTMAX follow ONE stray entity
+                    # (a point 400 000 units away turned the extent into
+                    # 10 km, the check gave up and the inch plan was read
+                    # as metres again — nothing imported). The extent of
+                    # where the entities really are (10th–90th percentile)
+                    # decides.
+                    rs_ = _robust_span(doc)
+                    if rs_:
+                        span_ = min(span_, rs_)
                     if span_ * float(scale) > 2000.0 and \
                             span_ * hs_ <= 2000.0:
                         return hs_, (f"header $INSUNITS="
@@ -88,9 +97,45 @@ def _unit(doc, forced):
     return 0.001, "no units in the file — millimetres assumed"
 
 
+def _robust_span(doc, cap=400000):
+    """Span of the drawing's bulk: 10th–90th percentile of the entities'
+    base points (a lone far-away entity does not count)."""
+    xs, ys = [], []
+    try:
+        for n_, e in enumerate(doc.modelspace()):
+            if n_ >= cap:
+                break
+            t = e.dxftype()
+            try:
+                if t == "LINE":
+                    q = e.dxf.start
+                elif t in ("CIRCLE", "ARC"):
+                    q = e.dxf.center
+                elif t in ("INSERT", "TEXT", "MTEXT", "POINT"):
+                    q = e.dxf.insert if t != "POINT" else e.dxf.location
+                elif t == "LWPOLYLINE":
+                    q = e.get_points("xy")[0]
+                else:
+                    continue
+                xs.append(float(q[0]))
+                ys.append(float(q[1]))
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        return None
+    if len(xs) < 50:
+        return None
+    xs.sort()
+    ys.sort()
+    # 10th–90th percentile (block INSERT points of a few % can sit
+    # hundreds of km away), widened to the whole bulk
+    i0, i1 = int(len(xs) * 0.10), int(len(xs) * 0.90) - 1
+    return 1.25 * max(xs[i1] - xs[i0], ys[i1] - ys[i0])
+
+
 _cache: dict = {}
 #: what a read holds: a read kept from an older version is read again
-READ_V = 6
+READ_V = 8
 
 
 def _sibling_dxf(path: Path):
