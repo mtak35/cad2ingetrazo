@@ -374,6 +374,28 @@ def _leaf(H, R, n, context) -> bool:
     return False
 
 
+def _door_and_window(mid, width, u, t, context):
+    """[(mid, width, kind), ...] — a door with its swing drawn at one jamb
+    and a window in the rest of the gap; None when the gap is not that."""
+    half = width / 2.0
+    for sign in (-1, 1):
+        for R in (0.9, 0.95, 1.0, 0.85, 1.05, 0.8, 1.1, 0.75, 1.2):
+            rest = width - R
+            if rest < 0.45 or rest > 1.8:
+                continue
+            dm = _add(mid, _mul(u, sign * (half - R / 2.0)))
+            wm = _add(mid, _mul(u, -sign * (half - rest / 2.0)))
+            gd = _gap_kind(dm, R, u, t, context)
+            if gd is None or gd[0] != "door":
+                continue
+            gw = _gap_kind(wm, rest, u, t, context)
+            if gw is None or gw[0] != "window":
+                continue
+            # (a hair apart: two openings of a wall keep 5 cm between)
+            return [(dm, R - 0.06, gd), (wm, rest - 0.06, gw)]
+    return None
+
+
 def _gap_kind(mid, width, u, t, context):
     """«door» | «window» | None — what the drawing shows in an opening.
     A door: its swing, pieces lying on a circle of the opening's width
@@ -494,6 +516,17 @@ def walls_from(segs, tmin: float = 0.08, tmax: float = 0.40, context=None):
             pos = _dot(_sub(mid, a), u)
             if width / 2 + 0.05 <= pos <= L - width / 2 - 0.05:
                 g = _gap_kind(mid, width, u, w["t"], context)
+                if context and width > SINGLE_LEAF_MAX + 0.15 and \
+                        (g is None or g[0] == "window"):
+                    # 3.64.173: a door and the window beside it, one gap in
+                    # the wall: the door where its swing is drawn, the
+                    # window in what is left of the gap
+                    two = _door_and_window(mid, width, u, w["t"], context)
+                    if two:
+                        for m2, w2, g2 in two:
+                            ops.append((k, _dot(_sub(m2, a), u), w2,
+                                        g2[0], g2[1], g2[2]))
+                        continue
                 if g is None:
                     # nothing drawn in it: an opening down to the floor
                     # with no door in it (or, without context, by width)

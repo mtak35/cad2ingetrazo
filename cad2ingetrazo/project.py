@@ -5424,6 +5424,72 @@ def _align_shift(doc, lid, pl, P, reach=8.0):
     return round(dx, 3), round(dy, 3)
 
 
+def _void_fix(ops, made, shifted, pl, st):
+    """The openings a wall's gaps made, minus the ones that are no
+    opening: a gap where the plan marks a floor hole (a crossed «VOID» box
+    between two bathrooms) is a hole in the SLAB — the wall goes on; and a
+    lift's front, one thin line with no second face (the whole wall made a
+    «gap»), is a wall with a door for each lift named beside it."""
+    from shapely.geometry import LineString, Point
+    texts = [(Point(float(t["x"]), float(t["y"])), str(t.get("text", "")))
+             for t in pl.get("texts") or ()]
+    holes = [p for p, tx in texts
+             if re.search(r"\bVOID\b|SHAFT|DUCT", tx, re.I)
+             and not re.search(r"ABOVE", tx, re.I)]
+    lifts = [p for p, tx in texts
+             if LIFT_WORD.search(tx.upper()) and not NOT_LIFT.search(tx.upper())]
+    # the walls a lift stands behind: a whole wall made a «gap»
+    cand = {}
+    for op in ops:
+        k, pos, width = op[:3]
+        kind = op[3] if len(op) > 3 else None
+        if kind not in ("void", "window", "door") or width <= 2.0:
+            continue
+        w = made[k]
+        L = math.dist(w["a"], w["b"])
+        if L > 1e-6 and width >= 0.8 * L and any(
+                LineString([w["a"], w["b"]]).distance(q) < 1.6
+                for q in lifts):
+            cand[k] = op
+    doors_at = {}                 # each lift's door goes in its nearest wall
+    for q in lifts:
+        ks = [k for k in cand
+              if LineString([made[k]["a"], made[k]["b"]]).distance(q) < 1.6]
+        if ks:
+            kk = min(ks, key=lambda k: LineString(
+                [made[k]["a"], made[k]["b"]]).distance(q))
+            doors_at.setdefault(kk, []).append(q)
+    out = []
+    for op in ops:
+        k, pos, width = op[:3]
+        kind = op[3] if len(op) > 3 else None
+        if kind not in ("void", "window", "door"):
+            out.append(op)
+            continue
+        w = made[k]
+        a, b = w["a"], w["b"]
+        L = math.dist(a, b)
+        if L < 1e-6:
+            out.append(op)
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        p0 = pos + shifted[k]
+        seg = LineString([(a[0] + u[0] * (p0 - width / 2),
+                           a[1] + u[1] * (p0 - width / 2)),
+                          (a[0] + u[0] * (p0 + width / 2),
+                           a[1] + u[1] * (p0 + width / 2))])
+        if kind == "void" and any(seg.distance(h) < 0.6 for h in holes):
+            continue                              # a slab hole, not a gap
+        if cand.get(k) is op:                     # a lift's wall
+            for q in doors_at.get(k, ()):
+                pj = (q.x - a[0]) * u[0] + (q.y - a[1]) * u[1] - shifted[k]
+                if 0.5 < pj + shifted[k] < L - 0.5:
+                    out.append((k, pj, 0.9, "door", -1, 1))
+            continue
+        out.append(op)
+    return out
+
+
 def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
     """Read ``path`` onto level ``lid`` in place of what an earlier import
     of it made: walls with their doors and windows, columns, beams, the
@@ -5716,6 +5782,11 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         except Exception:  # noqa: BLE001
             from .host import log_error
             log_error("project dashed_lines")
+    try:                       # 3.64.173: a wall the plan draws goes on
+        ops = _void_fix(ops, made, shifted, pl, st)
+    except Exception:  # noqa: BLE001
+        from .host import log_error
+        log_error("project._void_fix")
     orecs = []
     for op in ops:
         k, pos, width = op[:3]
@@ -14290,6 +14361,46 @@ def _walkways(doc, out, lid, zg, fin, G, WP, R):
                 g.minimum_rotated_rectangle.area > 0 and \
                 min(_mrr_sides(g)) >= 0.3:
             out["walks"].append((g, wt))
+    _steps_on_paving(out, wt)
+
+
+def _steps_on_paving(out, wt):
+    """3.64.173: steps that climb out of the porch / walkway paving start
+    ON it: the risers shared between the paving's top and the step's top —
+    not from the natural ground under the paving (which buried the lower
+    steps in it)."""
+    paving = [pg for pg, _z in out.get("walks") or []] + \
+        [q for q in out.get("porch") or []]
+    if not paving:
+        return
+    from shapely.ops import unary_union
+    pav = unary_union([q.buffer(0.02) for q in paving if not q.is_empty])
+    new = []
+    for nm, pcs in out["steps"]:
+        try:
+            if len(pcs) < 1:
+                new.append((nm, pcs))
+                continue
+            top = pcs[0][1]
+            base = pcs[-1][1] - pcs[-1][3]
+            foot = pcs[-1][0].buffer(0.25)
+            if base >= wt - 0.005 or not foot.intersects(pav) or \
+                    top - wt < 0.04:
+                if base < wt - 0.005 and top - wt < 0.04 and \
+                        foot.intersects(pav):
+                    continue          # the paving is already at the top
+                new.append((nm, pcs))
+                continue
+            n = len(pcs)
+            n2 = max(1, min(n, int(round((top - wt) / 0.16))))
+            r2 = (top - wt) / n2
+            pcs2 = [(poly, top - k * r2, extra, r2)
+                    for k, (poly, _z, extra, _r) in enumerate(pcs[:n2])]
+            new.append((re.sub(r"\(\d+ risers?\)", f"({n2} risers)", nm),
+                        pcs2))
+        except Exception:  # noqa: BLE001
+            new.append((nm, pcs))
+    out["steps"] = new
 
 
 def _mrr_sides(g):
