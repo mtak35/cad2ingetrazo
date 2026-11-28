@@ -18778,7 +18778,16 @@ def update_from_cad(doc, as_cad=False) -> list:
                 except Exception:  # noqa: BLE001
                     pass
         out.append((lv["name"], rep))
-    if not any(h_.get("roof") for h_ in doc["imports"].values()):
+    # 3.64.172: an update only updates — it never adds a floor and never
+    # puts another part of the drawing over a level that has its own plan.
+    # The roof plan the drawing holds is looked for only to fill a «Roof»
+    # level that exists and has no plan of its own yet.
+    _empty_roof = next((lv["id"] for lv in doc["arch"]["levels"]
+                        if str(lv.get("name", "")).strip().lower() == "roof"
+                        and not (doc["imports"].get(lv["id"]) or {}
+                                 ).get("file")), None)
+    if _empty_roof and not any(h_.get("roof")
+                               for h_ in doc["imports"].values()):
         try:                  # 3.64.30: the roof plan the drawing holds
             ref = [lv["id"] for lv in doc["arch"]["levels"]
                    if (doc["imports"].get(lv["id"]) or {}).get("file")]
@@ -18786,9 +18795,7 @@ def update_from_cad(doc, as_cad=False) -> list:
                 h_ = doc["imports"][ref[-1]]
                 reg = find_roof_part(doc, h_["file"], h_)
                 if reg:
-                    rl = next((lv["id"] for lv in doc["arch"]["levels"]
-                               if str(lv.get("name", "")).strip().lower()
-                               == "roof"), None)
+                    rl = _empty_roof
                     rep = import_roof_part(
                         doc, h_["file"], reg, float(doc["settings"].get(
                             "parapet_h", 1.0) or 1.0), rl)
