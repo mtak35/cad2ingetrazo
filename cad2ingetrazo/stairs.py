@@ -651,9 +651,10 @@ def auto(doc, cad=None, flip=False) -> dict:
                     stt0.get("stair_dn_skip", True):
                 dn_only += 1          # the stair from below, going DN
                 continue
-            if len(flights) == 1 and sum(len(f["lines"])
-                                         for f in flights) <= 6 or \
-                    max(len(f["lines"]) for f in flights) <= 4:
+            def _nl(f_):       # 3.64.173: a winder's fan lines count too
+                return len(f_["lines"]) + len(f_.get("_diag") or [])
+            if len(flights) == 1 and sum(_nl(f) for f in flights) <= 6 or \
+                    max(_nl(f) for f in flights) <= 4:
                 # a single short flight (a few steps down into a pit, a
                 # trench, a sunken room): steps, not the storey's stair
                 continue

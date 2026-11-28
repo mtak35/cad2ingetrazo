@@ -6660,7 +6660,10 @@ def import_level(doc: dict, lid: str, path: str, how: dict) -> dict:
         from .host import log_error
         log_error("project.balcony_doors_bath_windows 2")
     try:                       # glass out onto a verandah, a wide glazing
-        rep["sliding_doors"] = open_air_sliding_doors(doc, lid)
+        # 3.64.173: only when asked for — the window layer's windows stay
+        # windows (the layer decides, not the width)
+        rep["sliding_doors"] = open_air_sliding_doors(doc, lid) \
+            if doc["settings"].get("windows_to_sliding", False) else 0
     except Exception:  # noqa: BLE001
         from .host import log_error
         log_error("project.open_air_sliding_doors")
