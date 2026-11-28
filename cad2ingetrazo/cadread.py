@@ -59,6 +59,26 @@ def _unit(doc, forced):
         from formats.dxf_in import suggest_unit_scale
         scale, code = suggest_unit_scale(doc)
         if scale:
+            # 3.64.171: the host's check reads the MEDIAN entity size over
+            # the whole drawing — thousands of tiny fixture / furniture arcs
+            # pull it down and an inch drawing ($INSUNITS=1) was taken for
+            # metres, the plan 2.8 km wide and nothing imported. The
+            # drawing's own extent decides between the header and the guess.
+            try:
+                hs_ = _INSUNITS_M.get(int(doc.header.get("$INSUNITS", 0) or 0))
+                lo_ = doc.header.get("$EXTMIN")
+                hi_ = doc.header.get("$EXTMAX")
+                if hs_ and abs(float(scale) - hs_) > 1e-9 and lo_ and hi_:
+                    span_ = max(abs(float(hi_[0]) - float(lo_[0])),
+                                abs(float(hi_[1]) - float(lo_[1])))
+                    if span_ * float(scale) > 2000.0 and \
+                            span_ * hs_ <= 2000.0:
+                        return hs_, (f"header $INSUNITS="
+                                     f"{doc.header.get('$INSUNITS')} "
+                                     f"(the content is {span_ * float(scale):.0f} m "
+                                     f"wide read otherwise)")
+            except Exception:  # noqa: BLE001
+                pass
             return float(scale), f"auto ($INSUNITS={code}, checked)"
     except ImportError:
         pass
@@ -70,7 +90,7 @@ def _unit(doc, forced):
 
 _cache: dict = {}
 #: what a read holds: a read kept from an older version is read again
-READ_V = 5
+READ_V = 6
 
 
 def _sibling_dxf(path: Path):
